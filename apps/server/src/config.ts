@@ -1,64 +1,63 @@
+import { fileURLToPath } from 'node:url';
+
 /**
  * EVERY remote model id lives here and nowhere else.
  *
- * The machine this runs on has no usable GPU, so all inference is remote. That
- * makes the provider a hard dependency — and the exact endpoint ids and response
- * shapes below were NOT verified against fal's live catalog. They are the most
- * likely values. When one is wrong, it is wrong HERE, in one line, and not
- * scattered through the codebase.
- *
- * Verify in this order — only the first one blocks Phase 1:
- *   1. asr        — does it return WORD-level timestamps? Everything depends on this.
- *   2. asr.diarize — speaker labels. Nice to have; the editor works without them.
- *   3. the rest   — Phase 2/3, not needed yet.
+ * This machine has no usable GPU, so all inference is remote. That makes the
+ * provider a hard dependency — and these endpoint ids and response shapes were
+ * NOT verified against fal's live catalog. When one is wrong, it is wrong HERE,
+ * in one line, not scattered through the codebase.
  */
 
-import { fileURLToPath } from 'node:url';
-
-export interface ModelConfig {
-  endpoint: string;
-  notes: string;
-}
-
-export const MODELS = {
-  /**
-   * THE LOAD-BEARING ONE. Text-based editing is impossible without per-word
-   * [start, end]. Segment-level timestamps are not a substitute — they would
-   * let you cut sentences, not words, which is a different (worse) product.
-   * If this endpoint cannot do word level, the fallback is a forced-alignment
-   * pass (WhisperX-style) on top of any transcript.
-   */
-  asr: {
-    endpoint: 'fal-ai/whisper',
-    notes: 'Expects { chunk_level: "word" } and chunks[] with [start,end]. UNVERIFIED.',
+/** Transcription models the user can pick between in the Transcribe panel. */
+export const ASR_MODELS = [
+  {
+    id: 'fal-ai/whisper',
+    label: 'Whisper (large-v3)',
+    hint: 'Broad language coverage. Normalizes fillers away.',
+    verbatim: false,
+    verified: false,
   },
-
-  /** Phase 1 stretch: verbatim ASR that preserves "um"/"uh" (CrisperWhisper-class). */
-  asrVerbatim: {
-    endpoint: 'fal-ai/whisper',
-    notes: 'Standard ASR NORMALIZES fillers away. Without a verbatim model, filler removal finds nothing. UNVERIFIED whether fal hosts one.',
+  {
+    id: 'fal-ai/wizper',
+    label: 'Wizper (fast Whisper)',
+    hint: 'Faster, same family.',
+    verbatim: false,
+    verified: false,
   },
+  {
+    id: 'mock',
+    label: 'Mock (no API cost)',
+    hint: 'Fake words, real timings. Exercises the whole pipeline for free.',
+    verbatim: true,
+    verified: true,
+  },
+] as const;
 
-  /** Phase 2. */
-  tts: { endpoint: 'fal-ai/f5-tts', notes: 'Voice cloning / Overdub. UNVERIFIED.' },
-  enhance: { endpoint: 'fal-ai/audio-enhance', notes: 'Studio Sound. UNVERIFIED.' },
+export type AsrModelId = (typeof ASR_MODELS)[number]['id'];
 
-  /** Phase 3. */
-  lipsync: { endpoint: 'fal-ai/latentsync', notes: 'Video Regenerate. UNVERIFIED.' },
-  matting: { endpoint: 'fal-ai/birefnet', notes: 'Green screen. UNVERIFIED.' },
-} satisfies Record<string, ModelConfig>;
+/** Phase 2/3 tools. Exposed in the UI, but honestly marked as not wired. */
+export const AI_TOOLS = [
+  { id: 'studio-sound', label: 'Studio Sound', endpoint: '', wired: false,
+    hint: 'Denoise + dereverb + enhance. Needs an audio-enhance endpoint.' },
+  { id: 'overdub', label: 'Overdub (voice clone)', endpoint: '', wired: false,
+    hint: 'Retype a word and have it spoken in the original voice. Needs a TTS endpoint.' },
+  { id: 'translate', label: 'Translate / dub', endpoint: '', wired: false,
+    hint: 'Needs a translation + cross-lingual TTS endpoint.' },
+  { id: 'clips', label: 'Find clips', endpoint: '', wired: false,
+    hint: 'LLM scores the transcript for self-contained moments.' },
+  { id: 'green-screen', label: 'Green screen', endpoint: '', wired: false,
+    hint: 'Background removal. Needs a matting endpoint.' },
+] as const;
 
 export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
   falKey: process.env.FAL_KEY ?? '',
-  /**
-   * With no key, the server uses a mock ASR provider. This is not a toy: it lets
-   * the entire pipeline — ingest, transcript, EDL, ffmpeg render — be developed
-   * and verified end to end at zero API cost. Only the words are fake.
-   */
-  get provider(): 'fal' | 'mock' {
-    return process.env.ASR_PROVIDER === 'mock' || !this.falKey ? 'mock' : 'fal';
+
+  hasFal(): boolean {
+    return Boolean(this.falKey) && process.env.ASR_PROVIDER !== 'mock';
   },
+
   /**
    * fileURLToPath, not .pathname — .pathname keeps URL percent-encoding, so a
    * project path containing a space resolves to a literal "%20" directory.
@@ -66,8 +65,10 @@ export const CONFIG = {
   mediaDir: fileURLToPath(new URL('../../../media/', import.meta.url)),
 };
 
+/** Defaults for the Cuts panel. The user can change every one of these. */
 export const EDIT_DEFAULTS = {
   padMs: 40,
   fadeMs: 12,
   mergeWithinMs: 20,
+  maxGapMs: Infinity,
 };

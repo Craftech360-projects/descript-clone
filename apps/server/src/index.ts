@@ -6,15 +6,16 @@ import { writeFile } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { CONFIG, EDIT_DEFAULTS } from './config.ts';
+import { AI_TOOLS, ASR_MODELS, CONFIG, EDIT_DEFAULTS } from './config.ts';
 import { probe, extractAudioForAsr, renderEdl, computePeaks } from './ffmpeg.ts';
-import { getAsrProvider } from './asr.ts';
+import { transcribe, ASR_DEFAULTS, type AsrOptions } from './asr.ts';
 import * as store from './store.ts';
 
 import { compileEdl, outputDuration } from '../../../packages/core/src/edl.ts';
 import { detectFillers, removeFillers } from '../../../packages/core/src/fillers.ts';
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
-import type { Transcript } from '../../../packages/core/src/types.ts';
+import { toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
+import type { CompileOptions, Transcript } from '../../../packages/core/src/types.ts';
 
 await store.init();
 
@@ -22,15 +23,25 @@ const app = new Hono();
 app.use('/*', cors());
 app.use('/media/*', serveStatic({ root: './' }));
 
-app.get('/api/health', (c) =>
-  c.json({ ok: true, asrProvider: CONFIG.provider, hasFalKey: Boolean(CONFIG.falKey) }),
+/** What the workspace can offer: model choices, tool availability, key status. */
+app.get('/api/capabilities', (c) =>
+  c.json({
+    hasFal: CONFIG.hasFal(),
+    asrModels: ASR_MODELS,
+    aiTools: AI_TOOLS,
+    asrDefaults: ASR_DEFAULTS,
+    editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
+  }),
 );
 
 app.get('/api/projects', async (c) => c.json(await store.list()));
 
 /**
- * Ingest: upload → probe → extract 16k mono wav → ASR with word timestamps.
- * The wav is a throwaway; the original is the source of truth for rendering.
+ * IMPORT ONLY. This does not transcribe.
+ *
+ * An editor should not decide for you. Import lands the media in the project and
+ * computes what is free (probe, waveform); transcription costs money and has
+ * options, so it waits until you configure it and ask.
  */
 app.post('/api/projects', async (c) => {
   const body = await c.req.parseBody();
@@ -47,12 +58,6 @@ app.post('/api/projects', async (c) => {
 
   const info = await probe(sourcePath);
 
-  const wavPath = join(CONFIG.mediaDir, 'uploads', `${id}.asr.wav`);
-  await extractAudioForAsr(sourcePath, wavPath);
-
-  const asr = getAsrProvider();
-  const result = await asr.transcribe(wavPath, info.duration);
-
   const project: store.Project = {
     id,
     name: file.name,
@@ -60,15 +65,17 @@ app.post('/api/projects', async (c) => {
     sourceUrl: `/media/uploads/${id}${ext}`,
     duration: info.duration,
     hasVideo: info.hasVideo,
-    transcript: { mediaId: id, duration: info.duration, words: result.words },
-    asrProvider: result.provider,
-    verbatim: result.verbatim,
+    width: info.width,
+    height: info.height,
+    status: 'imported',
+    transcript: null,
+    asrProvider: null,
+    verbatim: false,
+    peaks: await computePeaks(sourcePath),
     createdAt: new Date().toISOString(),
   };
 
-  detectFillers(project.transcript);
   await store.save(project);
-
   return c.json(project);
 });
 
@@ -77,50 +84,66 @@ app.get('/api/projects/:id', async (c) => {
   return project ? c.json(project) : c.json({ error: 'No such project' }, 404);
 });
 
-/** Waveform for the timeline. Cached on the project — the source never changes. */
-app.get('/api/projects/:id/peaks', async (c) => {
+/** Transcribe, with the options the user chose. Re-runnable with different ones. */
+app.post('/api/projects/:id/transcribe', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project) return c.json({ error: 'No such project' }, 404);
 
-  if (!project.peaks) {
-    project.peaks = await computePeaks(project.sourcePath);
-    await store.save(project);
-  }
+  const options: AsrOptions = { ...ASR_DEFAULTS, ...(await c.req.json().catch(() => ({}))) };
 
-  return c.json({ peaks: project.peaks, duration: project.duration });
+  const wavPath = join(CONFIG.mediaDir, 'uploads', `${project.id}.asr.wav`);
+  await extractAudioForAsr(project.sourcePath, wavPath);
+
+  const result = await transcribe(wavPath, project.duration, options);
+
+  project.transcript = { mediaId: project.id, duration: project.duration, words: result.words };
+  project.asrProvider = result.provider;
+  project.verbatim = result.verbatim;
+  project.asrOptions = options;
+  project.status = 'transcribed';
+
+  // Flag fillers, do not cut them. The user decides.
+  detectFillers(project.transcript);
+
+  await store.save(project);
+  return c.json(project);
 });
 
-/** The editor sends back which word ids are deleted. That is the entire edit state. */
+/** The editor sends which word ids are deleted. That is the whole edit state. */
 app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
-  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
   const { deletedIds } = await c.req.json<{ deletedIds: string[] }>();
   const deleted = new Set(deletedIds);
-  for (const word of project.transcript.words) {
-    word.deleted = deleted.has(word.id);
-  }
+  for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
 
   await store.save(project);
-  return c.json({ ok: true, edl: summarize(project.transcript) });
+  return c.json({ ok: true });
 });
 
-/** One-click edits. Each mutates the transcript; the EDL follows for free. */
+/** Edit actions, each taking the settings from its panel. */
 app.post('/api/projects/:id/actions/:action', async (c) => {
   const project = await store.get(c.req.param('id'));
-  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const action = c.req.param('action');
+  const opts = await c.req.json<any>().catch(() => ({}));
   const t = project.transcript;
   let changed = 0;
 
-  switch (action) {
+  switch (c.req.param('action')) {
+    case 'detect-fillers':
+      changed = detectFillers(t, { includeDiscourseMarkers: opts.includeDiscourseMarkers });
+      break;
     case 'remove-fillers':
-      detectFillers(t);
+      detectFillers(t, { includeDiscourseMarkers: opts.includeDiscourseMarkers });
       changed = removeFillers(t);
       break;
     case 'remove-retakes':
-      changed = removeRetakes(t);
+      changed = removeRetakes(t, {
+        minWords: opts.minWords,
+        maxInterruption: opts.maxInterruption,
+      });
       break;
     case 'restore-all':
       for (const w of t.words) {
@@ -129,24 +152,36 @@ app.post('/api/projects/:id/actions/:action', async (c) => {
       }
       break;
     default:
-      return c.json({ error: `Unknown action: ${action}` }, 400);
+      return c.json({ error: `Unknown action: ${c.req.param('action')}` }, 400);
   }
 
   await store.save(project);
-  return c.json({ ok: true, changed, transcript: t, edl: summarize(t) });
+  return c.json({ ok: true, changed, transcript: t });
 });
 
-/** Compile and render. gapMs is optional: cap silence between kept words. */
+/** Captions for the EDITED timeline, in the format you asked for. */
+app.post('/api/projects/:id/captions', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
+
+  const { format = 'srt', maxChars, maxDurationMs, ...cut } = await c.req.json<any>().catch(() => ({}));
+
+  const edl = compileEdl(project.transcript, toCompileOptions(cut));
+  const cues = toCues(project.transcript, edl, { maxChars, maxDurationMs });
+
+  const body =
+    format === 'vtt' ? toVtt(cues) : format === 'ass' ? toAss(cues) : toSrt(cues);
+
+  return c.json({ format, cues: cues.length, content: body });
+});
+
+/** Render, with the cut settings from the Cuts panel. */
 app.post('/api/projects/:id/render', async (c) => {
   const project = await store.get(c.req.param('id'));
-  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { maxGapMs } = await c.req.json<{ maxGapMs?: number }>().catch(() => ({ maxGapMs: undefined }));
-
-  const edl = compileEdl(project.transcript, {
-    ...EDIT_DEFAULTS,
-    maxGapMs: maxGapMs ?? Infinity,
-  });
+  const options = await c.req.json<any>().catch(() => ({}));
+  const edl = compileEdl(project.transcript, toCompileOptions(options));
 
   if (edl.keep.length === 0) {
     return c.json({ error: 'Every word is deleted — there is nothing to render.' }, 400);
@@ -168,13 +203,18 @@ app.post('/api/projects/:id/render', async (c) => {
   });
 });
 
-function summarize(t: Transcript) {
-  const edl = compileEdl(t, EDIT_DEFAULTS);
+function toCompileOptions(o: any): CompileOptions {
   return {
-    segments: edl.keep.length,
-    outputDuration: outputDuration(edl),
-    sourceDuration: t.duration,
+    padMs: num(o.padMs, EDIT_DEFAULTS.padMs),
+    fadeMs: num(o.fadeMs, EDIT_DEFAULTS.fadeMs),
+    mergeWithinMs: num(o.mergeWithinMs, EDIT_DEFAULTS.mergeWithinMs),
+    // 0 from the UI slider means "keep every pause".
+    maxGapMs: num(o.maxGapMs, 0) > 0 ? o.maxGapMs : Infinity,
   };
+}
+
+function num(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
 app.onError((err, c) => {
@@ -184,5 +224,5 @@ app.onError((err, c) => {
 
 serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
   console.log(`server  http://localhost:${info.port}`);
-  console.log(`asr     ${CONFIG.provider}${CONFIG.provider === 'mock' ? '  (no FAL_KEY — using mock transcripts)' : ''}`);
+  console.log(`fal     ${CONFIG.hasFal() ? 'enabled' : 'disabled (mock ASR)'}`);
 });

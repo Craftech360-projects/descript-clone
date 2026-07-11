@@ -1,23 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type Project, type RenderResult, type Word } from './api.ts';
+import {
+  api,
+  type Capabilities,
+  type CutSettings,
+  type MediaItem,
+  type Project,
+  type RenderResult,
+  type AsrOptions,
+} from './api.ts';
 import Script from './Script.tsx';
 import Timeline from './Timeline.tsx';
+import Inspector, { type FillerMode, type Tab } from './Inspector.tsx';
 
-// The SAME compiler the server renders with. Preview and render are literally the
-// same function, so they cannot disagree.
 import { compileEdl, outputDuration, sourceToOutput } from '../../../packages/core/src/edl.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
+import type { Word } from '../../../packages/core/src/types.ts';
 
 export default function App() {
+  const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [library, setLibrary] = useState<MediaItem[]>([]);
   const [project, setProject] = useState<Project | null>(null);
-  const [peaks, setPeaks] = useState<number[]>([]);
+
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [tab, setTab] = useState<Tab>('transcribe');
+  const [asr, setAsr] = useState<AsrOptions | null>(null);
+  const [cut, setCut] = useState<CutSettings>({ padMs: 40, fadeMs: 12, mergeWithinMs: 20, maxGapMs: 0 });
+  const [fillerMode, setFillerMode] = useState<FillerMode>('hesitations');
+  const [retakeMin, setRetakeMin] = useState(2);
 
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<number | null>(null);
   const [showDeleted, setShowDeleted] = useState(true);
-  const [maxGapMs, setMaxGapMs] = useState(0);
 
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -25,19 +41,22 @@ export default function App() {
   const [result, setResult] = useState<RenderResult | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const words = project?.transcript.words ?? [];
+  const words = project?.transcript?.words ?? [];
+
+  useEffect(() => {
+    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch((e) => setError(e.message));
+    api.list().then(setLibrary).catch(() => {});
+  }, []);
 
   const edl = useMemo(
     () =>
-      project
+      project?.transcript
         ? compileEdl(project.transcript, {
-            padMs: 40,
-            fadeMs: 12,
-            mergeWithinMs: 20,
-            maxGapMs: maxGapMs > 0 ? maxGapMs : Infinity,
+            ...cut,
+            maxGapMs: cut.maxGapMs > 0 ? cut.maxGapMs : Infinity,
           })
         : null,
-    [project, maxGapMs],
+    [project, cut],
   );
 
   const playingIndex = useMemo(
@@ -45,15 +64,96 @@ export default function App() {
     [playing, words, currentTime],
   );
 
-  // --- playback: the text cursor is the playhead -------------------------------
+  const stats = {
+    words: words.length,
+    kept: words.filter((w) => !w.deleted).length,
+    cuts: edl?.keep.length ?? 0,
+    outputSec: edl ? outputDuration(edl) : 0,
+    sourceSec: project?.duration ?? 0,
+  };
+
+  // --- run helper --------------------------------------------------------------
+  const run = async <T,>(label: string, fn: () => Promise<T>) => {
+    setBusy(label);
+    setError(null);
+    try { return await fn(); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); return null; }
+    finally { setBusy(null); }
+  };
+
+  // --- library -----------------------------------------------------------------
+  const importFile = (file: File) =>
+    run('import', async () => {
+      const p = await api.import(file);
+      setProject(p);
+      setResult(null);
+      setSelection(new Set());
+      setTab('transcribe'); // import does NOT transcribe — that is your call
+      setLibrary(await api.list());
+      setNotice(`Imported ${p.name}. Configure the transcription and press Transcribe.`);
+      return p;
+    });
+
+  const openProject = (id: string) =>
+    run('open', async () => {
+      const p = await api.get(id);
+      setProject(p);
+      setResult(null);
+      setSelection(new Set());
+      setTab(p.transcript ? 'cuts' : 'transcribe');
+      return p;
+    });
+
+  // --- stages ------------------------------------------------------------------
+  const doTranscribe = () =>
+    run('transcribe', async () => {
+      const p = await api.transcribe(project!.id, asr!);
+      setProject(p);
+      setResult(null);
+      setTab('cuts');
+      setNotice(
+        p.verbatim
+          ? null
+          : 'This transcript is not verbatim — the model dropped fillers before you saw them. The filler tool will find little to nothing.',
+      );
+      return p;
+    });
+
+  const doAction = (action: string, options: Record<string, unknown> = {}) =>
+    run(action, async () => {
+      const r = await api.action(project!.id, action, options);
+      setProject({ ...project!, transcript: r.transcript });
+      setResult(null);
+      setNotice(`${r.changed} words cut.`);
+      return r;
+    });
+
+  const doCaptions = (format: string) =>
+    run('captions', async () => {
+      const r = await api.captions(project!.id, { format, ...cut });
+      const blob = new Blob([r.content], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${project!.name.replace(/\.[^.]+$/, '')}.${format}`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setNotice(`${r.cues} caption cues, timed to the edit.`);
+      return r;
+    });
+
+  const doRender = () =>
+    run('render', async () => {
+      const r = await api.render(project!.id, cut);
+      setResult(r);
+      return r;
+    });
+
+  // --- playback ----------------------------------------------------------------
   const onTimeUpdate = () => {
     const video = videoRef.current;
     if (!video) return;
     setCurrentTime(video.currentTime);
 
-    // "Follow edit" plays the CUT version straight from the source: when the
-    // playhead wanders into removed material, jump over it. This is preview
-    // without rendering — the thing that makes the edit feel live.
     if (!followEdit || !playing || !edl) return;
     if (sourceToOutput(edl, video.currentTime) !== null) return;
 
@@ -62,29 +162,27 @@ export default function App() {
     else { video.pause(); setPlaying(false); }
   };
 
-  const seek = (time: number) => {
+  const seek = (t: number) => {
     const video = videoRef.current;
     if (!video) return;
-    video.currentTime = time;
-    setCurrentTime(time);
+    video.currentTime = t;
+    setCurrentTime(t);
   };
 
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) { video.play(); setPlaying(true); }
-    else { video.pause(); setPlaying(false); }
+    video.paused ? video.play() : video.pause();
   };
 
   // --- editing -----------------------------------------------------------------
   const mutate = (fn: (words: Word[]) => void) => {
-    if (!project) return;
+    if (!project?.transcript) return;
     const next = structuredClone(project);
-    fn(next.transcript.words);
+    fn(next.transcript!.words);
     setProject(next);
     setResult(null);
-    api
-      .setDeleted(next.id, next.transcript.words.filter((w) => w.deleted).map((w) => w.id))
+    api.setDeleted(next.id, next.transcript!.words.filter((w) => w.deleted).map((w) => w.id))
       .catch((e) => setError(e.message));
   };
 
@@ -96,7 +194,7 @@ export default function App() {
     } else {
       next.add(words[index].id);
       setAnchor(index);
-      seek(words[index].start); // cursor == playhead
+      seek(words[index].start);
     }
     setSelection(next);
   };
@@ -112,184 +210,186 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement;
+      if (typing) return;
+
       if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); setSelectionDeleted(true); }
       else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); setSelectionDeleted(false); }
       else if (e.key === 'Escape') setSelection(new Set());
-      else if (e.key === ' ' && !(e.target instanceof HTMLInputElement)) { e.preventDefault(); togglePlay(); }
+      else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [setSelectionDeleted]);
 
-  // --- server ------------------------------------------------------------------
-  const run = async <T,>(label: string, fn: () => Promise<T>) => {
-    setBusy(label);
-    setError(null);
-    try { return await fn(); }
-    catch (e) { setError(e instanceof Error ? e.message : String(e)); return null; }
-    finally { setBusy(null); }
-  };
+  if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
 
-  const upload = (file: File) =>
-    run('Transcribing…', async () => {
-      const p = await api.upload(file);
-      setProject(p);
-      setSelection(new Set());
-      setResult(null);
-      api.peaks(p.id).then((r) => setPeaks(r.peaks)).catch(() => {});
-      return p;
-    });
-
-  const action = (name: 'remove-fillers' | 'remove-retakes' | 'restore-all') =>
-    run(name, async () => {
-      const r = await api.action(project!.id, name);
-      setProject({ ...project!, transcript: r.transcript });
-      setResult(null);
-      return r;
-    });
-
-  const render = () =>
-    run('Rendering…', async () => {
-      const r = await api.render(project!.id, maxGapMs > 0 ? maxGapMs : undefined);
-      setResult(r);
-      return r;
-    });
-
-  // --- empty state -------------------------------------------------------------
-  if (!project) {
-    return (
-      <div className="start">
-        <div className="start-inner">
-          <h1>Edit video by editing the words.</h1>
-          <p>
-            Drop in a recording. You get a script. Delete a sentence from the script and it
-            disappears from the video.
-          </p>
-          <label className="drop">
-            <input
-              type="file"
-              accept="video/*,audio/*"
-              onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])}
-            />
-            <strong>{busy ?? 'Choose a video or audio file'}</strong>
-            <small>{busy ? 'This can take a moment' : 'mp4, mov, mp3, wav…'}</small>
-          </label>
-          {error && <p className="error">{error}</p>}
-        </div>
-      </div>
-    );
-  }
-
-  const kept = words.filter((w) => !w.deleted).length;
-  const outSec = edl ? outputDuration(edl) : 0;
-  const cut = project.duration - outSec;
-
+  // --- workspace ---------------------------------------------------------------
   return (
     <div className="app">
       <header className="topbar">
-        <div className="file">
-          <strong>{project.name}</strong>
-          <span>
-            {words.length} words · {project.asrProvider}
-            {!project.verbatim && (
-              <b className="warn" title="Standard ASR normalizes fillers away before you ever see them. Filler removal will find little to nothing until a verbatim model is wired up.">
-                not verbatim
-              </b>
-            )}
-          </span>
+        <div className="brand">
+          <span className="dot" />
+          <strong>Workspace</strong>
         </div>
 
         <div className="transport">
-          <button className="play" onClick={togglePlay}>{playing ? '❚❚' : '▶'}</button>
-          <span className="clock">{clock(currentTime)} / {clock(project.duration)}</span>
+          <button className="play" onClick={togglePlay} disabled={!project}>
+            {playing ? '❚❚' : '▶'}
+          </button>
+          <span className="clock">
+            {clock(currentTime)} / {clock(project?.duration ?? 0)}
+          </span>
           <label className="check">
             <input type="checkbox" checked={followEdit} onChange={(e) => setFollowEdit(e.target.checked)} />
             Play the edit
           </label>
+          <label className="check">
+            <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
+            Show cut text
+          </label>
         </div>
 
         <div className="out">
-          <strong>{clock(outSec)}</strong>
-          {cut > 0.05 && <em>−{fmt(cut)} · {edl?.keep.length} cuts</em>}
+          {project?.transcript ? (
+            <>
+              <strong>{clock(stats.outputSec)}</strong>
+              <em>{stats.cuts} segments</em>
+            </>
+          ) : (
+            <span className="fal-state">{caps.hasFal ? 'fal connected' : 'no FAL_KEY — mock only'}</span>
+          )}
         </div>
       </header>
 
-      <div className="body">
-        <aside className="rail">
-          <div className="group">
-            <h3>Edit</h3>
-            <button onClick={() => action('remove-fillers')} disabled={!!busy}>Remove filler words</button>
-            <button onClick={() => action('remove-retakes')} disabled={!!busy}>Remove retakes</button>
-            <button onClick={() => action('restore-all')} disabled={!!busy}>Restore everything</button>
-          </div>
-
-          <div className="group">
-            <h3>Shorten pauses</h3>
-            <input
-              type="range" min={0} max={2000} step={100}
-              value={maxGapMs}
-              onChange={(e) => { setMaxGapMs(Number(e.target.value)); setResult(null); }}
-            />
-            <span className="val">{maxGapMs === 0 ? 'Keep all pauses' : `Cap at ${maxGapMs}ms`}</span>
-          </div>
-
-          <div className="group">
-            <h3>View</h3>
-            <label className="check">
-              <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
-              Show deleted text
+      <div className="middle">
+        {/* ---- media library ---- */}
+        <aside className="library">
+          <div className="lib-head">
+            <h3>Media</h3>
+            <label className="import">
+              +
+              <input
+                type="file"
+                accept="video/*,audio/*"
+                onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])}
+              />
             </label>
           </div>
 
-          <div className="group grow" />
+          {library.length === 0 && <p className="empty-panel">Import a file to start.</p>}
 
-          <button className="primary" onClick={render} disabled={!!busy || kept === 0}>
-            {busy === 'Rendering…' ? 'Rendering…' : 'Export'}
-          </button>
+          <ul className="items">
+            {library.map((m) => (
+              <li
+                key={m.id}
+                className={m.id === project?.id ? 'item on' : 'item'}
+                onClick={() => openProject(m.id)}
+              >
+                <span className="kind">{m.hasVideo ? '▣' : '♪'}</span>
+                <span className="nm">{m.name}</span>
+                <span className={m.status === 'transcribed' ? 'st done' : 'st'}>
+                  {m.status === 'transcribed' ? 'script' : 'raw'}
+                </span>
+              </li>
+            ))}
+          </ul>
+
+          {busy === 'import' && <p className="empty-panel">Importing…</p>}
         </aside>
 
+        {/* ---- script ---- */}
         <main className="script">
-          {error && <p className="error">{error}</p>}
-          <Script
-            transcript={project.transcript}
-            selection={selection}
-            playingIndex={playingIndex}
-            showDeleted={showDeleted}
-            onWordClick={clickWord}
-            onWordDoubleClick={(i) => { seek(words[i].start); videoRef.current?.play(); setPlaying(true); }}
-            onBackgroundClick={() => setSelection(new Set())}
-          />
+          {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
+          {notice && !error && <p className="notice" onClick={() => setNotice(null)}>{notice}</p>}
+
+          {!project && (
+            <div className="canvas-empty">
+              <h2>Nothing open</h2>
+              <p>Import media from the left. Nothing is transcribed until you ask for it.</p>
+            </div>
+          )}
+
+          {project && !project.transcript && (
+            <div className="canvas-empty">
+              <h2>{project.name}</h2>
+              <p>
+                {clock(project.duration)} · {project.hasVideo ? `${project.width}×${project.height}` : 'audio only'}
+              </p>
+              <p className="sub">
+                No script yet. Choose your settings in the Transcribe panel and run it.
+              </p>
+            </div>
+          )}
+
+          {project?.transcript && (
+            <Script
+              transcript={project.transcript}
+              selection={selection}
+              playingIndex={playingIndex}
+              showDeleted={showDeleted}
+              onWordClick={clickWord}
+              onWordDoubleClick={(i) => { seek(words[i].start); videoRef.current?.play(); }}
+              onBackgroundClick={() => setSelection(new Set())}
+            />
+          )}
         </main>
 
-        <aside className="preview">
-          <video
-            ref={videoRef}
-            src={project.sourceUrl}
-            onTimeUpdate={onTimeUpdate}
-            onPause={() => setPlaying(false)}
-            onPlay={() => setPlaying(true)}
-          />
+        {/* ---- preview + inspector ---- */}
+        <div className="right">
+          <div className="viewer">
+            {project ? (
+              <video
+                ref={videoRef}
+                src={project.sourceUrl}
+                onTimeUpdate={onTimeUpdate}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+              />
+            ) : (
+              <div className="viewer-empty" />
+            )}
 
-          {result ? (
-            <div className="result">
-              <h3>Export ready</h3>
-              <p>{fmt(result.outputDuration)} from {fmt(result.sourceDuration)} · {result.segments} segments · {result.renderMs}ms</p>
-              <video src={result.url} controls />
-              <a href={result.url} download>Download</a>
-            </div>
-          ) : (
-            <p className="hint">
-              Click a word to move the playhead. Select and press <kbd>Backspace</kbd> to cut it
-              from the video. <kbd>Space</kbd> plays.
-            </p>
-          )}
-        </aside>
+            {result && (
+              <div className="result">
+                <a href={result.url} download>
+                  Download render · {fmtShort(result.outputDuration)} · {result.renderMs}ms
+                </a>
+              </div>
+            )}
+          </div>
+
+          <Inspector
+            tab={tab}
+            setTab={setTab}
+            project={project}
+            caps={caps}
+            busy={busy}
+            asr={asr}
+            setAsr={setAsr}
+            onTranscribe={doTranscribe}
+            cut={cut}
+            setCut={setCut}
+            fillerMode={fillerMode}
+            setFillerMode={setFillerMode}
+            retakeMin={retakeMin}
+            setRetakeMin={setRetakeMin}
+            onRemoveFillers={() =>
+              doAction('remove-fillers', { includeDiscourseMarkers: fillerMode === 'all' })
+            }
+            onRemoveRetakes={() => doAction('remove-retakes', { minWords: retakeMin })}
+            onRestoreAll={() => doAction('restore-all')}
+            onCaptions={doCaptions}
+            onRender={doRender}
+            stats={stats}
+          />
+        </div>
       </div>
 
       <footer className="tl">
         <Timeline
-          peaks={peaks}
-          duration={project.duration}
+          peaks={project?.peaks ?? []}
+          duration={project?.duration ?? 0}
           edl={edl}
           currentTime={currentTime}
           onSeek={seek}
@@ -305,6 +405,6 @@ function clock(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function fmt(seconds: number): string {
+function fmtShort(seconds: number): string {
   return seconds >= 60 ? clock(seconds) : `${seconds.toFixed(1)}s`;
 }

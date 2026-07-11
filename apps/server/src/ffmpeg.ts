@@ -78,6 +78,60 @@ export async function renderEdl(
   }
 }
 
+/**
+ * Waveform peaks for the timeline. Decodes to raw mono PCM and reduces it to
+ * `buckets` amplitude values in [0,1].
+ *
+ * The timeline is worth having real data behind: a fake waveform is worse than
+ * none, because you cannot use it to find the edit point you are looking for.
+ */
+export async function computePeaks(input: string, buckets = 1600): Promise<number[]> {
+  const pcm = await runBinary('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error',
+    '-i', input,
+    '-vn',
+    '-ac', '1',
+    '-ar', '8000',        // plenty for a visual envelope; keeps the buffer small
+    '-f', 's16le',
+    '-',
+  ]);
+
+  const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2));
+  if (samples.length === 0) return [];
+
+  const size = Math.max(1, Math.floor(samples.length / buckets));
+  const peaks: number[] = [];
+
+  for (let i = 0; i < samples.length; i += size) {
+    let max = 0;
+    const end = Math.min(i + size, samples.length);
+    for (let j = i; j < end; j++) {
+      const v = Math.abs(samples[j]);
+      if (v > max) max = v;
+    }
+    peaks.push(max / 32768);
+  }
+
+  return peaks;
+}
+
+function runBinary(bin: string, args: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(bin, args, { windowsHide: true });
+    const chunks: Buffer[] = [];
+    let stderr = '';
+
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d));
+    proc.stderr.on('data', (d) => (stderr += d));
+    proc.on('error', (err) => reject(new Error(`Could not run ${bin}: ${err.message}`)));
+    proc.on('close', (code) =>
+      code === 0
+        ? resolve(Buffer.concat(chunks))
+        : reject(new Error(`${bin} exited ${code}: ${stderr.trim()}`)),
+    );
+  });
+}
+
 function run(bin: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(bin, args, { windowsHide: true });

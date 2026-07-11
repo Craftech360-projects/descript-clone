@@ -44,13 +44,23 @@ const falAsr: AsrProvider = {
       },
     });
 
-    const words = normalizeToWords(result?.data ?? result);
+    const payload = result?.data ?? result;
+
+    // The response shape is the one unverified assumption the product rests on.
+    // Log its skeleton (keys and one sample item, not the whole transcript) so
+    // that when it does not match, the fix is obvious instead of archaeological.
+    console.log('[asr] response keys:', Object.keys(payload ?? {}));
+    const sample = payload?.chunks?.[0] ?? payload?.words?.[0] ?? payload?.segments?.[0];
+    if (sample) console.log('[asr] first item:', JSON.stringify(sample));
+
+    const words = normalizeToWords(payload);
 
     if (words.length === 0) {
       throw new Error(
-        `${MODELS.asr.endpoint} returned no usable word timings. ` +
-          `Check the response shape and fix normalizeToWords(), or point MODELS.asr ` +
-          `at an endpoint that supports word-level timestamps.`,
+        `${MODELS.asr.endpoint} returned no usable WORD-level timings. Got keys: ` +
+          `[${Object.keys(payload ?? {}).join(', ')}]. Either the response shape differs ` +
+          `(fix normalizeToWords) or this endpoint only does segment-level timestamps, ` +
+          `which is not enough for word-level editing — point MODELS.asr elsewhere.`,
       );
     }
 

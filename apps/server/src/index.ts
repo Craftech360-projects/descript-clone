@@ -7,7 +7,7 @@ import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { CONFIG, EDIT_DEFAULTS } from './config.ts';
-import { probe, extractAudioForAsr, renderEdl } from './ffmpeg.ts';
+import { probe, extractAudioForAsr, renderEdl, computePeaks } from './ffmpeg.ts';
 import { getAsrProvider } from './asr.ts';
 import * as store from './store.ts';
 
@@ -75,6 +75,19 @@ app.post('/api/projects', async (c) => {
 app.get('/api/projects/:id', async (c) => {
   const project = await store.get(c.req.param('id'));
   return project ? c.json(project) : c.json({ error: 'No such project' }, 404);
+});
+
+/** Waveform for the timeline. Cached on the project — the source never changes. */
+app.get('/api/projects/:id/peaks', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  if (!project.peaks) {
+    project.peaks = await computePeaks(project.sourcePath);
+    await store.save(project);
+  }
+
+  return c.json({ peaks: project.peaks, duration: project.duration });
 });
 
 /** The editor sends back which word ids are deleted. That is the entire edit state. */

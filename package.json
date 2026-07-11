@@ -11,7 +11,7 @@
   },
   "scripts": {
     "test": "node --test packages/core/src/*.test.ts",
-    "server": "node --watch apps/server/src/index.ts",
+    "server": "node --env-file-if-exists=.env --watch apps/server/src/index.ts",
     "web": "npm run dev --workspace apps/web",
     "dev": "npm run server & npm run web"
   }

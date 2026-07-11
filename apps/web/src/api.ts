@@ -11,6 +11,7 @@ export interface Word {
 export interface Project {
   id: string;
   name: string;
+  sourceUrl: string;
   duration: number;
   hasVideo: boolean;
   transcript: { mediaId: string; duration: number; words: Word[] };
@@ -54,6 +55,9 @@ export const api = {
     fetch(`/api/projects/${id}/actions/${action}`, { method: 'POST' }).then(
       json<{ changed: number; transcript: Project['transcript'] }>,
     ),
+
+  peaks: (id: string) =>
+    fetch(`/api/projects/${id}/peaks`).then(json<{ peaks: number[]; duration: number }>),
 
   render: (id: string, maxGapMs?: number) =>
     fetch(`/api/projects/${id}/render`, {

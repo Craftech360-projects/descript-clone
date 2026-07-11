@@ -17,6 +17,8 @@ export interface Project {
   asrProvider: string;
   /** Whether the transcript preserves fillers. Drives a UI warning if not. */
   verbatim: boolean;
+  /** Waveform peaks, computed once on first request. */
+  peaks?: number[];
   createdAt: string;
 }
 

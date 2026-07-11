@@ -3,6 +3,7 @@ dist/
 .env
 media/uploads/*
 media/renders/*
+media/projects/*
 media/cache/*
 !media/**/.gitkeep
 *.log

@@ -1,0 +1,158 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #262b36;
+  --text: #e6e9ef;
+  --dim: #8b94a7;
+  --accent: #5b8cff;
+  --cut: #ff6b6b;
+  --filler: #f0b03e;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+}
+
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+
+/* --- empty state --- */
+.empty { text-align: center; padding-top: 15vh; }
+.empty h1 { font-size: 28px; margin-bottom: 8px; }
+.empty p { color: var(--dim); max-width: 46ch; margin: 0 auto 32px; }
+
+.drop {
+  display: block;
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 40px 24px;
+  border: 2px dashed var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.drop:hover { border-color: var(--accent); background: var(--panel); }
+.drop input { display: none; }
+.drop span { color: var(--dim); }
+
+/* --- header --- */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.meta { margin: 4px 0 0; font-size: 13px; color: var(--dim); }
+.warn { color: var(--filler); cursor: help; border-bottom: 1px dotted var(--filler); }
+
+.stats { text-align: right; line-height: 1.4; }
+.stats strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.stats span { font-size: 12px; color: var(--dim); }
+.stats em { display: block; font-size: 12px; color: var(--accent); font-style: normal; margin-top: 2px; }
+
+/* --- toolbar --- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 0;
+  flex-wrap: wrap;
+}
+.spacer { flex: 1; }
+
+button {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 13px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+
+.gap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--dim);
+  margin-left: 8px;
+}
+.gap input { width: 110px; accent-color: var(--accent); }
+.gap span { font-variant-numeric: tabular-nums; min-width: 68px; }
+
+/* --- stage --- */
+.stage { display: flex; gap: 16px; flex-wrap: wrap; }
+.stage video { width: 100%; max-width: 420px; border-radius: 10px; background: #000; }
+.result { flex: 1; min-width: 280px; }
+.result p { font-size: 12px; color: var(--dim); margin: 0 0 8px; }
+.result a { color: var(--accent); font-size: 13px; }
+
+/* --- transcript --- */
+.transcript {
+  margin-top: 22px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 17px;
+  line-height: 2.1;
+  user-select: none;
+}
+
+.word {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 1px;
+}
+.word:hover { background: #2a3040; }
+
+/* Fillers are flagged, not hidden — the human decides. */
+.word.filler { color: var(--filler); }
+
+/* Deleted words stay in the document so every cut is reversible. */
+.word.deleted {
+  color: #4a5263;
+  text-decoration: line-through;
+  text-decoration-color: var(--cut);
+}
+
+.word.selected { background: var(--accent); color: #fff; }
+.word.selected.deleted { background: #3a4a7a; }
+
+/* --- misc --- */
+.error {
+  background: #2a1618;
+  border: 1px solid #5a2a2e;
+  color: #ff9b9b;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+footer { margin-top: 20px; font-size: 12px; color: var(--dim); }
+kbd {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: inherit;
+}

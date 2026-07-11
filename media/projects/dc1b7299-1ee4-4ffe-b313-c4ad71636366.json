@@ -1,0 +1,374 @@
+{
+  "id": "dc1b7299-1ee4-4ffe-b313-c4ad71636366",
+  "name": "test.mp4",
+  "sourcePath": "C:\\Users\\abrah\\Downloads\\descript clone\\media\\uploads\\dc1b7299-1ee4-4ffe-b313-c4ad71636366.mp4",
+  "duration": 12,
+  "hasVideo": true,
+  "transcript": {
+    "mediaId": "dc1b7299-1ee4-4ffe-b313-c4ad71636366",
+    "duration": 12,
+    "words": [
+      {
+        "id": "w0",
+        "text": "So",
+        "start": 0.4,
+        "end": 0.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w1",
+        "text": "um",
+        "start": 0.65,
+        "end": 0.85,
+        "speaker": "SPEAKER_00",
+        "isFiller": true,
+        "deleted": true
+      },
+      {
+        "id": "w2",
+        "text": "today",
+        "start": 0.8999999999999999,
+        "end": 1.0999999999999999,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w3",
+        "text": "I",
+        "start": 1.15,
+        "end": 1.3499999999999999,
+        "speaker": "SPEAKER_00",
+        "isFiller": false,
+        "deleted": true
+      },
+      {
+        "id": "w4",
+        "text": "want",
+        "start": 1.4,
+        "end": 1.5999999999999999,
+        "speaker": "SPEAKER_00",
+        "isFiller": false,
+        "deleted": true
+      },
+      {
+        "id": "w5",
+        "text": "to",
+        "start": 1.65,
+        "end": 1.8499999999999999,
+        "speaker": "SPEAKER_00",
+        "isFiller": false,
+        "deleted": true
+      },
+      {
+        "id": "w6",
+        "text": "I",
+        "start": 1.9,
+        "end": 2.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w7",
+        "text": "want",
+        "start": 2.15,
+        "end": 2.35,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w8",
+        "text": "to",
+        "start": 2.4,
+        "end": 2.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w9",
+        "text": "talk",
+        "start": 2.6499999999999995,
+        "end": 2.8499999999999996,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w10",
+        "text": "about",
+        "start": 2.8999999999999995,
+        "end": 3.0999999999999996,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w11",
+        "text": "building",
+        "start": 3.1499999999999995,
+        "end": 3.3499999999999996,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w12",
+        "text": "a",
+        "start": 3.3999999999999995,
+        "end": 3.5999999999999996,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w13",
+        "text": "video",
+        "start": 3.6499999999999995,
+        "end": 3.8499999999999996,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w14",
+        "text": "editor",
+        "start": 3.8999999999999995,
+        "end": 4.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w15",
+        "text": "uh",
+        "start": 4.1499999999999995,
+        "end": 4.35,
+        "speaker": "SPEAKER_00",
+        "isFiller": true,
+        "deleted": true
+      },
+      {
+        "id": "w16",
+        "text": "that",
+        "start": 4.3999999999999995,
+        "end": 4.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w17",
+        "text": "edits",
+        "start": 4.6499999999999995,
+        "end": 4.85,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w18",
+        "text": "by",
+        "start": 4.8999999999999995,
+        "end": 5.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w19",
+        "text": "transcript",
+        "start": 5.1499999999999995,
+        "end": 5.35,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w20",
+        "text": "It",
+        "start": 5.3999999999999995,
+        "end": 5.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w21",
+        "text": "turns",
+        "start": 5.6499999999999995,
+        "end": 5.85,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w22",
+        "text": "out",
+        "start": 5.8999999999999995,
+        "end": 6.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w23",
+        "text": "the",
+        "start": 6.1499999999999995,
+        "end": 6.35,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w24",
+        "text": "hard",
+        "start": 6.3999999999999995,
+        "end": 6.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w25",
+        "text": "part",
+        "start": 6.6499999999999995,
+        "end": 6.85,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w26",
+        "text": "is",
+        "start": 6.8999999999999995,
+        "end": 7.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w27",
+        "text": "not",
+        "start": 7.1499999999999995,
+        "end": 7.35,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w28",
+        "text": "the",
+        "start": 7.3999999999999995,
+        "end": 7.6,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w29",
+        "text": "models",
+        "start": 7.6499999999999995,
+        "end": 7.85,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w30",
+        "text": "you",
+        "start": 7.8999999999999995,
+        "end": 8.1,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w31",
+        "text": "know",
+        "start": 8.149999999999999,
+        "end": 8.349999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w32",
+        "text": "it",
+        "start": 8.399999999999999,
+        "end": 8.599999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w33",
+        "text": "is",
+        "start": 8.649999999999999,
+        "end": 8.849999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w34",
+        "text": "the",
+        "start": 8.899999999999999,
+        "end": 9.099999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w35",
+        "text": "editor",
+        "start": 9.149999999999999,
+        "end": 9.349999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w36",
+        "text": "itself",
+        "start": 9.399999999999999,
+        "end": 9.599999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w37",
+        "text": "um",
+        "start": 9.649999999999999,
+        "end": 9.849999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": true,
+        "deleted": true
+      },
+      {
+        "id": "w38",
+        "text": "and",
+        "start": 9.899999999999999,
+        "end": 10.099999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w39",
+        "text": "that",
+        "start": 10.149999999999999,
+        "end": 10.349999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w40",
+        "text": "is",
+        "start": 10.399999999999999,
+        "end": 10.599999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w41",
+        "text": "the",
+        "start": 10.649999999999999,
+        "end": 10.849999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w42",
+        "text": "whole",
+        "start": 10.899999999999999,
+        "end": 11.099999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      },
+      {
+        "id": "w43",
+        "text": "insight",
+        "start": 11.149999999999999,
+        "end": 11.349999999999998,
+        "speaker": "SPEAKER_00",
+        "isFiller": false
+      }
+    ]
+  },
+  "asrProvider": "mock",
+  "verbatim": true,
+  "createdAt": "2026-07-11T10:31:58.445Z"
+}

@@ -1,0 +1,25 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+**/node_modules
+dist
+**/dist
+
+# State. Never bake someone's uploads into an image.
+media/uploads/*
+media/renders/*
+media/projects/*
+media/cache/*
+media/jobs/*
+media/thumbs/*
+
+# Secrets. The image takes its key from the runtime environment, not a layer.
+.env
+.env.*
+!.env.example
+
+.git
+.gitignore
+*.log
+Dockerfile
+.dockerignore
+docker-compose.yml

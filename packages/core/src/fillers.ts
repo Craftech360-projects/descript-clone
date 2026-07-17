@@ -3,11 +3,32 @@ import type { Transcript, Word } from './types.ts';
 /**
  * Standalone hesitation sounds. These carry no meaning in any context, so
  * removing them is always safe.
+ *
+ * Matched by shape, not by a fixed list. A verbatim model spells a hesitation
+ * as long as the speaker held it — "um", "umm", "ummmm", "uhhhhh" — and any
+ * finite list quietly misses the long tail (the old list stopped at three
+ * letters, so a four-m "ummmm" read as an ordinary word and survived the cut).
+ *
+ * Each alternative is anchored and made only of vowel/nasal runs, so none can
+ * reach a real English word. The one deliberate exception is "err": a rare verb
+ * ("to err is human") that is overwhelmingly the filler in speech. That was the
+ * previous behaviour too, so this does not widen the blast radius.
  */
-const HESITATIONS = new Set([
-  'um', 'umm', 'ummm', 'uh', 'uhh', 'uhhh', 'er', 'err', 'erm',
-  'ah', 'ahh', 'eh', 'hmm', 'hm', 'mm', 'mhm', 'uhm',
-]);
+const HESITATION = new RegExp(
+  '^(?:' +
+    [
+      'u+m+', // um, umm, ummmm
+      'u+h+', // uh, uhh, uhhhh
+      'u+h+m+', // uhm, uhmm
+      'h+m+', // hm, hmm, hmmm
+      'm+h+m+', // mhm, mmhmm — backchannel
+      'mm+', // mm, mmm
+      'e+r+m*', // er, err, erm, ermm
+      'e+h+', // eh, ehh
+      'a+h+', // ah, ahh, aah
+    ].join('|') +
+    ')$',
+);
 
 /**
  * Discourse markers. DANGEROUS to remove blindly: "like" is a filler in
@@ -43,7 +64,7 @@ export function detectFillers(transcript: Transcript, options: FillerOptions = {
   for (const word of words) word.isFiller = false;
 
   for (let i = 0; i < words.length; i++) {
-    if (HESITATIONS.has(normalize(words[i].text))) {
+    if (HESITATION.test(normalize(words[i].text))) {
       words[i].isFiller = true;
       found++;
     }
@@ -85,5 +106,5 @@ export function normalize(text: string): string {
 }
 
 export function isHesitation(word: Word): boolean {
-  return HESITATIONS.has(normalize(word.text));
+  return HESITATION.test(normalize(word.text));
 }

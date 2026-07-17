@@ -1,0 +1,219 @@
+/**
+ * The design system's public API. Custom properties only — no selectors.
+ *
+ * The colour names describe depth and meaning, not palette: --cut is not "red",
+ * it is "material the edit removed". Keep it that way.
+ *
+ * ── Black, and what that costs ────────────────────────────────────────────
+ * The surfaces are black. Not "dark blue-grey called black" — #000, and the
+ * chrome a few points off it. The previous ramp was a blue-violet cast at
+ * #090c12 / #121722 / #1c2331, which is the tell of every generated dark theme
+ * in existence, and it was never black.
+ *
+ * A black app cannot separate panels by fill: at these luminances a "step" is
+ * either invisible or grey. So structure is carried by HAIRLINES and SPACE, and
+ * colour is spent only where it means something. That is the deal black makes,
+ * and the borders below are load-bearing because of it.
+ *
+ * For the same reason there are almost no shadows left. A drop shadow on #000
+ * is #000 — it does nothing but cost a paint. Elevation here is a 1px ring.
+ * Only the dialog keeps a shadow, because it floats over a scrim that is not
+ * black.
+ *
+ * ── Amber, and why not blue ───────────────────────────────────────────────
+ * The accent was #5b8cff. Blue-on-black is the default of Figma, Premiere,
+ * Final Cut, Linear and every dark theme generator — it is the colour you get
+ * when nobody chooses. The two most respected tools in this actual category
+ * both refuse it: Resolve and Ableton key on amber over near-black.
+ *
+ * So: amber. It is the literal answer to "grand and rich" (gold on black), it
+ * is unmistakably chosen, and the waveform — the largest coloured object in the
+ * window — becomes the warm envelope every audio tool has instead of a blue
+ * smear.
+ *
+ * Amber has one hard requirement: --accent-fg is BLACK. White text on #ffb224
+ * measures 1.8:1 — unreadable. Black on it measures 10.8:1. Every rule that puts
+ * text on --accent must use --accent-fg, never #fff.
+ *
+ * ── No gradients ──────────────────────────────────────────────────────────
+ * There are none. Not in buttons, panels, the title bar, the transport, the
+ * progress fill or kbd. A gradient was doing the job a border should do, and on
+ * black it read as smudge. --grad-chrome and --accent-glow are gone rather than
+ * left unused, so they cannot come back by accident.
+ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  /* One variable file covers 100–900, so weight is free from here on. The old
+   * stack fell through to Segoe UI on Windows, which has no optical sizing and
+   * hints itself into a different typeface at 17px than at 11px. */
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../fonts/InterVariable.woff2') format('woff2');
+}
+
+:root {
+  /* ── surfaces · black, then hairlines ─────────────────────────────────
+   * The gap between --bg and --chrome is 11/255. It is not meant to read as a
+   * step; --line is what separates them. */
+  --void: #000000;        /* the picture, the canvas, the page */
+  --bg: #000000;          /* app background */
+  --sunk: #070707;        /* wells: inputs, chips, readouts */
+  --chrome: #0b0b0b;      /* panel surfaces: rails, dock, titlebar */
+  --raised: #151515;      /* floats above chrome: menus, dialogs */
+
+  /* Load-bearing. On black these ARE the layout. */
+  --line: #262626;
+  --line-soft: #171717;   /* internal dividers that shouldn't shout */
+  --line-strong: #3f3f3f; /* splitter hover, focused input border */
+
+  /* ── interaction surfaces ─────────────────────────────────────────────── */
+  --hover: #1a1a1a;
+  --active: #272727;
+  --selected: #2e2005;    /* amber tint — the accent at 12% on black */
+
+  /* ── text ─────────────────────────────────────────────────────────────── */
+  --text: #f2f2f2;        /* not #fff: pure white on pure black glares */
+  --dim: #a3a3a3;
+  --faint: #6e6e6e;
+  --ghost: #78787899;     /* cut words: present, but clearly gone */
+
+  /* ── accent · amber ───────────────────────────────────────────────────── */
+  --accent: #ffb224;
+  --accent-hover: #ffc45c;
+  --accent-press: #e59a0f;
+  --accent-dim: #4d3609;
+  --accent-tint: var(--selected);
+  --accent-fg: #140c00;   /* BLACK on amber. See the note above. */
+
+  /* ── semantic tones, each a fg/bg/line triad ──────────────────────────
+   * Rose, orchid, jade — not red, purple, green. The old set was the primary
+   * wheel (#ff6b6b / #4ec9a0 / #e8a33d), which is the palette you reach for
+   * when you are naming colours rather than choosing them. */
+  --cut: #ff5470;         /* rose */
+  --cut-bg: #2b0d15;
+  --cut-line: #591f2e;
+  --cut-fg: #ff8fa3;
+  --cut-sel: #ff5470;     /* selected AND cut: solid rose, black text on top */
+
+  /* Orchid, because a filler word is a CLASS of word, not a warning — and
+   * amber now means "attention", which is the accent's job. */
+  --filler: #c07df0;
+
+  /* Amber, deliberately the same family as the accent: both mean "attention".
+   * A warn box and a primary button never sit side by side, and when they do
+   * agree on hue the app reads as one system rather than two. */
+  --warn-bg: #2b1f05;
+  --warn-line: #57400d;
+  --warn-fg: #e3b662;
+
+  --ok: #2fd88a;          /* jade */
+  --ok-bg: #06231a;
+  --ok-line: #14503a;
+  --ok-fg: #64e6ae;
+
+  --info-bg: #0a1e24;
+  --info-line: #17414d;
+  --info-fg: #7fd3e8;
+
+  --danger: var(--cut);
+
+  /* ── timeline (canvas cannot read these; JS reads them via getComputedStyle) ── */
+  --wave-kept: var(--accent);
+  --wave-cut: #2e2e2e;
+  --playhead: #ffffff;    /* the one pure white in the app. It is a cursor. */
+  --ruler-bg: #060606;
+  --film-bg: #000000;
+
+  /* ── speakers ─────────────────────────────────────────────────────────
+   * Jewel tones, assigned by order of first appearance (see speakers.ts) —
+   * which is NOT the same as by prominence. On the Stanford speech --spk-1 goes
+   * to the applause track, because a room clapping is the first thing on the
+   * tape; the man himself is --spk-2 with 2,257 of the 2,269 words. Every one
+   * of these has to look good on its own, since which one lands on the subject
+   * is an accident of the first second of audio.
+   *
+   * None of them is amber, orchid or rose: those hues are spoken for by the
+   * accent, fillers and cuts, and a speaker rule down the margin must never be
+   * mistakable for a selection. */
+  --spk-1: #3fd8c4;       /* turquoise — complement of the amber accent */
+  --spk-2: #9db4ff;       /* periwinkle */
+  --spk-3: #ffa8c5;       /* rose quartz */
+  --spk-4: #b8e46a;       /* chartreuse */
+  --spk-5: #5ec8f5;       /* aqua */
+  --spk-6: #ffb98a;       /* apricot */
+  --spk-7: #6ee7a8;       /* mint */
+  --spk-8: #cf8bf3;       /* orchid */
+
+  /* ── space · 4px base ─────────────────────────────────────────────────── */
+  --s-0: 2px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* ── radius ───────────────────────────────────────────────────────────── */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 10px;
+  --r-4: 14px;
+  --r-full: 999px;
+
+  /* ── type ─────────────────────────────────────────────────────────────── */
+  --font-ui: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  --t-micro: 10px;   /* section labels, badges */
+  --t-small: 11px;
+  --t-ui: 12px;
+  --t-base: 13px;
+  --t-lg: 15px;
+  --t-script: 17px;  /* the measure. protected by name. do not touch. */
+  --t-title: 20px;
+  --t-hero: 30px;
+
+  /* ── elevation ────────────────────────────────────────────────────────
+   * On black, a ring — not a shadow. --shadow-3 survives because the dialog
+   * sits over a blurred scrim, which is the one non-black backdrop here. */
+  --ring-1: 0 0 0 1px var(--line);
+  --shadow-3: 0 24px 64px -12px rgb(0 0 0 / .8), 0 0 0 1px var(--line-strong);
+  /* The stage is black picture on a black wall: without this it has no edges. */
+  --shadow-stage: 0 0 0 1px #202020;
+  --scrim: rgb(0 0 0 / .72);
+
+  /* ── focus · two-tone so the ring reads on ANY surface ────────────────── */
+  --focus: #ffc45c;
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
+
+  /* ── motion ───────────────────────────────────────────────────────────── */
+  --dur-1: 80ms;
+  --dur-2: 140ms;
+  --dur-3: 240ms;
+  --ease: cubic-bezier(.2, .6, .2, 1);
+  --ease-out: cubic-bezier(0, .7, .2, 1);
+
+  /* ── z ────────────────────────────────────────────────────────────────── */
+  --z-splitter: 10;
+  --z-sticky: 20;
+  --z-hud: 30;
+  --z-menu: 40;
+  --z-toast: 50;
+  --z-dialog: 60;
+
+  /* ── state ────────────────────────────────────────────────────────────── */
+  --disabled-opacity: .38;
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+  }
+}

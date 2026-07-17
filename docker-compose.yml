@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    image: jumpcut:latest
+    ports:
+      - '8787:8787'
+    environment:
+      PORT: 8787
+      MEDIA_DIR: /data
+      WEB_DIST: ./apps/web/dist
+      # Unset to run the mock ASR provider: the full pipeline, zero cost.
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      # Pin this to your UI's origin in production. Unset means "any origin",
+      # and every route here is unauthenticated.
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-512}
+    volumes:
+      # Uploads, renders and project JSON must outlive the container.
+      - media:/data
+    # A render is CPU-bound x264 and will use every core it is given. The limit
+    # is what stops one export starving the request loop that serves the editor.
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+    restart: unless-stopped
+
+volumes:
+  media:
+    # Pinned to the volume the running container actually used. Without this,
+    # compose derives the name from the project directory (descript-clone_media)
+    # and hands you a BRAND NEW EMPTY volume — the library looks wiped, while
+    # 93MB of uploads sit safe in te-media where nothing can see them. The
+    # container was originally started by `docker run -v te-media:/data`, so the
+    # compose file and the live container disagreed about where state lives.
+    name: te-media

@@ -73,15 +73,40 @@ export function toParagraphs(transcript: Transcript, options: ParagraphOptions =
 /**
  * The word playing at a given source time, for karaoke highlighting.
  * Returns the index into transcript.words, or -1 inside a pause.
+ *
+ * This used to scan linearly, with a comment inviting a binary search "if this
+ * ever shows up in a profile". It does: at the end of a 2282-word transcript the
+ * scan ran all 2282 entries, and it is called once per animation frame. Words
+ * are sorted by start, so a bisect costs ~11 comparisons instead — 200x fewer,
+ * and the cost stops growing as the playhead moves right.
  */
 export function wordAt(words: Word[], sourceTime: number): number {
-  // Linear is fine at podcast scale (tens of thousands of words, 60fps). Swap for
-  // a binary search if this ever shows up in a profile.
-  for (let i = 0; i < words.length; i++) {
-    if (sourceTime >= words[i].start && sourceTime < words[i].end) return i;
-    if (words[i].start > sourceTime) break;
+  const i = lastStartingAtOrBefore(words, sourceTime);
+  if (i === -1) return -1;
+  // Only the nearest word can contain the time; anything earlier ended sooner.
+  return sourceTime < words[i].end ? i : -1;
+}
+
+/**
+ * Index of the last word whose start is <= sourceTime, or -1 before the first.
+ * Also the caret-placement primitive: clicking in a pause should land on the
+ * word you just heard, not nowhere.
+ */
+export function lastStartingAtOrBefore(words: Word[], sourceTime: number): number {
+  let lo = 0;
+  let hi = words.length - 1;
+  let found = -1;
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (words[mid].start <= sourceTime) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  return -1;
+  return found;
 }
 
 /** Short label for the speaker margin: "SPEAKER_00" -> "Speaker 1". */

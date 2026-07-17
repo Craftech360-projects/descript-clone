@@ -1,0 +1,105 @@
+/**
+ * Reset and element defaults. Everything here is unstyled-HTML behaviour, not
+ * app layout — app layout lives in app.css.
+ */
+
+* { box-sizing: border-box; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: var(--t-base) / 1.5 var(--font-ui);
+  height: 100vh;
+  overflow: hidden;
+
+  /* Inter ships contextual alternates and ligatures on by default; keep them,
+   * and let the variable font pick its optical size rather than scaling one
+   * master. -webkit-font-smoothing is the difference between Inter looking like
+   * Inter and looking like a heavier fake of it on dark backgrounds. */
+  font-optical-sizing: auto;
+  font-feature-settings: 'liga' 1, 'calt' 1;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root { height: 100%; }
+
+/* The one global rule this app has never had. Keyboard users previously got
+ * nothing at all — button:hover only changed border-color. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--r-1);
+}
+
+/* ── buttons ───────────────────────────────────────────────────────────
+ * Flat fill, one hairline. The old rule stacked a 180° gradient, an inset
+ * white highlight and a drop shadow to fake a bevel — three effects doing what
+ * a border does, and on #000 the shadow was invisible while the gradient just
+ * looked like a dirty smudge. A control on black is a rectangle of *lighter
+ * than its surface*, edged. That is the whole trick. */
+button {
+  background: var(--chrome);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 7px 11px;
+  font: inherit;
+  font-weight: 450;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+button:hover:not(:disabled) { background: var(--hover); border-color: var(--line-strong); }
+button:active:not(:disabled) { background: var(--active); }
+button:disabled { opacity: var(--disabled-opacity); cursor: default; }
+
+/* Icons are 24-grid SVGs at currentColor; they inherit the button's colour
+ * transition for free and never carry their own. */
+button svg { display: block; flex-shrink: 0; }
+
+select,
+input[type='text'] {
+  width: 100%;
+  background: var(--sunk);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 7px 9px;
+  font: inherit;
+  transition: border-color var(--dur-1) var(--ease);
+}
+select:hover,
+input[type='text']:hover { border-color: var(--line-strong); }
+select:focus-visible,
+input[type='text']:focus-visible { border-color: var(--accent); }
+
+input[type='range'] { width: 100%; accent-color: var(--accent); }
+
+kbd {
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--r-1);
+  padding: 1px 5px;
+  font: inherit;
+  font-size: var(--t-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* Scrollbars are chrome too. The default light-grey Windows bar on a black
+ * panel is the single loudest "unstyled web page" tell in the app. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #303030 transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: #303030;
+  border-radius: var(--r-full);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }

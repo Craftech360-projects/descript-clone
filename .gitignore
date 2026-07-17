@@ -5,5 +5,10 @@ media/uploads/*
 media/renders/*
 media/projects/*
 media/cache/*
+# Both are generated and both were leaking into `git status`: jobs/ is the job
+# registry's write-through state, thumbs/ is ~560KB of filmstrip sheets per
+# video. Derived data, rebuildable from the source in one ffmpeg pass.
+media/jobs/*
+media/thumbs/*
 !media/**/.gitkeep
 *.log

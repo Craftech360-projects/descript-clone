@@ -1,0 +1,184 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  CAPTION_FONTS,
+  DEFAULT_CAPTIONS,
+  captionBoxFill,
+  captionScale,
+  clampAnchor,
+  fontCss,
+  hexToAss,
+  strokeRole,
+} from './caption-style.ts';
+import { toAss, toCues } from './captions.ts';
+import { compileEdl } from './edl.ts';
+import type { Transcript } from './types.ts';
+
+function fromText(text: string): Transcript {
+  const words = text.split(/\s+/).map((t, i) => ({
+    id: `w${i}`,
+    text: t,
+    start: i * 0.5,
+    end: i * 0.5 + 0.4,
+  }));
+  return { mediaId: 'test', duration: words.length * 0.5, words };
+}
+
+const cuesOf = (text: string, maxChars = 42) => {
+  const t = fromText(text);
+  return toCues(t, compileEdl(t, { padMs: 0, mergeWithinMs: 0 }), { maxChars });
+};
+
+const styleLine = (ass: string) => ass.split('\n').find((l) => l.startsWith('Style:'))!;
+const dialogue = (ass: string) => ass.split('\n').filter((l) => l.startsWith('Dialogue:'));
+
+/**
+ * Read a style field BY NAME, off the file's own Format line.
+ *
+ * Not by index: hardcoding "BorderStyle is field 16" is both wrong (it is 15)
+ * and dangerous — an assertion on the wrong column happily passes whenever the
+ * neighbouring value coincides, which is exactly what happened while writing
+ * these. The Format line is the schema; read it.
+ */
+function styleField(ass: string, name: string): string {
+  const format = ass.split('\n').find((l) => l.startsWith('Format: Name'))!;
+  const names = format.replace('Format: ', '').split(',').map((s) => s.trim());
+  const index = names.indexOf(name);
+  assert.ok(index >= 0, `no such style field: ${name}`);
+  return styleLine(ass).split(',')[index].trim();
+}
+
+test('hexToAss reverses RGB into ASS BGR order', () => {
+  // The whole point of the helper. Red and blue swapping is silent and looks
+  // like a design choice rather than a bug.
+  assert.equal(hexToAss('#FF0000'), '&H000000FF', 'red must land in the last byte');
+  assert.equal(hexToAss('#0000FF'), '&H00FF0000', 'blue must land in the first colour byte');
+  assert.equal(hexToAss('#FFFFFF'), '&H00FFFFFF');
+  assert.equal(hexToAss('#000000'), '&H00000000');
+});
+
+test('hexToAss takes ASS alpha, where 0 is opaque', () => {
+  assert.equal(hexToAss('#000000', 0x80), '&H80000000');
+  assert.equal(hexToAss('#000000', 999), '&HFF000000', 'clamped, not wrapped');
+});
+
+test('a malformed colour still produces parseable ASS', () => {
+  // A broken colour must not take the whole style line down with it — libass
+  // would drop every caption rather than one colour.
+  for (const bad of ['', 'red', '#GGG', '#12', 'rgb(1,2,3)']) {
+    assert.match(hexToAss(bad), /^&H[0-9A-F]{8}$/, `bad input produced bad ASS: ${bad}`);
+  }
+});
+
+test('captionScale maps the 1080p reference onto the real frame', () => {
+  assert.equal(captionScale(1080), 1);
+  assert.equal(captionScale(540), 0.5);
+  assert.equal(captionScale(2160), 2);
+  // Never scale by zero or NaN — that would collapse every glyph to nothing.
+  assert.equal(captionScale(0), 1);
+  assert.equal(captionScale(Number.NaN), 1);
+});
+
+test('clampAnchor keeps a dragged caption inside the frame', () => {
+  assert.deepEqual(clampAnchor(-3, 9), { x: 0, y: 1 });
+  assert.deepEqual(clampAnchor(0.25, 0.75), { x: 0.25, y: 0.75 });
+  assert.deepEqual(clampAnchor(Number.NaN, 0.5), { x: 0.5, y: 0.5 });
+});
+
+test('every offered font has a css stack, and unknown names fall back', () => {
+  for (const f of CAPTION_FONTS) assert.ok(fontCss(f.id).length > 0);
+  assert.equal(fontCss('Impact'), CAPTION_FONTS[0].css, 'unknown must not yield undefined');
+});
+
+test('toAss scales size and position to the frame it is burning onto', () => {
+  const cues = cuesOf('hello world');
+  const settings = { ...DEFAULT_CAPTIONS, fontSize: 48, strokeWidth: 4, x: 0.25, y: 0.5 };
+
+  const hd = toAss(cues, settings, { width: 1920, height: 1080 });
+  assert.match(styleLine(hd), /^Style: Default,Arial,48,/);
+  assert.ok(dialogue(hd)[0].includes('\\pos(480,540)'));
+
+  // Half the height: every authored length halves, and the fractional position
+  // lands on the same spot in the picture.
+  const half = toAss(cues, settings, { width: 960, height: 540 });
+  assert.match(styleLine(half), /^Style: Default,Arial,24,/);
+  assert.ok(dialogue(half)[0].includes('\\pos(240,270)'));
+});
+
+test('toAss declares the real frame as PlayRes', () => {
+  // libass scales its canvas to the frame. Lying here moves every caption.
+  const ass = toAss(cuesOf('hi there'), DEFAULT_CAPTIONS, { width: 1080, height: 1920 });
+  assert.ok(ass.includes('PlayResX: 1080'));
+  assert.ok(ass.includes('PlayResY: 1920'));
+});
+
+test('allCaps is applied to the burned text', () => {
+  const ass = toAss(cuesOf('quiet words'), { ...DEFAULT_CAPTIONS, allCaps: true });
+  assert.ok(dialogue(ass)[0].includes('QUIET'));
+  assert.ok(!dialogue(ass)[0].includes('quiet'));
+});
+
+test('backdrop picks the ASS border mode rather than only a colour', () => {
+  const box = toAss(cuesOf('a b'), { ...DEFAULT_CAPTIONS, backdrop: 'box' });
+  const plain = toAss(cuesOf('a b'), { ...DEFAULT_CAPTIONS, backdrop: 'none' });
+  const shadow = toAss(cuesOf('a b'), { ...DEFAULT_CAPTIONS, backdrop: 'shadow' });
+
+  // 3 is "opaque box", 1 is "outline, plus an optional drop shadow".
+  assert.equal(styleField(box, 'BorderStyle'), '3', 'a box is a border mode, not just a colour');
+  assert.equal(styleField(plain, 'BorderStyle'), '1');
+  assert.equal(styleField(shadow, 'BorderStyle'), '1');
+
+  assert.equal(styleField(plain, 'Shadow'), '0', 'no backdrop means no shadow');
+  assert.notEqual(styleField(shadow, 'Shadow'), '0', 'a drop shadow needs a depth');
+});
+
+test('a box is filled with the OUTLINE colour, which is what libass actually does', () => {
+  // Verified by test render, not by reading the spec: BorderStyle 3 fills from
+  // OutlineColour and ignores BackColour. Coding the box as BackColour looks
+  // right, renders wrong, and made the preview disagree with the burn.
+  const boxed = { ...DEFAULT_CAPTIONS, backdrop: 'box' as const, strokeColor: '#3A1D00' };
+  const ass = toAss(cuesOf('a b'), boxed);
+
+  assert.equal(styleField(ass, 'OutlineColour'), hexToAss('#3A1D00'), 'the box fill');
+  assert.equal(captionBoxFill(boxed), '#3A1D00', 'the preview must read the same colour');
+  assert.equal(captionBoxFill({ ...boxed, backdrop: 'none' }), null, 'no box, no fill');
+  assert.equal(strokeRole('box'), 'box');
+  assert.equal(strokeRole('shadow'), 'outline');
+});
+
+test('braces in a word cannot swallow the caption', () => {
+  // { opens an ASS override block. Unescaped, everything to the next } silently
+  // disappears from the burn — no error, just missing words.
+  const t: Transcript = {
+    mediaId: 'x',
+    duration: 2,
+    words: [
+      { id: 'w0', text: '{weird}', start: 0, end: 0.4 },
+      { id: 'w1', text: 'word', start: 0.5, end: 0.9 },
+    ],
+  };
+  const cues = toCues(t, compileEdl(t, { padMs: 0, mergeWithinMs: 0 }), {});
+  const line = dialogue(toAss(cues, DEFAULT_CAPTIONS))[0];
+
+  assert.ok(line.includes('\\{weird\\}'), 'braces must be escaped');
+  assert.ok(line.includes('word'), 'the following word must survive');
+});
+
+test('the caption is anchored at its centre, matching the drag handle', () => {
+  // Alignment 5 (centre) is what makes \pos mean the point you dropped it on.
+  // Any other alignment and the caption lands offset from where you let go.
+  assert.equal(styleField(toAss(cuesOf('hello'), DEFAULT_CAPTIONS), 'Alignment'), '5');
+});
+
+test('the user colour is the text colour, not the karaoke pre-roll', () => {
+  const ass = toAss(cuesOf('a b'), { ...DEFAULT_CAPTIONS, color: '#00FF00', strokeColor: '#FF0000' });
+  assert.equal(styleField(ass, 'PrimaryColour'), hexToAss('#00FF00'));
+  assert.equal(styleField(ass, 'OutlineColour'), hexToAss('#FF0000'));
+});
+
+test('toAss defaults are usable with no settings at all', () => {
+  // The sidecar .ass download calls this with nothing.
+  const ass = toAss(cuesOf('one two three'));
+  assert.ok(!ass.includes('undefined'), 'a missing setting leaked into the output');
+  assert.ok(styleLine(ass).startsWith('Style: Default,Arial,48,&H00FFFFFF,'));
+});

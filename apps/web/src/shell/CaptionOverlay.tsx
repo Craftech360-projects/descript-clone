@@ -1,0 +1,217 @@
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { sourceToOutput } from '../../../../packages/core/src/edl.ts';
+import { toCues } from '../../../../packages/core/src/captions.ts';
+import {
+  CAPTION_REFERENCE_HEIGHT,
+  captionBoxFill,
+  clampAnchor,
+  fontCss,
+  type CaptionSettings,
+} from '../../../../packages/core/src/caption-style.ts';
+import type { Edl, Word } from '../../../../packages/core/src/types.ts';
+
+interface Props {
+  videoRef: RefObject<HTMLVideoElement | null>;
+  words: Word[];
+  edl: Edl | null;
+  captions: CaptionSettings;
+  /** Read imperatively at 60Hz — see the rAF below. */
+  getCurrentTime: () => number;
+  onDragStart: () => void;
+  onMove: (x: number, y: number) => void;
+  onDragEnd: (label: string) => void;
+}
+
+/** The video's picture within its element, once object-fit: contain letterboxes it. */
+interface Box {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The draggable caption, drawn over the monitor.
+ *
+ * This is a preview of a burn that libass will do later, so the two have to
+ * agree. They agree because both read the same CaptionSettings and both scale
+ * from the same 1080p reference — position is a fraction of the picture, so it
+ * survives the monitor being 480px wide and the render being 4K.
+ *
+ * It is an approximation in one respect, and deliberately: the browser and
+ * libass are different text engines. The metric-compatible font list keeps the
+ * widths and wrap points honest, but glyph rasterisation and outline joins will
+ * differ by a pixel here and there. Placement, size and colour are exact; the
+ * antialiasing is not.
+ */
+export default function CaptionOverlay(p: Props) {
+  const [box, setBox] = useState<Box | null>(null);
+  const [cueIndex, setCueIndex] = useState(-1);
+  const dragging = useRef(false);
+
+  const cues = useMemo(
+    () =>
+      p.edl
+        ? toCues({ mediaId: '', duration: 0, words: p.words }, p.edl, {
+            maxChars: p.captions.maxChars,
+          })
+        : [],
+    [p.words, p.edl, p.captions.maxChars],
+  );
+
+  // ── keep the overlay glued to the picture, not the element ──────────────────
+  //
+  // object-fit: contain letterboxes, so the element's box and the picture's box
+  // are different rectangles. Positioning against the element would drift the
+  // caption by the size of the bars — and the bars change with every resize.
+  useEffect(() => {
+    const video = p.videoRef.current;
+    if (!video) return;
+
+    const measure = () => {
+      const rect = video.getBoundingClientRect();
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh || !rect.width || !rect.height) return setBox(null);
+
+      const scale = Math.min(rect.width / vw, rect.height / vh);
+      const width = vw * scale;
+      const height = vh * scale;
+      setBox({
+        left: (rect.width - width) / 2,
+        top: (rect.height - height) / 2,
+        width,
+        height,
+      });
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(video);
+    // videoWidth is 0 until metadata lands, so the first measure can come up empty.
+    video.addEventListener('loadedmetadata', measure);
+    return () => {
+      ro.disconnect();
+      video.removeEventListener('loadedmetadata', measure);
+    };
+  }, [p.videoRef, p.captions.enabled]);
+
+  // ── which cue is on screen ──────────────────────────────────────────────────
+  //
+  // The clock is still read outside React, on rAF — that part matters, because
+  // `timeupdate` fires at ~4Hz and would drop captions a quarter-second late.
+  // But only the cue INDEX crosses into React, and that changes at cue
+  // boundaries — about once a second, not 60 times. setState bails out when the
+  // value is unchanged, so the frames in between cost a comparison and nothing
+  // else.
+  //
+  // This used to write textContent through a ref, on the theory that the
+  // timeline's imperative idiom applied here too. It did not: the ref is null
+  // on any render this component returns null from, and it returns null until
+  // `box` is measured — which cannot happen until the video reports
+  // videoWidth. So the effect ran once against a null ref, never scheduled its
+  // rAF, and the caption stayed permanently blank once the box did arrive.
+  useEffect(() => {
+    const edl = p.edl;
+    if (!p.captions.enabled || !edl) return;
+
+    let raf = 0;
+    const frame = () => {
+      raf = requestAnimationFrame(frame);
+      const output = sourceToOutput(edl, p.getCurrentTime());
+      setCueIndex(
+        output === null ? -1 : cues.findIndex((c) => output >= c.start && output < c.end),
+      );
+    };
+
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, [cues, p.edl, p.getCurrentTime, p.captions.enabled]);
+
+  if (!p.captions.enabled || !box) return null;
+
+  // Between cues there is nothing being said — but an empty overlay is
+  // impossible to grab. Hold the first cue as a dimmed guide so the caption is
+  // always there to place, and mark it so it never reads as real content.
+  const active = cueIndex >= 0 ? cues[cueIndex] : null;
+  const text = active?.text ?? cues[0]?.text ?? 'Captions';
+  const placeholder = active === null;
+
+  // Every length scales off the picture height, exactly as toAss does.
+  const scale = box.height / CAPTION_REFERENCE_HEIGHT;
+  const fontSize = p.captions.fontSize * scale;
+  const strokeSize = p.captions.strokeWidth * scale;
+  const boxFill = captionBoxFill(p.captions);
+  // In box mode the stroke colour IS the box, and libass draws no glyph
+  // outline. Drawing one here would show an outline the render will not have.
+  const outline = boxFill === null ? strokeSize : 0;
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dragging.current = true;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    p.onDragStart();
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return;
+    const video = p.videoRef.current;
+    if (!video) return;
+    const rect = video.getBoundingClientRect();
+    // Screen -> picture -> 0..1. Clamped, so it can never be lost off-frame.
+    const { x, y } = clampAnchor(
+      (e.clientX - rect.left - box.left) / box.width,
+      (e.clientY - rect.top - box.top) / box.height,
+    );
+    p.onMove(x, y);
+  };
+
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    p.onDragEnd('Move captions');
+  };
+
+  return (
+    <div
+      className="cap-layer"
+      style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+    >
+      <div
+        className={`cap-text${placeholder ? ' ph' : ''}`}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        style={{
+          left: `${p.captions.x * 100}%`,
+          top: `${p.captions.y * 100}%`,
+          fontFamily: fontCss(p.captions.font),
+          fontSize: `${fontSize}px`,
+          color: p.captions.color,
+          textTransform: p.captions.allCaps ? 'uppercase' : 'none',
+          // paint-order puts the stroke BEHIND the fill; without it the browser
+          // centres the stroke on the glyph edge and eats half the letterform,
+          // which libass does not do.
+          WebkitTextStrokeWidth: outline > 0 ? `${outline}px` : undefined,
+          WebkitTextStrokeColor: outline > 0 ? p.captions.strokeColor : undefined,
+          paintOrder: 'stroke fill',
+          // Opaque, and the stroke colour — that is what libass fills a
+          // BorderStyle 3 box with. See captionBoxFill.
+          background: boxFill ?? 'transparent',
+          // ASS reuses the outline width as the box's padding.
+          padding: boxFill !== null ? `${strokeSize}px ${strokeSize * 2}px` : 0,
+          textShadow:
+            p.captions.backdrop === 'shadow'
+              ? `${3 * scale}px ${3 * scale}px ${2 * scale}px rgba(0,0,0,0.85)`
+              : undefined,
+          // ~the widest line toCues will emit, so wrapping previews truthfully.
+          maxWidth: `${Math.min(96, p.captions.maxChars * 1.9)}%`,
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  );
+}

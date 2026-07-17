@@ -12,7 +12,15 @@
   "scripts": {
     "test": "node --test packages/core/src/*.test.ts",
     "server": "node --env-file-if-exists=.env --watch apps/server/src/index.ts",
+    "server:prod": "node --env-file-if-exists=.env apps/server/src/index.ts",
     "web": "npm run dev --workspace apps/web",
     "dev": "npm run server & npm run web"
-  }
+  },
+  "//": [
+    "server uses --watch, which restarts on ANY server file save. That kills",
+    "in-flight jobs (and on Windows re-parents rather than kills the ffmpeg",
+    "child). Use server:prod when a render matters.",
+    "dev chains with '&', which is POSIX-only. On Windows run server and web",
+    "in two terminals."
+  ]
 }

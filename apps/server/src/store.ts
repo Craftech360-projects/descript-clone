@@ -1,7 +1,10 @@
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CONFIG } from './config.ts';
+import { probe } from './ffmpeg.ts';
 import type { AsrOptions } from './asr.ts';
+import type { Thumbs } from './thumbs.ts';
+import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
 export interface Project {
@@ -15,6 +18,8 @@ export interface Project {
   hasVideo: boolean;
   width?: number;
   height?: number;
+  /** Frames per second. Absent on audio, and on projects imported before it was read. */
+  fps?: number;
 
   /** Imported media is not transcribed until the user asks. */
   status: 'imported' | 'transcribed';
@@ -26,6 +31,19 @@ export interface Project {
 
   /** Waveform envelope, computed at import (it is free and always useful). */
   peaks: number[];
+  /**
+   * Filmstrip sheets. Absent on audio, and on video that has not been asked for
+   * them yet — building them costs ~8s, so it is a job the client kicks off on
+   * first open rather than something import blocks on.
+   */
+  thumbs?: Thumbs;
+  /**
+   * Caption look and placement. Persisted, unlike the cut settings: those are
+   * engine defaults you rarely touch, while this is placement you dragged by
+   * hand and would be furious to lose on reload. Absent on projects saved
+   * before captions existed — the client falls back to DEFAULT_CAPTIONS.
+   */
+  captions?: CaptionSettings;
   createdAt: string;
 }
 
@@ -51,11 +69,39 @@ export async function get(id: string): Promise<Project | null> {
     const project = JSON.parse(
       await readFile(join(projectsDir, `${id}.json`), 'utf8'),
     ) as Project;
-    cache.set(id, project);
-    return project;
+    // Migrate BEFORE caching. Callers mutate the object this returns and then
+    // save it, so a post-cache migration would be silently dropped.
+    const migrated = await migrate(project);
+    cache.set(id, migrated);
+    return migrated;
   } catch {
     return null;
   }
+}
+
+/**
+ * Bring a project written by an older build up to date, lazily, on first open.
+ *
+ * Lazy rather than a migration pass: there is no schema version to key off, the
+ * work is cheap, and a project that is never opened never needs it.
+ */
+async function migrate(project: Project): Promise<Project> {
+  // fps was added after this project was imported. It is one ffprobe call, once,
+  // and then it is on disk forever.
+  if (project.hasVideo && project.fps === undefined) {
+    try {
+      const info = await probe(project.sourcePath);
+      if (info.fps !== undefined) {
+        const next = { ...project, fps: info.fps };
+        await save(next);
+        return next;
+      }
+    } catch {
+      // The source may be gone, or ffprobe may not be installed. Neither is a
+      // reason to fail opening the project — fps is a nicety.
+    }
+  }
+  return project;
 }
 
 /** The media library listing. Peaks are omitted — too big, and not needed here. */

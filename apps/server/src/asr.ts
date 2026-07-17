@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { ASR_MODELS, CONFIG, type AsrModelId } from './config.ts';
+import { ASR_ENDPOINT, ASR_MODELS, CONFIG, type AsrModelId } from './config.ts';
 import type { Word } from '../../../packages/core/src/types.ts';
 
 /** Everything the Transcribe panel lets the user decide. */
@@ -17,7 +17,10 @@ export interface AsrOptions {
 }
 
 export const ASR_DEFAULTS: AsrOptions = {
-  model: 'fal-ai/whisper',
+  // Scribe is verbatim by construction — there is no flag to ask for it, and no
+  // Whisper-family option left to fall back to. `verbatim` below is now a
+  // statement about the model, not a request sent anywhere.
+  model: 'scribe_v1',
   language: 'auto',
   speakers: 0,
   diarize: true,
@@ -31,46 +34,102 @@ export interface AsrResult {
   verbatim: boolean;
 }
 
+/**
+ * Progress reporting for ASR.
+ *
+ * There is nothing honest to put in a bar here, and `progress: -1` says so.
+ * Going direct traded fal's queue channel for a single blocking POST: fal at
+ * least reported "Queued · position 3", which was a fact. The direct endpoint
+ * reports nothing until it returns the finished transcript, so `stage` is all
+ * that is left to be truthful with. A percentage would be invention.
+ */
+export interface AsrProgress {
+  /** 0..1 where a real fraction exists, -1 where it genuinely does not. */
+  progress: number;
+  stage: string;
+}
+
 export async function transcribe(
   audioPath: string,
   duration: number,
   options: AsrOptions,
+  onProgress?: (p: AsrProgress) => void,
 ): Promise<AsrResult> {
-  if (options.model === 'mock' || !CONFIG.hasFal()) {
+  if (options.model === 'mock' || !CONFIG.hasAsr()) {
+    // The mock is synchronous and instant. It gets no progress bar, because
+    // there is no progress to report and a fake one would be a lie.
     return mockTranscribe(duration);
   }
-  return falTranscribe(audioPath, options);
+  return elevenLabsTranscribe(audioPath, options, onProgress);
 }
 
 // ---------------------------------------------------------------------------
-// fal
+// ElevenLabs
 // ---------------------------------------------------------------------------
 
-async function falTranscribe(audioPath: string, options: AsrOptions): Promise<AsrResult> {
-  const { fal } = await import('@fal-ai/client');
-  fal.config({ credentials: CONFIG.falKey });
+/**
+ * Build the multipart body.
+ *
+ * Direct means the audio IS the request body — there is no upload-to-storage
+ * step and no public URL, which is one less hop and one less place a user's
+ * recording sits at a guessable address.
+ *
+ * FormData coerces values with String(), so a boolean would arrive as the
+ * string "false" — which is truthy on the far side. Every flag is stringified
+ * deliberately here rather than left to chance.
+ */
+export function buildForm(file: Blob, filename: string, options: AsrOptions): FormData {
+  const form = new FormData();
+  form.set('file', file, filename);
+  form.set('model_id', options.model);
+  // The whole product hinges on this being honoured: word-level or nothing.
+  form.set('timestamps_granularity', 'word');
+  form.set('diarize', String(options.diarize));
+  // Surfaces [laughter]/[applause] as their own timed tokens.
+  form.set('tag_audio_events', 'true');
 
+  if (options.language !== 'auto') form.set('language_code', options.language);
+  // Under fal this knob did not exist and the setting was dead. Direct, Scribe
+  // accepts a speaker count — so the Transcribe panel's control now does something.
+  if (options.speakers > 0) form.set('num_speakers', String(options.speakers));
+
+  return form;
+}
+
+async function elevenLabsTranscribe(
+  audioPath: string,
+  options: AsrOptions,
+  onProgress?: (p: AsrProgress) => void,
+): Promise<AsrResult> {
   const bytes = await readFile(audioPath);
-  const file = new File([bytes], basename(audioPath), { type: 'audio/wav' });
-  const audioUrl = await fal.storage.upload(file);
+  const form = buildForm(new Blob([bytes], { type: 'audio/wav' }), basename(audioPath), options);
 
-  const input: Record<string, unknown> = {
-    audio_url: audioUrl,
-    task: 'transcribe',
-    // The whole product hinges on this being honoured.
-    chunk_level: 'word',
-    diarize: options.diarize,
-  };
-  if (options.language !== 'auto') input.language = options.language;
-  if (options.speakers > 0) input.num_speakers = options.speakers;
+  // One stage for the whole remote call. The POST uploads and transcribes in a
+  // single request that reports nothing until it returns, so splitting this into
+  // "Uploading" then "Transcribing" would be a guess about a boundary we cannot
+  // observe.
+  onProgress?.({ progress: -1, stage: 'Transcribing' });
 
-  const result: any = await fal.subscribe(options.model, { input });
-  const payload = result?.data ?? result;
+  const res = await fetch(ASR_ENDPOINT, {
+    method: 'POST',
+    headers: { 'xi-api-key': CONFIG.elevenLabsKey },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(
+      `ElevenLabs returned ${res.status}${res.status === 401 ? ' — check ELEVENLABS_API_KEY' : ''}` +
+        `${detail ? `: ${detail.slice(0, 400)}` : ''}`,
+    );
+  }
+
+  const payload: any = await res.json();
 
   // The response shape is the one unverified assumption the product rests on.
   // Log its skeleton so a mismatch is obvious rather than archaeological.
   console.log('[asr] keys:', Object.keys(payload ?? {}));
-  const sample = payload?.chunks?.[0] ?? payload?.words?.[0] ?? payload?.segments?.[0];
+  const sample = payload?.words?.[0];
   if (sample) console.log('[asr] first item:', JSON.stringify(sample));
 
   const words = normalizeToWords(payload);
@@ -79,7 +138,7 @@ async function falTranscribe(audioPath: string, options: AsrOptions): Promise<As
     throw new Error(
       `${options.model} returned no usable WORD-level timings (keys: ` +
         `${Object.keys(payload ?? {}).join(', ')}). Either the response shape differs — ` +
-        `fix normalizeToWords() — or this endpoint only does segment-level timestamps, ` +
+        `fix normalizeToWords() — or timestamps_granularity was not honoured, ` +
         `which cannot support word-level editing.`,
     );
   }
@@ -89,35 +148,41 @@ async function falTranscribe(audioPath: string, options: AsrOptions): Promise<As
   return {
     words,
     provider: options.model,
-    // Asking for verbatim does not make it so. Standard Whisper normalizes
-    // fillers away regardless, and claiming otherwise would make the filler
-    // tool look broken instead of unavailable.
+    // Still read from the declared model rather than assumed: verbatim is a
+    // property of the model, and the UI's filler warning depends on it being true.
     verbatim: declared?.verbatim ?? false,
   };
 }
 
-/** Providers disagree wildly about response shape. Accept the common ones. */
+/**
+ * Scribe's flat `words[]` is the only shape parsed now.
+ *
+ * The Whisper-family branches (`chunks`, `segments[].words`, `[start, end]`
+ * timestamp tuples) went with fal — they described providers this can no longer
+ * reach, and a fallback for a shape nothing sends is a shape nothing tests.
+ *
+ * `type` still matters: Scribe emits the whitespace BETWEEN words as its own
+ * token. Spacing carries real timings, so it survives the end > start filter and
+ * would otherwise land in the document as blank words. Audio events
+ * ([laughter], [applause]) are kept deliberately — they are timed tokens the
+ * editor can cut like any other word.
+ */
 export function normalizeToWords(payload: any): Word[] {
-  const raw: any[] =
-    payload?.chunks ??
-    payload?.words ??
-    payload?.segments?.flatMap((s: any) => s.words ?? []) ??
-    [];
+  const raw: any[] = payload?.words ?? [];
 
   return raw
     .map((item, i) => {
-      const start = Array.isArray(item.timestamp) ? item.timestamp[0] : item.start;
-      const end = Array.isArray(item.timestamp) ? item.timestamp[1] : item.end;
-      const text = (item.text ?? item.word ?? '').trim();
+      if (item.type === 'spacing') return null;
 
-      if (typeof start !== 'number' || typeof end !== 'number' || !text) return null;
+      const text = (item.text ?? '').trim();
+      if (typeof item.start !== 'number' || typeof item.end !== 'number' || !text) return null;
 
       return {
         id: `w${i}`,
         text,
-        start,
-        end,
-        speaker: item.speaker ?? item.speaker_id ?? undefined,
+        start: item.start,
+        end: item.end,
+        speaker: item.speaker_id ?? undefined,
       } satisfies Word;
     })
     .filter((w): w is Word => w !== null)

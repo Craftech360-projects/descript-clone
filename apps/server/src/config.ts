@@ -3,27 +3,35 @@ import { fileURLToPath } from 'node:url';
 /**
  * EVERY remote model id lives here and nowhere else.
  *
- * This machine has no usable GPU, so all inference is remote. That makes the
- * provider a hard dependency — and these endpoint ids and response shapes were
- * NOT verified against fal's live catalog. When one is wrong, it is wrong HERE,
- * in one line, not scattered through the codebase.
+ * This machine has no usable GPU, so transcription is remote. That makes the
+ * provider a hard dependency — so when it is wrong, it is wrong HERE, in one
+ * line, not scattered through the codebase.
+ *
+ * Verified against the live API on 2026-07-16 with a 3s flite-synthesised clip:
+ * `scribe_v1` is a real id, `timestamps_granularity: 'word'` is honoured, and
+ * the response carries `words[]` with per-word `start`/`end` in SECONDS plus
+ * `speaker_id`. `language_code` and `num_speakers` are both accepted. That is
+ * the whole assumption this product rests on, and it holds.
  */
 
-/** Transcription models the user can pick between in the Transcribe panel. */
+/** The ElevenLabs speech-to-text endpoint. One call: the body is the audio. */
+export const ASR_ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
+
+/**
+ * Transcription models the user can pick between in the Transcribe panel.
+ *
+ * Whisper and Wizper are gone with fal. They were hosted there, and reaching
+ * them now would mean a second provider and a second key — for models that
+ * report verbatim:false, i.e. that normalize away the fillers this product
+ * exists to remove. Losing them costs the product nothing it was using.
+ */
 export const ASR_MODELS = [
   {
-    id: 'fal-ai/whisper',
-    label: 'Whisper (large-v3)',
-    hint: 'Broad language coverage. Normalizes fillers away.',
-    verbatim: false,
-    verified: false,
-  },
-  {
-    id: 'fal-ai/wizper',
-    label: 'Wizper (fast Whisper)',
-    hint: 'Faster, same family.',
-    verbatim: false,
-    verified: false,
+    id: 'scribe_v1',
+    label: 'ElevenLabs Scribe',
+    hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings + diarization. Filler removal needs this.',
+    verbatim: true,
+    verified: true,
   },
   {
     id: 'mock',
@@ -36,33 +44,49 @@ export const ASR_MODELS = [
 
 export type AsrModelId = (typeof ASR_MODELS)[number]['id'];
 
-/** Phase 2/3 tools. Exposed in the UI, but honestly marked as not wired. */
-export const AI_TOOLS = [
-  { id: 'studio-sound', label: 'Studio Sound', endpoint: '', wired: false,
-    hint: 'Denoise + dereverb + enhance. Needs an audio-enhance endpoint.' },
-  { id: 'overdub', label: 'Overdub (voice clone)', endpoint: '', wired: false,
-    hint: 'Retype a word and have it spoken in the original voice. Needs a TTS endpoint.' },
-  { id: 'translate', label: 'Translate / dub', endpoint: '', wired: false,
-    hint: 'Needs a translation + cross-lingual TTS endpoint.' },
-  { id: 'clips', label: 'Find clips', endpoint: '', wired: false,
-    hint: 'LLM scores the transcript for self-contained moments.' },
-  { id: 'green-screen', label: 'Green screen', endpoint: '', wired: false,
-    hint: 'Background removal. Needs a matting endpoint.' },
-] as const;
+/**
+ * The unbuilt tools — Studio Sound, Overdub, Translate, Find clips, Green
+ * screen — used to be served to the client and rendered as five permanently
+ * disabled rows with "not wired" badges.
+ *
+ * The defence was that a button that pretends is worse than one that admits.
+ * That is half right, and it is the wrong half: the honest artifact for an
+ * unbuilt feature is a roadmap, not a disabled control shipped into the surface
+ * where every user pays its cognitive cost forever. They live in the README now.
+ * The warn-box voice stays everywhere it describes something real.
+ */
 
 export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
-  falKey: process.env.FAL_KEY ?? '',
+  elevenLabsKey: process.env.ELEVENLABS_API_KEY ?? '',
 
-  hasFal(): boolean {
-    return Boolean(this.falKey) && process.env.ASR_PROVIDER !== 'mock';
+  /** Whether real transcription is available. Without it, the mock provider runs. */
+  hasAsr(): boolean {
+    return Boolean(this.elevenLabsKey) && process.env.ASR_PROVIDER !== 'mock';
   },
 
   /**
    * fileURLToPath, not .pathname — .pathname keeps URL percent-encoding, so a
    * project path containing a space resolves to a literal "%20" directory.
+   *
+   * MEDIA_DIR overrides it so a container can point this at a mounted volume:
+   * the default sits inside the source tree, which is exactly where state must
+   * NOT live when the filesystem is ephemeral.
    */
-  mediaDir: fileURLToPath(new URL('../../../media/', import.meta.url)),
+  mediaDir: process.env.MEDIA_DIR ?? fileURLToPath(new URL('../../../media/', import.meta.url)),
+
+  /**
+   * Serve the built web app from this server when set, so one container is the
+   * whole product. Unset in dev, where Vite serves the UI and proxies /api here.
+   */
+  webDist: process.env.WEB_DIST ?? '',
+
+  /**
+   * Hard cap on an upload. The import route buffers the entire file in memory
+   * before it touches disk, so an unbounded upload is an unbounded allocation —
+   * this is the difference between a rejected request and a killed container.
+   */
+  maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 512) * 1024 * 1024,
 };
 
 /** Defaults for the Cuts panel. The user can change every one of these. */

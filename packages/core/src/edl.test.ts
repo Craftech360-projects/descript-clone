@@ -149,3 +149,42 @@ test('outputToSource inverts sourceToOutput across a cut', () => {
   assert.equal(outputToSource(edl, 1.5), 2.5);
   assert.equal(sourceToOutput(edl, outputToSource(edl, 0.75)!), 0.75);
 });
+
+/**
+ * A landmine, committed as a skipped test so the next person to reach for word
+ * reordering finds it rather than the crater.
+ *
+ * compileEdl decides where to cut with `cur.index === prev.index + 1`. That test
+ * conflates "adjacent in the document" with "adjacent in the source". The two
+ * coincide only because word order never changes today. Reorder them and the
+ * compiler concludes that consecutive array entries are contiguous audio, merges
+ * them into one range, and renders the ORIGINAL order — silently, with no error.
+ *
+ * The fix is a stable `sourceOrder` on Word, compared instead of the array index.
+ * It cannot be a timestamp comparison: the index check is what distinguishes a
+ * deletion from a pause (see edl.ts). Note the ids here are non-contiguous
+ * (w0, w2, w4) exactly as real ASR output is, so the order cannot be recovered
+ * by parsing them either.
+ */
+test.skip('LANDMINE: reordering words renders the wrong audio', () => {
+  const a: Word = { id: 'w0', text: 'A', start: 0, end: 1 };
+  const b: Word = { id: 'w2', text: 'B', start: 1, end: 2 };
+  const c: Word = { id: 'w4', text: 'C', start: 2, end: 3 };
+
+  // Document order A, C, B — the user moved C before B.
+  const reordered: Transcript = { mediaId: 'test', duration: 4, words: [a, c, b] };
+  const edl = compileEdl(reordered, NO_PAD);
+
+  // What it SHOULD be: three ranges, in document order, so the render says "A C B".
+  assert.deepEqual(
+    edl.keep,
+    [{ start: 0, end: 1 }, { start: 2, end: 3 }, { start: 1, end: 2 }],
+    'each reordered word needs its own range, emitted in document order',
+  );
+
+  // What it actually does, verified: every pair is array-adjacent, so the whole
+  // thing stays one open run and it emits a SINGLE range from the first word's
+  // start to the last word's end — [{0, 2}]. That renders "A B" and drops C
+  // entirely. Not merely the wrong order: missing audio, no error.
+  assert.notDeepEqual(edl.keep, [{ start: 0, end: 2 }], 'today: one range, C vanishes');
+});

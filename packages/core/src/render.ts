@@ -17,6 +17,26 @@ export interface RenderOptions {
   output: string;
   /** Audio-only sources skip the video chain entirely. */
   hasVideo: boolean;
+  /**
+   * Absolute path to an ASS/SRT file to burn into the picture. Omit to render
+   * clean video. Ignored when there is no video track to burn onto.
+   */
+  subtitlePath?: string;
+}
+
+/**
+ * Make a path safe to sit inside a filtergraph's subtitles=filename='...'.
+ *
+ * On Windows this is the difference between working and not. Verified against
+ * ffmpeg 8.1: the drive colon stays special even INSIDE single quotes — the
+ * plainly-quoted 'C:/x/y.ass' fails to parse, while 'C\:/x/y.ass' works. Paths
+ * containing a space are fine once quoted.
+ */
+export function escapeSubtitlePath(path: string): string {
+  return path
+    .replace(/\\/g, '/') // ffmpeg takes forward slashes on Windows and they need no escaping
+    .replace(/'/g, "'\\''") // close the quote, emit a literal ', reopen
+    .replace(/:/g, '\\:');
 }
 
 /**
@@ -27,7 +47,8 @@ export interface RenderOptions {
  * broadband click. A ~12ms fade is inaudible as a fade and removes the click.
  */
 export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
-  const { input, output, hasVideo } = options;
+  const { input, output, hasVideo, subtitlePath } = options;
+  const burnIn = Boolean(hasVideo && subtitlePath);
 
   if (edl.keep.length === 0) {
     throw new Error('Cannot render an empty EDL: every word was deleted.');
@@ -64,9 +85,19 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
     ? edl.keep.map((_, i) => `[v${i}][a${i}]`).join('')
     : concatInputs.join('');
 
+  // Burn-in happens AFTER the concat, never before. The cues are timed against
+  // the OUTPUT timeline (see toCues), so they only line up once the kept ranges
+  // are spliced together. Burning onto the source first would drift every
+  // caption by exactly the amount cut before it.
+  const videoLabel = burnIn ? '[vcat]' : '[outv]';
+
   lines.push(
-    `${ordered}concat=n=${n}:v=${v}:a=1${hasVideo ? '[outv]' : ''}[outa]`,
+    `${ordered}concat=n=${n}:v=${v}:a=1${hasVideo ? videoLabel : ''}[outa]${burnIn ? ';' : ''}`,
   );
+
+  if (burnIn) {
+    lines.push(`[vcat]subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'[outv]`);
+  }
 
   const args = [
     '-hide_banner',

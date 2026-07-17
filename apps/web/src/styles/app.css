@@ -1,0 +1,849 @@
+/**
+ * Shell layout and components.
+ *
+ * Naming: component classes are prefixed (sc- script, tl- timeline, ui- kit).
+ * This is not decoration — the file already carries a collision scar, documented
+ * in Script.tsx: a bare `.body` class collided with the shell's flex container
+ * and silently turned every word into a flex item.
+ */
+
+.boot { display: grid; place-items: center; height: 100%; color: var(--faint); }
+
+/* Flat amber, black label. The weight bump is what makes it read as primary now
+ * that there is no gradient and no glow doing it. */
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+button.primary:active:not(:disabled) { background: var(--accent-press); border-color: var(--accent-press); }
+button.primary:disabled { background: var(--chrome); border-color: var(--line); color: var(--text); }
+button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
+
+.check {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--t-ui); color: var(--dim); cursor: pointer;
+}
+.check input { accent-color: var(--accent); flex-shrink: 0; }
+
+/* ---- segmented control ----
+ * One question, three answers, 28px. This was `.radios` — a column of three
+ * rows at 70px, which in a panel this height-starved was the single most
+ * expensive way to ask a yes/no/maybe.
+ *
+ * A well holding lit segments, same as every other input here: --sunk recessed,
+ * --line edged. The checked segment is the amber tint the app already uses for
+ * "this one" (.item.on, .toggle.on), so nothing new is invented.
+ */
+.seg {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
+  gap: 2px; padding: 2px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+}
+.seg-opt {
+  position: relative;
+  display: grid; place-items: center;
+  padding: 5px var(--s-1);
+  border-radius: var(--r-1);
+  font-size: var(--t-ui); color: var(--dim);
+  cursor: pointer; text-align: center; min-width: 0;
+  transition: background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.seg-opt span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The real radio, stretched over its label and made invisible: the browser
+ * keeps arrow-key cycling, the group semantics and the hit target; the label
+ * does the painting. appearance:none so no engine draws a dot under it. */
+.seg-opt input {
+  appearance: none; -webkit-appearance: none;
+  position: absolute; inset: 0; margin: 0;
+  border-radius: inherit; cursor: pointer;
+}
+.seg-opt:hover:not(.on) { background: var(--hover); color: var(--text); }
+.seg-opt.on {
+  background: var(--selected); color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent-dim);
+}
+/* :focus-visible on the input, not :focus-within on the label — otherwise a
+ * mouse click leaves the ring behind. */
+.seg-opt:has(input:focus-visible) { box-shadow: var(--ring); }
+
+.error, .notice {
+  padding: 9px 13px; border-radius: 7px;
+  font-size: var(--t-ui); margin-bottom: 18px; cursor: pointer;
+}
+.error { background: var(--cut-bg); border: 1px solid var(--cut-line); color: var(--cut-fg); }
+.notice { background: var(--info-bg); border: 1px solid var(--info-line); color: var(--info-fg); }
+
+/* ===================== shell ===================== */
+/**
+ * Grid, with the column widths owned by React as custom properties. Splitters
+ * write --w-* directly on .app during a drag, so resizing never re-renders.
+ *
+ * The monitor holds the centre stage and the script sits in the right column —
+ * the standard NLE arrangement. The old layout had this inverted and starved
+ * the monitor to 418px while the 640px script page floated in a 947px column
+ * with ~150px of dead gutter on each side. Monitor.tsx claimed "surplus width
+ * flows here by construction"; it did not, because the rail was capped below
+ * the surplus. The stage is now ~700px wide — about 3.8x the area.
+ *
+ * The dock spans only the library and the stage: the right column runs the full
+ * height beneath the title bar. A transport that ran under the document would
+ * be claiming to transport it; it transports the picture.
+ */
+.app {
+  display: grid;
+  grid-template-columns: var(--w-library, 216px) 1px 1fr 1px var(--w-rail, clamp(480px, 40vw, 720px));
+  /* 260, not 208: the dock now carries a 54px filmstrip lane on top of the
+   * 22px ruler, and at 208 that left the waveform ~45px — a smear rather than
+   * an envelope you can read. */
+  grid-template-rows: 48px 1fr var(--h-dock, 260px);
+  grid-template-areas:
+    'title title title  title title'
+    'lib   sp1   center sp2   right'
+    'dock  dock  dock   sp2   right';
+  height: 100%;
+  background: var(--void);
+}
+
+/* ---- title bar ---- */
+.titlebar {
+  grid-area: title;
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
+  padding: 0 var(--s-4);
+  background: var(--chrome);
+  border-bottom: 1px solid var(--line);
+  position: relative; z-index: var(--z-sticky);
+}
+.tb-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* No glow. On black a 10px amber bloom around a 9px dot is a smudge twice the
+ * size of the dot, which is exactly the "AI made this" tell. */
+.tb-left .dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  flex-shrink: 0;
+}
+.tb-brand {
+  font-size: var(--t-base); font-weight: 650; letter-spacing: -.02em;
+  color: var(--text); flex-shrink: 0;
+}
+.tb-sep { width: 1px; height: 13px; background: var(--line); flex-shrink: 0; }
+.tb-name {
+  font-size: var(--t-base); font-weight: 450; letter-spacing: -.01em;
+  color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px;
+}
+.tb-mid { display: flex; gap: var(--s-1); }
+.tb-right { display: flex; align-items: center; gap: 10px; }
+.tb-right .primary { padding: 6px 16px; font-size: var(--t-ui); }
+
+/* A square box holding a 24-grid SVG. Nothing here sizes the glyph any more —
+ * the icon is geometry, so the box and the drawing agree by construction rather
+ * than by whatever Segoe UI Symbol felt like doing at 14px. */
+.icon {
+  width: 28px; height: 28px; padding: 0;
+  display: grid; place-items: center;
+  color: var(--dim);
+}
+.icon:hover:not(:disabled) { color: var(--text); }
+
+.chip {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .06em;
+  font-weight: 600;
+  color: var(--faint); border: 1px solid var(--line);
+  border-radius: var(--r-full); padding: 3px var(--s-2);
+  background: var(--sunk);
+}
+.chip.ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-bg); }
+
+.save-state {
+  font-size: var(--t-small); color: var(--faint);
+  padding: 2px var(--s-2); border-radius: var(--r-1);
+}
+.save-state.saving { color: var(--dim); }
+.save-state.saved { color: var(--ok); }
+/* --warn-fg, not --filler: "unsaved" is a caution, and --filler is now orchid
+ * because a filler word is a class of word rather than a warning. */
+.save-state.unsaved { color: var(--warn-fg); }
+.save-state.err {
+  color: var(--cut-fg); background: var(--cut-bg);
+  border: 1px solid var(--cut-line); cursor: pointer; font: inherit;
+  font-size: var(--t-small);
+}
+
+/* ---- splitters ---- */
+.splitter {
+  position: relative; z-index: var(--z-splitter);
+  background: var(--line); cursor: col-resize;
+}
+.splitter:hover, .splitter:focus-visible { background: var(--accent); }
+/* Widen the hit target without widening the line. */
+.splitter::after { content: ''; position: absolute; inset: 0 -3px; }
+.splitter.sp1 { grid-area: sp1; }
+.splitter.sp2 { grid-area: sp2; }
+
+/* ===================== left rail ===================== */
+/**
+ * This panel used to be 216px holding a single row: about 780px of pure void,
+ * which is the loudest "unfinished" signal in the whole window. It now carries
+ * the two things that are genuinely navigational — what media is open, and who
+ * is talking in it.
+ */
+.library {
+  grid-area: lib;
+  background: var(--chrome);
+  border-right: 1px solid var(--line-soft);
+  overflow-y: auto; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s-5);
+  padding: var(--s-4) 10px var(--s-5);
+}
+.lib-section { display: flex; flex-direction: column; gap: var(--s-2); }
+.lib-head { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--s-1); }
+.lib-head h3 {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700;
+}
+.lib-count { font-size: var(--t-micro); color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.import {
+  width: 22px; height: 22px; display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+  color: var(--dim);
+  background: var(--sunk);
+  transition: border-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.import:hover { border-color: var(--accent); color: var(--accent); }
+.import input { display: none; }
+
+.items { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
+.item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px var(--s-2); border-radius: var(--r-2); cursor: pointer; font-size: var(--t-ui);
+  border: 1px solid transparent;
+  transition: background var(--dur-1) var(--ease);
+}
+.item:hover { background: var(--hover); }
+.item.on {
+  background: var(--selected); border-color: var(--accent-dim);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.item .kind { color: var(--faint); flex-shrink: 0; display: flex; }
+.item.on .kind { color: var(--accent); }
+.item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .st {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); border: 1px solid var(--line); border-radius: 3px; padding: 1px var(--s-1);
+  flex-shrink: 0; font-weight: 600;
+}
+.item .st.done { color: var(--ok); border-color: var(--ok-line); }
+
+/* ---- speakers ---- */
+/**
+ * --spk-1..8 were defined in tokens.css and used by NOTHING — planned, then
+ * abandoned, exactly like the orphan `kbd` class. They are the only real colour
+ * this app has, and they come from real data (Word.speaker), so they are worth
+ * finishing rather than deleting.
+ */
+.spk-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
+.spk-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px var(--s-2); border-radius: var(--r-2);
+  font-size: var(--t-ui); color: var(--dim);
+}
+.spk-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--spk);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--spk) 16%, transparent);
+}
+/* A button, so it is reachable by keyboard — but it must not look like one. */
+.spk-name {
+  flex: 1; min-width: 0; text-align: left;
+  background: none; border: 0; box-shadow: none; padding: 0;
+  font: inherit; font-size: var(--t-ui); color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spk-name:hover:not(:disabled) { background: none; color: var(--accent); }
+.spk-count { font-size: var(--t-small); color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.lib-empty { font-size: var(--t-small); color: var(--faint); padding: 0 var(--s-1); line-height: 1.6; }
+
+/* ===================== script ===================== */
+/* Lives inside .right now, not in its own grid column. min-height:0 is what
+ * lets it scroll instead of forcing the flex column taller than the viewport. */
+.script {
+  flex: 1; min-height: 0; min-width: 0;
+  overflow-y: auto; padding: var(--s-5) var(--s-4) var(--s-6);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+/* The measure. This cap is why the monitor can grow for free: past 640px the
+ * script cannot use another pixel, so the surplus is not taken from anything. */
+.page { max-width: 640px; margin: 0 auto; }
+
+.canvas-empty { max-width: 460px; margin: 12vh auto 0; text-align: center; }
+.canvas-empty h2 { font-size: var(--t-title); font-weight: 500; margin-bottom: var(--s-1); letter-spacing: -.02em; }
+.canvas-empty p { color: var(--dim); }
+.canvas-empty .sub { margin-top: 14px; color: var(--faint); font-size: var(--t-ui); }
+
+.para {
+  display: flex; gap: var(--s-3); margin-bottom: var(--s-5);
+  /* Skip layout+paint for offscreen paragraphs while keeping them in the DOM,
+   * so native Selection, find-in-page and rect math all still work. Always
+   * paired with contain-intrinsic-size or scroll anchoring jitters. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+/* 64px, not 86: the script column is now ~600px rather than ~950, and every
+ * pixel the margin takes comes straight off the measure. */
+.speaker { width: 64px; flex-shrink: 0; text-align: right; padding-top: 5px; }
+.speaker .name {
+  display: block; font-size: var(--t-small); font-weight: 650;
+  color: var(--spk, var(--dim));
+  letter-spacing: -.005em;
+}
+.speaker .tc {
+  display: block; font-size: var(--t-micro); color: var(--faint);
+  font-variant-numeric: tabular-nums; margin-top: 1px;
+}
+
+/* NOT ".body" — that name collided with the app shell's flex container and
+ * silently turned every word into a flex item, killing spacing and wrapping. */
+.para .text {
+  flex: 1; min-width: 0;
+  font-size: var(--t-script);
+  /* 1.9 was set when every paragraph was one short sentence; combined with the
+   * 640px measure floating in a 947px column it read as a list of fragments
+   * rather than prose. 1.7 still clears descenders at 17px. */
+  line-height: 1.7;
+  letter-spacing: -.011em;
+  /* The speaker's colour, carried down the whole turn. Consecutive paragraphs
+   * from one speaker share a --spk, so the rule reads as continuous. */
+  border-left: 2px solid color-mix(in srgb, var(--spk, var(--line)) 30%, transparent);
+  padding-left: var(--s-4);
+}
+
+/* The horizontal padding draws the hover pill, and the negative margin keeps it
+ * out of the layout. Without the margin every word carries 4px of extra advance
+ * width on top of the real space, so the measure sets ~1.8x too loose and the
+ * page stops reading like prose. */
+.w {
+  cursor: text;
+  border-radius: 3px;
+  padding: 1px var(--s-0);
+  margin: 0 calc(var(--s-0) * -1);
+  transition: background var(--dur-1);
+}
+.w:hover { background: var(--active); }
+.w.filler { color: var(--filler); }
+.w.cut {
+  color: var(--ghost);
+  text-decoration: line-through;
+  /* Was hardcoded rgb(255 107 107) — the old --cut, by value. It survived two
+   * palette changes without following either of them. */
+  text-decoration-color: color-mix(in srgb, var(--cut) 75%, transparent);
+  text-decoration-thickness: 1.5px;
+}
+/* Black on amber: a highlighter on a page. --accent-fg is not optional here —
+ * white on #ffb224 measures 1.8:1. This pair measures 10.8:1. */
+.w.sel { background: var(--accent); color: var(--accent-fg); }
+/* Selected AND cut: solid rose, keeping the strike. It cannot be a dark tint —
+ * .w.sel has already committed the text to black, so the fill has to stay light
+ * enough to carry it. Measured 6.2:1. */
+.w.sel.cut { background: var(--cut-sel); }
+
+/* The space between two selected words. Without this the highlight breaks into
+ * discrete pills instead of reading as one continuous run. The padding matches
+ * .w exactly, or the join shows as a notch where the two boxes differ in height. */
+.wrap.run { background: var(--accent); padding: 1px 0; }
+/* --text, NOT --accent-fg. The karaoke highlight sits on --accent-dim (a deep
+ * amber), and --accent-fg is black — that pair measures 1.7:1, i.e. the word
+ * being spoken would have been the only unreadable word on the page. With
+ * --text it is 10.2:1. */
+.w.playing {
+  background: var(--accent-dim); color: var(--text);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* Undo has to show its work. When a sweep restores more words than we would
+ * sanely select, they pulse instead — otherwise Ctrl+Z looks like a no-op. */
+.w.flash { animation: flash var(--dur-3) var(--ease-out) 3; }
+@keyframes flash {
+  0%, 100% { background: transparent; }
+  50% { background: var(--accent-dim); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w.flash { animation: none; box-shadow: 0 0 0 1px var(--accent); }
+}
+
+/* ===================== the program monitor ===================== */
+/**
+ * The centre stage. No aspect-ratio on the stage itself: it fills whatever the
+ * grid gives it and the picture letterboxes inside, which is what a program
+ * monitor is. Forcing 16/9 here would letterbox the 4:3 source TWICE — once
+ * into the box and once by the box — and throw away most of the width we just
+ * bought.
+ */
+.monitor {
+  grid-area: center;
+  background: var(--void);
+  display: flex; flex-direction: column;
+  padding: var(--s-5) var(--s-5) var(--s-3);
+  min-height: 0; min-width: 0;
+}
+.stage {
+  flex: 1; min-height: 0; width: 100%;
+  border-radius: var(--r-3); background: #000; overflow: hidden;
+  display: grid; place-items: center;
+  box-shadow: var(--shadow-stage);
+  /* The containing block for the caption layer. */
+  position: relative;
+}
+/**
+ * Absolute, not a grid item — and that is load-bearing.
+ *
+ * `place-items: center` above stops the item stretching, which leaves the
+ * implicit grid row sized `auto`, i.e. from the video's own aspect. `height:
+ * 100%` then resolves against THAT row rather than against the stage, so at a
+ * wide monitor the element came out taller than its own container (measured:
+ * 483x361 inside a 483x348 stage) and `overflow: hidden` sliced the bottom off
+ * the picture. object-fit was innocent the whole time: it was letterboxing
+ * correctly, inside an element that had outgrown the box.
+ *
+ * inset: 0 against the position:relative stage makes the element EXACTLY the
+ * stage box at every rail width, so contain letterboxes against the real
+ * bounds — whole frame, black on the rest.
+ */
+.stage video {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  display: block; object-fit: contain;
+}
+
+/* ---- caption overlay ----
+ * Sits on the picture, not the element: the layer is positioned in JS from the
+ * letterboxed content box, so these rules must not add any offset of their own.
+ * The layer ignores the pointer so scrubbing and clicks reach the video; only
+ * the caption itself is grabbable. */
+.cap-layer { position: absolute; pointer-events: none; }
+.cap-text {
+  position: absolute;
+  /* The anchor is the CENTRE of the block — same as ASS Alignment 5 — so the
+   * point you drop is the point it centres on. */
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: grab;
+  margin: 0;
+  text-align: center;
+  line-height: 1.2;
+  font-weight: 700;
+  white-space: pre-wrap;
+  border-radius: 3px;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  outline: 1px dashed transparent;
+  outline-offset: 6px;
+  transition: outline-color 120ms ease;
+}
+.cap-text:hover { outline-color: rgba(255, 255, 255, 0.5); }
+.cap-text:active { cursor: grabbing; outline-color: var(--accent); }
+/* Nothing is on screen at this moment — this is the placement guide, not a lie
+ * about what the burn will contain. */
+/* Nothing is being said at this moment — this is the placement guide, not a
+ * claim about what the burn will contain at this frame. */
+.cap-text.ph { opacity: 0.45; }
+.stage-empty {
+  width: 100%; height: 100%;
+  display: grid; place-items: center;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-3);
+  color: var(--faint); font-size: var(--t-ui);
+}
+.stage-meta {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  margin-top: 10px; min-height: 16px; flex-shrink: 0;
+}
+
+/* ===================== right column ===================== */
+.right {
+  grid-area: right;
+  background: var(--chrome);
+  border-left: 1px solid var(--line-soft);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+}
+.dims {
+  font-size: var(--t-small); color: var(--faint);
+  font-variant-numeric: tabular-nums; letter-spacing: .01em;
+}
+.dl { color: var(--accent); font-size: var(--t-small); }
+
+/* ===================== the contextual rail ===================== */
+/**
+ * What was here: four tabs named after the engine's stages. The rail now
+ * reflects the selection instead — and with nothing selected, the context is
+ * the document itself.
+ */
+/* The script above takes the slack; the inspector takes what it needs and caps
+ * out, so a long Project panel can never squeeze the document to nothing. */
+.rail {
+  flex: 0 0 auto; max-height: 46%;
+  display: flex; flex-direction: column; min-height: 0;
+  /* The panels inside lay themselves out against the RAIL's width, not the
+   * viewport's. That width is a splitter drag away from anything between 380
+   * and 860px (App.tsx), and the drag writes --w-rail straight to CSS without a
+   * render — so a media query here would be answering the wrong question, and
+   * a JS measurement would give back the render the splitter just saved. */
+  container-type: inline-size;
+  container-name: rail;
+}
+
+.rail-head {
+  flex-shrink: 0; padding: var(--s-3) var(--s-4) 10px;
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.panel {
+  flex: 1; overflow-y: auto; padding: var(--s-4) var(--s-4) var(--s-6);
+  display: flex; flex-direction: column; gap: var(--s-5);
+}
+.panel .field > button { width: 100%; }
+
+/* ---- the Project panel's arrangement ----
+ * The rail is WIDE and SHORT: 380-860px across, but capped at 46% of the column
+ * so the document above always wins. This panel was authored the other way
+ * round — one full-width stack, the shape you write for a 280px Photoshop
+ * sidebar. It ran ~640px tall closed and ~1040 open inside ~357px of room, so
+ * it overflowed by 3x down one axis while ~300px of the other went unused. That
+ * mismatch was the whole problem; it is not fixed by making things smaller.
+ *
+ * So: two columns. Words on the left, picture on the right. Captions is the
+ * only field that can treble in height, and it holds the right column alone —
+ * which means the arrangement balances (394 vs 412) in exactly the state that
+ * hurts, and the panel barely changes height when you switch captions on.
+ *
+ * It still scrolls, and it should: the honest total is ~530px and the script is
+ * worth more than the 46% cap. The goal was a short scroll, not no scroll.
+ */
+.panel-project {
+  display: grid;
+  grid-template-columns: 1fr;
+  /* Rows pack to the top when the panel is shorter than its box. Items are
+   * left to STRETCH on purpose: a .pcol taller than its content costs nothing
+   * (it stacks its fields from the top regardless), and it is what lets the
+   * divider below run the full height of the pair instead of stopping dead
+   * wherever the shorter column happens to end. */
+  align-content: start;
+  gap: var(--s-5) var(--s-4);
+}
+.pcol { display: flex; flex-direction: column; gap: var(--s-5); min-width: 0; }
+
+/* 540, not a viewport breakpoint: below this each column falls under ~250px and
+ * "Remove 3 false starts" stops fitting on its button. The default rail is 560,
+ * so the two-column form is what you see out of the box; drag it narrower and
+ * this degrades to the single stack, in the same order. */
+@container rail (min-width: 540px) {
+  .panel-project { grid-template-columns: 1fr 1fr; }
+  .panel-project > .hero,
+  .panel-project > .advanced { grid-column: 1 / -1; }
+  /* A hairline, because on black that is what a boundary is — a 16px gap
+   * between two columns of controls is not a boundary, it is a coincidence.
+   * --line, not --line-soft: soft is for dividers inside one group, and at
+   * #171717 on #0b0b0b this one simply did not render. */
+  .pcol + .pcol { border-left: 1px solid var(--line); padding-left: var(--s-4); }
+}
+
+/* The one big number: what you are actually making. */
+.hero {
+  display: flex; flex-direction: column; gap: var(--s-0);
+  padding: var(--s-4);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+}
+.hero strong {
+  font-size: var(--t-hero); font-weight: 600;
+  font-variant-numeric: tabular-nums slashed-zero; line-height: 1.1;
+  letter-spacing: -.03em;
+}
+.hero small { font-size: var(--t-small); color: var(--faint); }
+
+/* ---- the Project hero: the number, then the facts that qualify it ----
+ * Four stacked lines in a 560px well. The number keeps the left, the stats take
+ * the right, and the well stops being mostly air. Wraps rather than crushes,
+ * because the rail goes to 380. */
+.hero.stat { flex-direction: row; align-items: center; flex-wrap: wrap; gap: var(--s-3) var(--s-4); }
+.hero-main { display: flex; flex-direction: column; gap: var(--s-0); flex-shrink: 0; }
+.hero-stats {
+  display: flex; gap: var(--s-5);
+  margin-left: auto;
+}
+.hero-stats > div { display: flex; flex-direction: column; gap: var(--s-0); }
+.hero-stats dt {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .07em;
+  color: var(--faint); font-weight: 700;
+}
+.hero-stats dd {
+  font-size: var(--t-base); color: var(--text);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+/* "of 400" is the denominator, not the reading. */
+.hero-stats .of { color: var(--faint); }
+
+/* ===================== progress ===================== */
+.progress {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding: var(--s-3); background: var(--sunk);
+  border: 1px solid var(--line); border-radius: var(--r-3);
+}
+.pg-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
+.pg-stage { font-size: var(--t-ui); color: var(--text); }
+.pg-pct { font-size: var(--t-ui); color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* The inset shadow is gone: it was black-on-black. The track is a hairline. */
+.pg-track {
+  height: 5px; border-radius: var(--r-full);
+  background: var(--void); overflow: hidden;
+  border: 1px solid var(--line-soft);
+}
+.pg-fill {
+  height: 100%; background: var(--accent);
+  border-radius: var(--r-full);
+  transition: width var(--dur-2) var(--ease-out);
+}
+/* Indeterminate is not decoration — it is the honest shape for work that cannot
+ * report a fraction, like waiting in someone else's queue. */
+.pg-fill.indeterminate {
+  width: 35%;
+  animation: slide 1.2s var(--ease) infinite;
+  transition: none;
+}
+@keyframes slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(386%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pg-fill.indeterminate { animation: none; width: 100%; opacity: .4; }
+}
+.pg-cancel { align-self: flex-start; font-size: var(--t-small); padding: 4px var(--s-2); }
+
+/* ===================== dialogs ===================== */
+.dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-4);
+  background: var(--raised); color: var(--text);
+  box-shadow: var(--shadow-3);
+}
+.dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
+
+.dl-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s-4);
+  border-bottom: 1px solid var(--line);
+}
+.dl-head h2 { font-size: var(--t-lg); font-weight: 600; letter-spacing: -.015em; }
+
+.dl-body {
+  padding: var(--s-4);
+  display: flex; flex-direction: column; gap: var(--s-5);
+  max-height: min(70vh, 640px); overflow-y: auto;
+}
+.dl-body .field > button { width: 100%; }
+.dl-sub { font-size: var(--t-ui); color: var(--faint); }
+
+.dl-foot {
+  display: flex; justify-content: flex-end; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--line); background: var(--chrome);
+  border-radius: 0 0 var(--r-4) var(--r-4);
+}
+
+.field { display: flex; flex-direction: column; gap: var(--s-2); }
+.field h3 {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700;
+}
+
+.hint { font-size: var(--t-small); line-height: 1.6; color: var(--faint); }
+.empty-panel { font-size: var(--t-ui); color: var(--faint); }
+
+/* Honest, not decorative: this is where the app admits what it does not know. */
+.warn-box {
+  font-size: var(--t-small); line-height: 1.6;
+  background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-fg);
+  padding: var(--s-2) 10px; border-radius: var(--r-2);
+}
+
+.slider { display: flex; flex-direction: column; gap: var(--s-1); }
+.slider span { font-size: var(--t-small); color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* A swatch, a name, and the hex — the hex because "which black is that" is a
+ * real question once a stroke and a backdrop are both in play. */
+.color-row {
+  display: flex; align-items: center; gap: var(--s-2);
+  font-size: var(--t-ui); color: var(--dim); cursor: pointer;
+}
+.color-row input[type='color'] {
+  width: 28px; height: 22px; flex-shrink: 0; padding: 0;
+  background: none; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+}
+.color-row span { flex: 1; }
+.color-row code {
+  font-size: var(--t-micro); color: var(--faint);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
+}
+
+/* Engine internals live here. Native <details>: full keyboard + SR support, no JS. */
+.advanced { border-top: 1px solid var(--line); padding-top: var(--s-3); }
+.advanced summary {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700; cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: var(--s-1);
+}
+.advanced summary::-webkit-details-marker { display: none; }
+/* A drawn triangle, not the ▸ glyph — same reason as ui/Icon.tsx. Borders give
+ * exact geometry at any size and depend on no font at all. */
+.advanced summary::before {
+  content: ''; width: 0; height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--dur-1) var(--ease);
+}
+.advanced[open] summary::before { transform: rotate(90deg); }
+.advanced summary:hover { color: var(--dim); }
+/* Advanced spans the full panel, so its two fields sit side by side there
+ * rather than adding another ~260px to the scroll. Single column when the rail
+ * is narrow — see the container query above. */
+.adv-grid {
+  display: grid; grid-template-columns: 1fr;
+  gap: var(--s-4);
+  margin-top: var(--s-3);
+}
+/* Must live HERE, after the base rule, not up with the other rail queries: a
+ * container query carries no extra specificity, so from further up the file the
+ * single-column default below it simply won out and this never applied. */
+@container rail (min-width: 540px) {
+  .adv-grid { grid-template-columns: 1fr 1fr; align-items: start; }
+}
+
+.readout {
+  display: flex; justify-content: space-between;
+  font-size: var(--t-small); color: var(--dim);
+  padding: 9px 10px; background: var(--sunk); border-radius: var(--r-2);
+  border: 1px solid var(--line-soft);
+}
+.readout.big { flex-direction: column; gap: var(--s-0); }
+.readout.big span { font-size: var(--t-title); color: var(--text); font-variant-numeric: tabular-nums; }
+.readout.big small { color: var(--faint); }
+
+.tool {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 9px 0; border-bottom: 1px solid var(--line-soft);
+}
+.tool-head { display: flex; align-items: center; justify-content: space-between; }
+.tool-head strong { font-size: var(--t-ui); font-weight: 550; }
+.badge {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); border: 1px solid var(--line); border-radius: 3px; padding: 1px var(--s-1);
+  font-weight: 600;
+}
+
+/* ===================== transport ===================== */
+/**
+ * The transport lives in the dock, not the title bar. That is where it survives
+ * every layout permutation: hide the monitor, hide the script, collapse the
+ * waveform — the transport is still here, because it is the one control that
+ * must never go away.
+ */
+.transport {
+  display: flex; align-items: center; gap: var(--s-4);
+  padding: 0 var(--s-4); height: 52px;
+  border-bottom: 1px solid var(--line-soft); flex-shrink: 0;
+  background: var(--chrome);
+}
+.tp-buttons { display: flex; align-items: center; gap: var(--s-1); }
+/* Solid amber disc, black triangle. The old one was a gradient plus a coloured
+ * bloom; on black the bloom was most of what you saw. */
+.play {
+  width: 36px; height: 36px; border-radius: var(--r-full);
+  display: grid; place-items: center; padding: 0;
+  background: var(--accent);
+  border-color: var(--accent); color: var(--accent-fg);
+}
+.play:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.play:active:not(:disabled) { background: var(--accent-press); border-color: var(--accent-press); }
+.play:disabled { background: var(--chrome); border-color: var(--line); color: var(--text); }
+
+.tp-clock { display: flex; align-items: baseline; gap: var(--s-2); }
+.tp-clock .tc {
+  font-size: var(--t-title); font-weight: 500;
+  font-variant-numeric: tabular-nums slashed-zero;
+  color: var(--text); min-width: 74px; letter-spacing: -.02em;
+}
+.tc-total { font-size: var(--t-ui); color: var(--faint); font-variant-numeric: tabular-nums; }
+/* Which timeline the clock is speaking. Without this the number is ambiguous. */
+.tc-space {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .07em;
+  color: var(--faint); border: 1px solid var(--line); font-weight: 600;
+  border-radius: var(--r-1); padding: 1px var(--s-1); background: var(--sunk);
+}
+
+.tp-toggles { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
+.toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: var(--t-small); padding: 5px 10px;
+  color: var(--dim); background: var(--sunk);
+}
+.toggle.on {
+  background: var(--selected); border-color: var(--accent); color: var(--text);
+}
+.toggle.on svg { color: var(--accent); }
+/* Rose, not orchid: this number is how much the edit REMOVES, so it belongs to
+ * the cut family. It read as --filler only because --filler used to be amber. */
+.tp-saved {
+  font-size: var(--t-small); color: var(--cut-fg);
+  font-variant-numeric: tabular-nums; margin-left: var(--s-2);
+}
+
+/* ===================== timeline ===================== */
+/* The lifting shadow is gone — it was black smoke on a black wall, costing a
+ * paint to render nothing. The border-top is the whole separation. */
+.tl {
+  grid-area: dock;
+  background: var(--chrome); border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+}
+
+.tl-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+.tl-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s-1) var(--s-4);
+  border-bottom: 1px solid var(--line-soft); flex-shrink: 0;
+}
+.tl-range { font-size: var(--t-small); color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.tl-zoom { display: flex; gap: var(--s-1); }
+.tl-zoom button {
+  min-width: 26px; height: 24px; padding: 0 var(--s-2);
+  font-size: var(--t-small); line-height: 1;
+  display: grid; place-items: center;
+  color: var(--dim);
+}
+.tl-zoom button:hover:not(:disabled) { color: var(--text); }
+
+/* The canvas host. Two layers stacked: a static waveform+ruler that repaints
+ * only on view/edit change, and an overlay that repaints per frame. */
+.tl-canvas {
+  position: relative; flex: 1; min-height: 0;
+  cursor: text; touch-action: none; /* touch-action: the pointer drag is ours */
+  background: var(--void);
+}
+.tl-layer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.tl-overlay { pointer-events: none; }

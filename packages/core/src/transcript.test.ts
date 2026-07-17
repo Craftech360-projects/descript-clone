@@ -33,6 +33,29 @@ test('detectFillers does not treat "like" as a filler', () => {
   assert.equal(detectFillers(t), 0, 'removing these would change the meaning');
 });
 
+test('detectFillers catches hesitations held for any length', () => {
+  // A verbatim model spells the sound as long as it was held. A fixed list
+  // stops somewhere; these all have to match regardless of how many letters.
+  const t = fromText('um umm ummmm uh uhh uhhhhh uhm erm hmmm mmm ahh eh');
+  assert.equal(detectFillers(t), t.words.length, 'every one is a hesitation');
+});
+
+test('detectFillers survives punctuation and casing from real ASR output', () => {
+  const t = fromText('Um, I think... Uh! yes Mm.');
+  detectFillers(t);
+  assert.deepEqual(
+    t.words.filter((w) => w.isFiller).map((w) => w.text),
+    ['Um,', 'Uh!', 'Mm.'],
+  );
+});
+
+test('detectFillers leaves real words that look like hesitations alone', () => {
+  // "uh-huh" and "mm-hmm" mean yes; "hum"/"harm"/"ohm" are ordinary words.
+  // Losing any of these to an over-eager pattern would corrupt the edit.
+  const t = fromText('uh-huh I hum a tune to harm no one at one ohm aha amen');
+  assert.equal(detectFillers(t), 0);
+});
+
 test('discourse markers are opt-in, not default', () => {
   const t = fromText('it was you know pretty good');
   assert.equal(detectFillers(t), 0);

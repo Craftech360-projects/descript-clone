@@ -194,6 +194,31 @@ export type PlayStep =
  */
 export const LOOKAHEAD = 0.03;
 
+/**
+ * How early to jump when playing at `rate`.
+ *
+ * The lookahead is not a taste value, it is a race margin: the loop is only
+ * asked once per animation frame, so it must notice a boundary at least one
+ * frame's worth of travel before it arrives. Travel per frame is 16.7ms x rate —
+ * so at 2x the playhead moves 33ms between questions and a fixed 30ms lookahead
+ * is already too late. It would sail past the boundary, and playStep would catch
+ * it on the far side as "not in kept audio" and jump from there: self-correcting,
+ * but only after leaking a frame of the audio the edit removed. That is the exact
+ * bug the rAF loop was written to kill, coming back at speed.
+ *
+ * Scaling keeps the margin at a constant ~1.8 frames, whatever the rate.
+ *
+ * The cost, stated plainly: compileEdl pads each range by 40ms, and the 30ms
+ * default was chosen to sit inside that padding — so leaving early costs nothing
+ * that was not padding anyway. That stops being true above 1.33x, where the
+ * lookahead exceeds the pad and starts clipping real audio: 20ms of it at the 2x
+ * limit. Losing 20ms of a word's tail at double speed is the cheaper of the two,
+ * and it is bounded by MAX_SPEED.
+ */
+export function lookaheadFor(rate: number): number {
+  return LOOKAHEAD * rate;
+}
+
 /** Below this, two ranges touch: a "cut" between them is not really a cut. */
 const CONTIGUOUS = 0.001;
 

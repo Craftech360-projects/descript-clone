@@ -1,0 +1,42 @@
+{
+  "name": "transcript-editor",
+  "productName": "Transcript Editor",
+  "version": "0.1.0",
+  "description": "Edit video and audio by editing the transcript.",
+  "author": "You <you@example.com>",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2"
+  },
+  "build": {
+    "appId": "com.example.transcript-editor",
+    "productName": "Transcript Editor",
+    "directories": { "output": "dist" },
+    "files": ["main.cjs", "package.json"],
+    "extraResources": [{ "from": "resources", "to": "." }],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**",
+      "node_modules/ffprobe-static/**"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

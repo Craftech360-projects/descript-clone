@@ -92,9 +92,10 @@ export async function generate(
   ];
 
   await new Promise<void>((resolve, reject) => {
-    // Bare 'ffmpeg' + windowsHide, matching ffmpeg.ts — there is no configured
-    // path; the binary is resolved off PATH and checkTools() reports its absence.
-    const child = spawn('ffmpeg', args, { windowsHide: true });
+    // CONFIG.ffmpegPath + windowsHide, matching ffmpeg.ts: a bare name off PATH
+    // in dev/Docker, the shipped binary in the desktop build. checkTools() still
+    // reports its absence before any traffic arrives.
+    const child = spawn(CONFIG.ffmpegPath, args, { windowsHide: true });
     hooks.onSpawn?.(child);
 
     let stderr = '';

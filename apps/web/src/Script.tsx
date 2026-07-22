@@ -11,7 +11,8 @@ interface Props {
   showDeleted: boolean;
   /** speaker → `var(--spk-N)`. See speakers.ts for why order, not hash. */
   colors: Map<string | undefined, string>;
-  onWordClick: (index: number, shift: boolean) => void;
+  /** `clicks` is the native detail count — 2 means this is half of a double. */
+  onWordClick: (index: number, shift: boolean, clicks: number) => void;
   onWordDoubleClick: (index: number) => void;
   onBackgroundClick: () => void;
 }
@@ -43,7 +44,19 @@ export default function Script({
   const indexOf = new Map(transcript.words.map((w, i) => [w.id, i]));
 
   return (
-    <div className="page" onMouseDown={(e) => e.target === e.currentTarget && onBackgroundClick()}>
+    // Anything on the page that is not a word clears the selection.
+    //
+    // This was `e.target === e.currentTarget`, which meant ONLY the bare .page
+    // div counted as background — in practice just the 24px gaps between
+    // paragraphs. Clicking the end of a line, the speaker margin, or the space
+    // between two words hit .text/.speaker/.wrap and did nothing at all, so a
+    // selection read as stuck to the page: measured, 3 of the 5 obvious "empty"
+    // spots were dead. Escape worked, but a keyboard-only escape hatch is not
+    // one most people will find.
+    <div
+      className="page"
+      onMouseDown={(e) => !(e.target as HTMLElement).closest('.w') && onBackgroundClick()}
+    >
       {paragraphs.map((para, p) => {
         const previous = paragraphs[p - 1];
         return (
@@ -135,7 +148,7 @@ const Para = memo(function Para({
             <span key={word.id} data-wid={word.id} className={runsOn ? 'wrap run' : 'wrap'}>
               <span
                 className={className(word, i === playingIndex, selected, flash.has(word.id))}
-                onClick={(e) => onWordClick(i, e.shiftKey)}
+                onClick={(e) => onWordClick(i, e.shiftKey, e.detail)}
                 onDoubleClick={() => onWordDoubleClick(i)}
               >
                 {word.text}

@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 
 import {
   buildWordPatch,
+  clampSpeed,
   docFromTranscript,
   isEmptyPatch,
   type CutSettings,
@@ -115,10 +116,11 @@ export function loadDoc(
   transcript: Transcript,
   cut: CutSettings,
   captions?: CaptionSettings,
+  speed?: number,
 ): void {
   savedRev = 0;
   set({
-    doc: docFromTranscript(transcript, cut, captions),
+    doc: docFromTranscript(transcript, cut, captions, clampSpeed(speed)),
     history: emptyHistory(),
     selection: null,
     flash: [],
@@ -246,6 +248,30 @@ function commitCut(cut: CutSettings): void {
   const { doc } = state;
   if (!doc) return;
   apply({ kind: 'cut', prev: doc.cut, next: cut }, { label: 'Change edit settings' });
+}
+
+// ── speed ─────────────────────────────────────────────────────────────────────
+
+/**
+ * No transient/commit split here, unlike the cut sliders and the caption drag.
+ *
+ * Those two need one because they are driven by a CONTINUOUS gesture — a drag
+ * fires ~40 times and would push 40 undo steps. Speed is picked from a ladder:
+ * one discrete choice, one history entry, nothing to coalesce. The pair of
+ * begin/end functions would be dead weight that only ever wrapped a single call.
+ */
+export function updateSpeed(speed: number): void {
+  const { doc } = state;
+  if (!doc) return;
+  apply(
+    { kind: 'speed', prev: doc.speed, next: clampSpeed(speed) },
+    { label: `Speed ${formatSpeed(speed)}` },
+  );
+}
+
+/** 1.2x, not 1.2000x — and 1x, not 1.0x. */
+export function formatSpeed(speed: number): string {
+  return `${Number(speed.toFixed(2))}x`;
 }
 
 // ── caption style ─────────────────────────────────────────────────────────────

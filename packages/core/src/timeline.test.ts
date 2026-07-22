@@ -7,6 +7,8 @@ import {
   clampZoom,
   KEPT,
   CUT,
+  LOOKAHEAD,
+  lookaheadFor,
   playStep,
   snap,
   sourceMap,
@@ -252,4 +254,36 @@ test('snap picks the nearest target', () => {
   const map = sourceMap(10, 0, 100);
   assert.equal(snap(10.2, [10, 10.5], map, 8), 10.2 - 0.2, 'nearest wins');
   assert.equal(snap(99, [10, 20], map, 8), 99, 'nothing in range leaves the time alone');
+});
+
+// ── lookahead vs. playback rate ───────────────────────────────────────────────
+
+test('the lookahead outruns the playhead at every supported speed', () => {
+  // The invariant: the loop is asked once per animation frame, so it must look
+  // further ahead than the playhead can travel between two of them. Fail this
+  // and playStep sails past the boundary and leaks cut audio for a frame.
+  const FRAME = 1 / 60;
+  for (const rate of [0.5, 1, 1.2, 1.5, 2]) {
+    const travelPerFrame = FRAME * rate;
+    assert.ok(
+      lookaheadFor(rate) > travelPerFrame,
+      `${rate}x travels ${(travelPerFrame * 1000).toFixed(1)}ms/frame but looks ` +
+        `${(lookaheadFor(rate) * 1000).toFixed(1)}ms ahead`,
+    );
+  }
+});
+
+test('a fixed lookahead would NOT survive 2x — this is why it scales', () => {
+  // The regression this guards: LOOKAHEAD is 30ms, and at 2x the playhead moves
+  // 33ms per frame. Hard-coding the constant would be one frame too slow.
+  assert.ok(LOOKAHEAD < (1 / 60) * 2, 'the unscaled constant is genuinely too small at 2x');
+  assert.equal(lookaheadFor(1), LOOKAHEAD, '1x is unchanged from before speed existed');
+});
+
+test('playStep jumps earlier at speed, and at the same place', () => {
+  const edl: Edl = { sourceDuration: 10, keep: [{ start: 0, end: 5 }, { start: 8, end: 10 }], fadeMs: 12 };
+
+  // 4.95 is inside the 2x lookahead (60ms) but outside the 1x one (30ms).
+  assert.deepEqual(playStep(edl, 4.95, lookaheadFor(1)), { action: 'continue' });
+  assert.deepEqual(playStep(edl, 4.95, lookaheadFor(2)), { action: 'seek', to: 8, silent: true });
 });

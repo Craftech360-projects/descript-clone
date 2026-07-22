@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import Icon from '../ui/Icon.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import { outputDuration, sourceToOutput } from '../../../../packages/core/src/edl.ts';
+import { SPEEDS } from '../../../../packages/core/src/doc.ts';
+import { formatSpeed } from '../store/editor.ts';
 import type { Edl } from '../../../../packages/core/src/types.ts';
 
 interface Props {
@@ -13,6 +15,8 @@ interface Props {
   setFollowEdit: (v: boolean) => void;
   showDeleted: boolean;
   setShowDeleted: (v: boolean) => void;
+  speed: number;
+  setSpeed: (v: number) => void;
   onPlayPause: () => void;
   onStep: (direction: -1 | 1) => void;
   onHome: () => void;
@@ -41,6 +45,8 @@ export default function Transport({
   setFollowEdit,
   showDeleted,
   setShowDeleted,
+  speed,
+  setSpeed,
   onPlayPause,
   onStep,
   onHome,
@@ -48,8 +54,28 @@ export default function Transport({
 }: Props) {
   const clockRef = useRef<HTMLSpanElement>(null);
 
-  const outDuration = edl ? outputDuration(edl) : duration;
+  /**
+   * Speed divides the EDIT clock and nothing else.
+   *
+   * In edit space the clock is quoting the file you are about to download, and
+   * that file is `speed` times shorter — so both the position and the total have
+   * to be divided, or they would describe a render nobody is going to get.
+   *
+   * Source space is deliberately left alone. There, the number is the playhead's
+   * position in the original media, which does not move because you chose to play
+   * it faster; dividing it would make the clock disagree with the timeline right
+   * below it, which is drawn in source seconds.
+   */
+  const outDuration = edl ? outputDuration(edl, speed) : duration;
   const total = followEdit && edl ? outDuration : duration;
+
+  // A <select> whose value is not among its options renders BLANK, and an
+  // off-ladder speed is reachable: the API clamps to [0.5, 2] but does not snap,
+  // so a project saved by a script can hold 1.3. Show it rather than showing an
+  // empty control that appears broken.
+  const options: readonly number[] = (SPEEDS as readonly number[]).includes(speed)
+    ? SPEEDS
+    : [...SPEEDS, speed].sort((a, b) => a - b);
 
   useEffect(() => {
     const el = clockRef.current;
@@ -61,7 +87,8 @@ export default function Transport({
       const source = getCurrentTime();
       // Inside a cut, sourceToOutput returns null — hold the last known output
       // position rather than blanking the clock.
-      const shown = followEdit && edl ? sourceToOutput(edl, source) : source;
+      const output = followEdit && edl ? sourceToOutput(edl, source) : null;
+      const shown = followEdit && edl ? (output === null ? null : output / speed) : source;
       const text = shown === null ? last : timecode(shown, { ms: false });
       if (text !== last) {
         el.textContent = text;
@@ -71,7 +98,7 @@ export default function Transport({
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [getCurrentTime, followEdit, edl]);
+  }, [getCurrentTime, followEdit, edl, speed]);
 
   return (
     <div className="transport">
@@ -96,6 +123,39 @@ export default function Transport({
         <span className="tc-space">{followEdit && edl ? 'edit' : 'source'}</span>
       </div>
 
+      {/*
+        * A menu, not a row of toggles like its neighbours on the right.
+        *
+        * Seven mutually exclusive values is too many to spend a transport bar's
+        * width on, and speed is the one control every player already hides behind
+        * exactly this. Native <select>: it is a real listbox on every platform,
+        * keyboard and screen reader included, and this app has no popover to
+        * borrow.
+        *
+        * It sits by the clock rather than with the view toggles because it is not
+        * one. "Preview edit" and "Show cuts" change what you are looking at;
+        * this changes what you are going to ship — hence the title.
+        */}
+      <label className="tp-speed">
+        <select
+          className={speed === 1 ? undefined : 'fast'}
+          aria-label="Playback and export speed"
+          title="Speed. This is part of the edit — the render comes out at this speed too."
+          value={speed}
+          // Not the bar's own `disabled`, which only means "no project". Speed
+          // lives on the DOCUMENT, so there is nowhere to put it until a script
+          // exists — while play and step still work on untranscribed media.
+          disabled={disabled || !edl}
+          onChange={(e) => setSpeed(Number(e.target.value))}
+        >
+          {options.map((s) => (
+            <option key={s} value={s}>
+              {formatSpeed(s)}
+            </option>
+          ))}
+        </select>
+      </label>
+
       <div className="tp-toggles">
         {/* Checkboxes in a transport bar are the dev-app tell. These are toggles. */}
         <button
@@ -115,9 +175,16 @@ export default function Transport({
         >
           Show cuts
         </button>
+        {/* Speed counts toward this now, so it can go the other way: at 0.5x the
+          * output is LONGER than the source, and a rose "−0:00" would be a lie
+          * told twice. */}
         {edl && (
-          <span className="tp-saved" title="How much the edit removes">
-            −{timecode(Math.max(0, duration - outDuration))}
+          <span
+            className={duration >= outDuration ? 'tp-saved' : 'tp-saved longer'}
+            title="How much shorter the edit makes it, speed included"
+          >
+            {duration >= outDuration ? '−' : '+'}
+            {timecode(Math.abs(duration - outDuration))}
           </span>
         )}
       </div>

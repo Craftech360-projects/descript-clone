@@ -22,35 +22,47 @@ dependencies and touches no I/O.
 
 ---
 
-## 2. The one thing that will surprise you: render cost is O(segments × duration)
+## 2. Render cost is O(output duration), and flat in the cut count
 
-Not O(output duration). This is the most important fact for capacity planning.
+It did not used to be, and the difference is why the desktop build used to die
+mid-export. Worth understanding before sizing anything.
 
-`buildRenderPlan` emits one `trim` chain per kept range, all fed from the same
-input label:
+`buildRenderPlan` cuts each stream in **one linear pass**:
 
 ```
-[0:v]trim=start=1.2:end=3.4,setpts=PTS-STARTPTS[v0];
-[0:v]trim=start=5.1:end=9.8,setpts=PTS-STARTPTS[v1];
-...
-[v0][a0][v1][a1]...concat=n=N:v=1:a=1[outv][outa]
+[0:v]select='between(t,1.2,3.4)+between(t,5.1,9.8)+...',setpts=N/FR/TB[outv];
+[0:a]afade=...:enable='...',...,asetnsamples=n=64:p=0,aselect='...',asetpts=N/SR/TB[outa]
 ```
 
-Reusing `[0:v]` N times makes ffmpeg **implicitly split the decoded stream N
-ways**. Each of the N trim chains then sees *every frame* of the source and
-discards the ones outside its window. So:
+The graph it replaced emitted one `trim`/`atrim` chain per kept range and spliced
+them with `concat`. Reusing `[0:v]` N times makes ffmpeg **implicitly split the
+decoded stream N ways**, and `concat` drains branch 0 to exhaustion before it
+reads branch 1 — so branches 1..N-1 queue their decoded frames in RAM with
+nothing bounding the queue. Measured on the 885s 720p sample:
 
-- Decode happens once, but **filtering is N × full-stream**.
-- `concat` needs all N inputs live, so buffering grows with N.
-- A 10-min 1080p video with **5 cuts** renders quickly.
-- The same video with **400 cuts** — a realistic filler-removal pass — does
-  roughly 400× the filter work. This is the difference between seconds and
-  "did it hang?".
+| Graph | Peak RSS | Wall clock |
+|---|---|---|
+| `trim` × N + concat, **6 cuts** | 2.9 GB after 45s, still climbing | never finished — tens of GB wanted |
+| `trim` × N + concat, 40 cuts | 1.6 GB | 68s |
+| **select/aselect, 40 cuts** | **324 MB** | **56s** |
+| **select/aselect, 400 cuts** | **324 MB** | **120s** |
 
-Removing every "um" from an hour-long podcast is exactly the case that produces
-hundreds of segments. **Test that case before sizing.** If it is too slow, the
-fix is the concat demuxer (segment to temp files, concat losslessly) or
-`select`/`aselect` with a single expression — both replace N chains with one.
+`select` decides frame by frame as the stream goes past, so exactly one frame is
+in flight regardless of cut count, and memory is flat.
+
+Two ordering constraints inside that audio chain are load-bearing, both in
+`render.ts` with the measurements attached:
+
+- `asetnsamples=n=64` exists because `aselect` drops **whole frames**, and a
+  decoder hands out ~1024 samples (21ms) at a time — enough slop per cut to walk
+  audio off the picture.
+- It must come **after** the fades. Re-framing multiplies the frame count by 16
+  and everything downstream pays that per frame: ahead of the 2N fades it cost
+  905s at 400 cuts, behind them ~60s.
+
+Filler removal on an hour of podcast is what produces hundreds of segments, so
+**still test that case before sizing** — but it is now a duration problem, not a
+segment-count one.
 
 ---
 
@@ -74,7 +86,8 @@ changes (`-c:v h264_nvenc`).
   why `MAX_UPLOAD_MB` exists; the default 512 assumes ≥4 GB RAM.
 - `computePeaks` buffers the whole decoded 8 kHz mono PCM in RAM: ~57 MB/hour of
   media, all at once.
-- x264 at 1080p `veryfast` sits around 300–600 MB, plus the concat buffering above.
+- x264 at 1080p `veryfast` sits around 300–600 MB. That is now the whole render
+  cost — the filtergraph's own buffering is flat and small (see §2).
 - `store.ts` caches **every project in a `Map` that never evicts**. Transcripts
   and peaks accumulate for the process lifetime. Restarts are currently your GC.
 
@@ -228,7 +241,7 @@ POST /api/projects/:id/render
 
 **Synchronous — it blocks until ffmpeg exits.** See blocker #2.
 
-Burn-in is video-only and post-concat (burning before would drift every caption by
+Burn-in is video-only and applied after the cut (burning before would drift every caption by
 the amount cut before it). `captionsSkipped: true` means you asked for captions on
 an audio-only project. `renderMs` is your measurement hook — use it.
 

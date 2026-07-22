@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileEdl, outputDuration, sourceToOutput, outputToSource } from './edl.ts';
+import { compileEdl, outputDuration, sourceToOutput, outputToSource, splicePoints } from './edl.ts';
 import type { Transcript, Word } from './types.ts';
 
 /** "hello"(0-1) "there"(1-2) "world"(2-3) — one word per second, no pauses. */
@@ -69,6 +69,44 @@ test('maxGapMs shortens a long pause, leaving half the allowance each side', () 
   assert.equal(outputDuration(edl), 3);
 });
 
+test('a pause is left alone when shortening it would not pay for the cut', () => {
+  // A 620ms gap at a 500ms cap. Splitting saves 120ms of silence — and costs a
+  // seek that freezes the picture for ~116ms (measured) plus a micro-fade each
+  // side. The preview ends up glitchier than if nothing had been cut.
+  const t = transcript([
+    ['hello', 0, 1],
+    ['world', 1.62, 2.5],
+  ]);
+  const edl = compileEdl(t, { padMs: 40, mergeWithinMs: 20, maxGapMs: 500, minTrimMs: 250 });
+  assert.equal(edl.keep.length, 1, 'not worth a cut: leave the pause');
+});
+
+test('a pause IS shortened once the saving covers the cut', () => {
+  // Same cap, but a 2s gap: 1420ms of dead air comes out after padding. Worth it.
+  const t = transcript([
+    ['hello', 0, 1],
+    ['world', 3, 4],
+  ]);
+  const edl = compileEdl(t, { padMs: 40, mergeWithinMs: 20, maxGapMs: 500, minTrimMs: 250 });
+  assert.equal(edl.keep.length, 2, 'a 2s pause at a 500ms cap must still be cut');
+});
+
+test('minTrimMs never spares a deletion, however small the hole', () => {
+  // The hole here is 20ms of a word the user deleted. minTrim governs pauses,
+  // not deletions: leaving this in would play back a word that was cut.
+  const t = transcript([
+    ['keep', 0, 1],
+    ['um', 1, 1.02, true],
+    ['keep', 1.02, 2],
+  ]);
+  const edl = compileEdl(t, { padMs: 0, mergeWithinMs: 0, maxGapMs: 500, minTrimMs: 250 });
+  assert.deepEqual(
+    edl.keep,
+    [{ start: 0, end: 1 }, { start: 1.02, end: 2 }],
+    'a deleted word must be cut regardless of how little time it saves',
+  );
+});
+
 test('gaps shorter than maxGapMs are left alone', () => {
   const t = transcript([
     ['hello', 0, 1],
@@ -125,6 +163,30 @@ test('padding that closes a gap merges the ranges instead of emitting a zero-len
   ]);
   const edl = compileEdl(t, { padMs: 40, mergeWithinMs: 20 });
   assert.equal(edl.keep.length, 1, 'the pads overlap, so this is one range, not two');
+});
+
+test('splicePoints marks where the picture cuts, on the output timeline', () => {
+  // One cut, at the join between the two kept ranges. It must be reported in
+  // OUTPUT time — captions use it to tell a seam from a silence, and they are
+  // timed on the output.
+  const t = transcript([
+    ['a', 0, 1],
+    ['b', 1, 2, true],
+    ['c', 2, 3],
+  ]);
+  const edl = compileEdl(t, NO_PAD);
+
+  assert.equal(edl.keep.length, 2);
+  assert.deepEqual(splicePoints(edl), [1], 'the cut lands 1s into the render');
+  assert.equal(splicePoints(edl).length, edl.keep.length - 1);
+});
+
+test('an uncut EDL has no splice points', () => {
+  const t = transcript([
+    ['a', 0, 1],
+    ['b', 1, 2],
+  ]);
+  assert.deepEqual(splicePoints(compileEdl(t, NO_PAD)), []);
 });
 
 test('sourceToOutput returns null for cut material and remaps kept material', () => {
@@ -187,4 +249,21 @@ test.skip('LANDMINE: reordering words renders the wrong audio', () => {
   // start to the last word's end — [{0, 2}]. That renders "A B" and drops C
   // entirely. Not merely the wrong order: missing audio, no error.
   assert.notDeepEqual(edl.keep, [{ start: 0, end: 2 }], 'today: one range, C vanishes');
+});
+
+test('speed divides the output duration', () => {
+  const t = transcript([
+    ['hello', 0, 1],
+    ['umm', 1, 2, true],
+    ['world', 2, 3],
+  ]);
+  const edl = compileEdl(t, NO_PAD);
+
+  assert.equal(outputDuration(edl), 2, 'the cut alone leaves 2s');
+  assert.equal(outputDuration(edl, 1), 2, 'an explicit 1x is the default');
+  assert.equal(outputDuration(edl, 2), 1, '2x halves what the cut left');
+  assert.equal(outputDuration(edl, 0.5), 4, 'slowing down makes it longer');
+  // Speed applies to the EDITED length, not the source: cut then speed, in that
+  // order, because that is the order the filtergraph does it in.
+  assert.equal(outputDuration(edl, 1.2), 2 / 1.2);
 });

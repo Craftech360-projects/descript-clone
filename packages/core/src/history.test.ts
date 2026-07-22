@@ -2,13 +2,22 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  affectedIds,
   applyPatch,
   buildWordPatch,
+  clampSpeed,
+  cutFromWire,
+  cutToWire,
+  DEFAULT_SPEED,
   docFromTranscript,
   invertPatch,
   isEmptyPatch,
+  MAX_SPEED,
+  MIN_SPEED,
+  SPEEDS,
   type CutSettings,
   type Doc,
+  type DocPatch,
 } from './doc.ts';
 import {
   breakCoalescing,
@@ -279,4 +288,105 @@ test('undo/redo on an empty history is a safe no-op', () => {
   assert.equal(undo(d, emptyHistory()), null);
   assert.equal(redo(d, emptyHistory()), null);
   assert.equal(undoLabel(emptyHistory()), null);
+});
+
+// ── speed ─────────────────────────────────────────────────────────────────────
+//
+// Speed is a document patch like any other, so it owes the same guarantees:
+// invert() is total, a no-op writes no history, and it never touches a word.
+
+test('a speed patch inverts cleanly, so undo is total', () => {
+  const d = doc();
+  assert.equal(d.speed, 1, 'documents start at source speed');
+
+  const patch: DocPatch = { kind: 'speed', prev: 1, next: 1.2 };
+  const fast = applyPatch(d, patch);
+  assert.equal(fast.speed, 1.2);
+  assert.equal(fast.rev, d.rev + 1, 'a speed change is a change');
+
+  const back = applyPatch(fast, invertPatch(patch));
+  assert.equal(back.speed, 1);
+});
+
+test('re-picking the current speed writes no history entry', () => {
+  assert.ok(isEmptyPatch({ kind: 'speed', prev: 1.2, next: 1.2 }));
+  assert.ok(!isEmptyPatch({ kind: 'speed', prev: 1.2, next: 1.5 }));
+});
+
+test('changing speed leaves every word identical, by reference', () => {
+  // Structural sharing is what keeps React.memo honest on the script — a speed
+  // change must not invalidate 2282 spans.
+  const d = doc();
+  const fast = applyPatch(d, { kind: 'speed', prev: 1, next: 2 });
+  assert.equal(fast.words, d.words, 'the words array is not even copied');
+  assert.deepEqual(affectedIds({ kind: 'speed', prev: 1, next: 2 }), []);
+});
+
+test('undo of a speed change restores the old speed', () => {
+  let d = doc();
+  let h = emptyHistory();
+  ({ doc: d, history: h } = commit(d, h, { kind: 'speed', prev: 1, next: 1.5 }, {
+    label: 'Speed 1.5x',
+    selectionBefore: [],
+    selectionAfter: [],
+  }));
+  assert.equal(d.speed, 1.5);
+  assert.equal(undo(d, h)!.doc.speed, 1);
+});
+
+test('clampSpeed closes the range ffmpeg cannot survive', () => {
+  // Everything here is reachable: the server takes speed off a JSON body.
+  assert.equal(clampSpeed(0), MIN_SPEED, 'setpts=PTS/0 is a division by zero');
+  assert.equal(clampSpeed(-2), MIN_SPEED);
+  assert.equal(clampSpeed(99), MAX_SPEED, 'past 2 a single atempo is not enough');
+  assert.equal(clampSpeed(NaN), DEFAULT_SPEED);
+  assert.equal(clampSpeed(undefined), DEFAULT_SPEED, 'an old project file has no speed');
+  assert.equal(clampSpeed('fast'), DEFAULT_SPEED);
+  assert.equal(clampSpeed(1.2), 1.2, 'a speed on the ladder passes through');
+  assert.equal(clampSpeed('1.2'), 1.2, 'JSON numbers survive a round trip as strings');
+});
+
+test('every speed on the ladder survives its own clamp', () => {
+  for (const s of SPEEDS) assert.equal(clampSpeed(s), s, `${s}x must be renderable`);
+});
+
+// ── cut settings persistence: the Infinity/JSON boundary ──────────────────────
+//
+// maxGapMs is Infinity in the document ("keep every pause") and 0 on the wire,
+// because Infinity serialises to null. These two functions are the crossing, and
+// the round trip is what the persisted pause slider rides on.
+
+test('cutToWire turns "keep every pause" into the 0 JSON can carry', () => {
+  assert.equal(cutToWire(CUT).maxGapMs, 0, 'Infinity becomes 0 on the wire');
+  // A finite cap is left exactly as it is.
+  assert.equal(cutToWire({ ...CUT, maxGapMs: 500 }).maxGapMs, 500);
+  // The other fields ride along untouched.
+  assert.deepEqual(cutToWire(CUT), { padMs: 40, fadeMs: 12, mergeWithinMs: 20, maxGapMs: 0 });
+});
+
+test('a cut round-trips through the wire and back unchanged', () => {
+  const fallback: CutSettings = { padMs: 40, fadeMs: 12, mergeWithinMs: 20, maxGapMs: Infinity };
+  for (const cut of [
+    CUT,
+    { ...CUT, maxGapMs: 500 },
+    { padMs: 0, fadeMs: 0, mergeWithinMs: 0, maxGapMs: Infinity },
+    { padMs: 120, fadeMs: 25, mergeWithinMs: 5, maxGapMs: 1000 },
+  ] as CutSettings[]) {
+    const round = cutFromWire(JSON.parse(JSON.stringify(cutToWire(cut))), fallback);
+    assert.deepEqual(round, cut, `${JSON.stringify(cut)} must survive JSON both ways`);
+  }
+});
+
+test('cutFromWire falls back field by field for an older or broken record', () => {
+  const fallback: CutSettings = { padMs: 40, fadeMs: 12, mergeWithinMs: 20, maxGapMs: Infinity };
+
+  assert.equal(cutFromWire(undefined, fallback), fallback, 'no stored cut → engine defaults');
+  // A partial record keeps what it has and defaults the rest.
+  assert.deepEqual(cutFromWire({ padMs: 100 }, fallback), { ...fallback, padMs: 100 });
+  // 0 on the wire is "keep every pause", not "cap at zero".
+  assert.equal(cutFromWire({ maxGapMs: 0 }, fallback).maxGapMs, Infinity);
+  assert.equal(cutFromWire({ maxGapMs: 750 }, fallback).maxGapMs, 750);
+  // Garbage in a hand-edited file does not poison the compiler.
+  assert.equal(cutFromWire({ padMs: NaN as unknown as number }, fallback).padMs, 40);
+  assert.equal(cutFromWire({ fadeMs: 'x' as unknown as number }, fallback).fadeMs, 12);
 });

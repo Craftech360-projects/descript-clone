@@ -20,7 +20,8 @@ import {
 import { compileEdl, outputDuration } from '../../../packages/core/src/edl.ts';
 import { detectFillers, removeFillers } from '../../../packages/core/src/fillers.ts';
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
-import { toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
+import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
+import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts';
 import type { CompileOptions, Transcript } from '../../../packages/core/src/types.ts';
 
 await store.init();
@@ -185,18 +186,27 @@ app.post('/api/projects/:id/transcribe', async (c) => {
   return c.json({ jobId: job.id }, 202);
 });
 
-/** The editor sends which word ids are deleted. That is the whole edit state. */
+/** The editor sends the whole edit state: what is cut, and how it plays out. */
 app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions } = await c.req.json<{
+  const { deletedIds, captions, speed, cut } = await c.req.json<{
     deletedIds: string[];
     captions?: CaptionSettings;
+    speed?: number;
+    cut?: Partial<CutSettings>;
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
   if (captions) project.captions = captions;
+  // Distinguish "not sent" from "sent as 1": an older client omits the field and
+  // must not have its speed reset, but a user picking 1x must have it saved.
+  if (speed !== undefined) project.speed = clampSpeed(speed);
+  // Sanitised, not trusted: the record is stored in the wire shape (maxGapMs 0 =
+  // keep every pause), and every field is coerced to a real number so a bad body
+  // cannot poison the compiler on the next render.
+  if (cut) project.cut = sanitizeCut(cut);
 
   await store.save(project);
   return c.json({ ok: true });
@@ -244,19 +254,32 @@ app.post('/api/projects/:id/captions', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { format = 'srt', maxChars, maxDurationMs, captions: sent, ...cut } =
+  const { format = 'srt', maxChars, maxDurationMs, captions: sent, speed: sentSpeed, ...cut } =
     await c.req.json<any>().catch(() => ({}));
 
   const captions: CaptionSettings = { ...DEFAULT_CAPTIONS, ...project.captions, ...(sent ?? {}) };
+  const speed = clampSpeed(sentSpeed ?? project.speed);
 
   const edl = compileEdl(project.transcript, toCompileOptions(cut));
   // maxChars is the one caption setting that changes the CUES rather than their
   // styling, so the sidecar file has to honour it too or the .srt wraps
   // differently from the burn.
-  const cues = toCues(project.transcript, edl, {
-    maxChars: maxChars ?? captions.maxChars,
-    maxDurationMs,
-  });
+  //
+  // Then scaled, which the BURNED captions deliberately are not: this file gets
+  // read against the rendered video's clock, and speed has already divided that
+  // clock.
+  //
+  // Split first at 1x, scale second, in that order — the same reason maxChars is
+  // honoured above. The burn splits its cues at 1x, so splitting these anywhere
+  // else would hand out a .srt that breaks its lines in different places than
+  // the picture does.
+  const cues = scaleCues(
+    toCues(project.transcript, edl, {
+      maxChars: maxChars ?? captions.maxChars,
+      maxDurationMs,
+    }),
+    speed,
+  );
 
   const body =
     format === 'vtt'
@@ -275,6 +298,10 @@ app.post('/api/projects/:id/render', async (c) => {
 
   const options = await c.req.json<any>().catch(() => ({}));
   const edl = compileEdl(project.transcript, toCompileOptions(options));
+  // The request wins over the record so a render uses what is on screen right
+  // now, exactly as the caption style below does. Clamped because this is a
+  // number off the wire and `setpts=PTS/0` is a division by zero.
+  const speed = clampSpeed(options.speed ?? project.speed);
 
   if (edl.keep.length === 0) {
     return c.json({ error: 'Every word is deleted — there is nothing to render.' }, 400);
@@ -314,10 +341,14 @@ app.post('/api/projects/:id/render', async (c) => {
     const started = Date.now();
     const { segments, burnedIn } = await renderEdl(
       edl,
-      project.sourcePath,
-      outPath,
-      project.hasVideo,
-      subtitles,
+      {
+        input: project.sourcePath,
+        output: outPath,
+        hasVideo: project.hasVideo,
+        subtitles,
+        speed,
+        fps: project.fps,
+      },
       {
         // This progress is exact rather than estimated: we know the output
         // length before we start, because the EDL says so.
@@ -335,7 +366,8 @@ app.post('/api/projects/:id/render', async (c) => {
       // dropping the option the user ticked.
       captionsSkipped: wantsCaptions && !project.hasVideo,
       sourceDuration: project.duration,
-      outputDuration: outputDuration(edl),
+      outputDuration: outputDuration(edl, speed),
+      speed,
       renderMs: Date.now() - started,
     };
   });
@@ -416,6 +448,21 @@ function toCompileOptions(o: any): CompileOptions {
     mergeWithinMs: num(o.mergeWithinMs, EDIT_DEFAULTS.mergeWithinMs),
     // 0 from the UI slider means "keep every pause".
     maxGapMs: num(o.maxGapMs, 0) > 0 ? o.maxGapMs : Infinity,
+  };
+}
+
+/**
+ * What gets stored on the project record: the wire shape, every field a real
+ * number, maxGapMs left in its 0-means-keep form. Distinct from toCompileOptions,
+ * which turns that 0 into the Infinity the compiler wants — persistence keeps 0,
+ * because Infinity would serialise to null on disk.
+ */
+function sanitizeCut(o: any): CutSettings {
+  return {
+    padMs: num(o.padMs, EDIT_DEFAULTS.padMs),
+    fadeMs: num(o.fadeMs, EDIT_DEFAULTS.fadeMs),
+    mergeWithinMs: num(o.mergeWithinMs, EDIT_DEFAULTS.mergeWithinMs),
+    maxGapMs: Math.max(0, num(o.maxGapMs, 0)),
   };
 }
 

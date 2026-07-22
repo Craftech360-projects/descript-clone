@@ -33,6 +33,11 @@ export interface Project {
   thumbs?: Thumbs;
   /** Caption look and placement. Absent on projects saved before captions existed. */
   captions?: CaptionSettings;
+  /** Output speed multiplier. Absent on projects saved before speed existed. */
+  speed?: number;
+  /** Cut settings, wire shape (maxGapMs 0 = keep every pause). Absent on projects
+   *  saved before cut settings were persisted; the client falls back to defaults. */
+  cut?: CutSettings;
   createdAt: string;
 }
 
@@ -69,6 +74,8 @@ export interface RenderSettings extends CutSettings {
   /** Look and placement. Sent so a render uses what is on screen right now,
    *  rather than whatever was last persisted. */
   captions?: CaptionSettings;
+  /** Output speed. Sent for the same reason as `captions` above. */
+  speed?: number;
 }
 
 export type JobKind = 'transcribe' | 'render' | 'thumbs';
@@ -96,7 +103,10 @@ export interface RenderResult {
   /** Captions were asked for, but the project has no video to burn them onto. */
   captionsSkipped: boolean;
   sourceDuration: number;
+  /** Length of the finished file — speed already divided in. */
   outputDuration: number;
+  /** The speed actually rendered at, after the server clamped it. */
+  speed: number;
   renderMs: number;
 }
 
@@ -134,11 +144,18 @@ export const api = {
   job: (id: string) => fetch(`/api/jobs/${id}`).then(json<Job>),
   cancelJob: (id: string) => post(`/api/jobs/${id}/cancel`).then(json<{ ok: boolean }>),
 
-  setDeleted: (id: string, deletedIds: string[], captions?: CaptionSettings) =>
+  /**
+   * Persist the edit state. Was `setDeleted`, which stopped being true once the
+   * caption style rode along with it and is now four things.
+   */
+  saveDoc: (
+    id: string,
+    doc: { deletedIds: string[]; captions?: CaptionSettings; speed?: number; cut?: CutSettings },
+  ) =>
     fetch(`/api/projects/${id}/transcript`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deletedIds, captions }),
+      body: JSON.stringify(doc),
     }).then(json<{ ok: boolean }>),
 
   action: (id: string, action: string, options: Record<string, unknown> = {}) =>

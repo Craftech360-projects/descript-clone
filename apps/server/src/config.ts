@@ -60,6 +60,16 @@ export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
   elevenLabsKey: process.env.ELEVENLABS_API_KEY ?? '',
 
+  /**
+   * Where the ffmpeg/ffprobe binaries live. A bare name is resolved off PATH,
+   * which is right for dev and the Docker image where both are installed
+   * system-wide. The desktop build has no such guarantee — it sets these to the
+   * binaries it ships, so the app never depends on the user having ffmpeg. `||`
+   * (not `??`) so an empty env var falls back rather than spawning "".
+   */
+  ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
+
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
     return Boolean(this.elevenLabsKey) && process.env.ASR_PROVIDER !== 'mock';

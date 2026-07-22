@@ -452,10 +452,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .cap-text:hover { outline-color: rgba(255, 255, 255, 0.5); }
 .cap-text:active { cursor: grabbing; outline-color: var(--accent); }
-/* Nothing is on screen at this moment — this is the placement guide, not a lie
- * about what the burn will contain. */
 /* Nothing is being said at this moment — this is the placement guide, not a
- * claim about what the burn will contain at this frame. */
+ * claim about what the burn will contain at this frame. It only ever shows
+ * while paused; see CaptionOverlay. */
 .cap-text.ph { opacity: 0.45; }
 .stage-empty {
   width: 100%; height: 100%;
@@ -793,6 +792,20 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--faint); border: 1px solid var(--line); font-weight: 600;
   border-radius: var(--r-1); padding: 1px var(--s-1); background: var(--sunk);
 }
+
+/* base.css already gives select its well, border, hover and focus ring. This
+ * only narrows it — the base rule is width:100%, which would eat the bar.
+ * Fixed at its widest label ("0.75x"), with tabular figures, so changing speed
+ * never shifts the toggles beside it. */
+.tp-speed select {
+  width: 68px; padding: 5px 8px;
+  font-size: var(--t-small); font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+/* Off 1x this stops being a view preference: it is the only control in the bar
+ * whose value ends up in the rendered file. So it lights up the way .toggle.on
+ * does, rather than sitting quiet and letting you forget you set it. */
+.tp-speed select.fast { border-color: var(--accent); color: var(--text); }
 
 .tp-toggles { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
 .toggle {

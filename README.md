@@ -78,6 +78,22 @@ apps/web/          transcript editor
 
 ## Two details that are not optional
 
+**A cut has to be worth making.** Shortening a pause by 20ms is free to compile
+and expensive to watch. In the preview a cut is a seek, and a seek re-decodes
+from the previous H.264 keyframe: measured against this app's own media in a
+real browser, **116ms at p50, 215ms at p90**, with the file *fully buffered* —
+so it is codec cost, not network, and no amount of preloading removes it. In the
+render a cut is a dropped range of frames plus a micro-fade each side, 24ms of
+ramp to delete 20ms of silence. At a 500ms cap, 65 of 175 cuts each froze the picture
+for longer than the silence they removed: the edit made the preview *worse* than
+no edit. `minTrimMs` (250ms, just above that p90) is the floor — below it the
+pause stays. Measured effect at a 500ms cap: 175 cuts → 110, frozen picture
+21.2s → 13.3s, at a cost of 8.9s of retained silence spread over 65 pauses.
+
+It governs **pauses only**. A deletion is cut however small the hole, because
+that hole contains a word you asked to lose — `trimWorthMaking` is not consulted
+on that branch, and a test pins it.
+
 **Micro-fades at cuts.** Cutting a waveform at an arbitrary sample leaves a step
 discontinuity — a broadband click. Every segment gets a ~12ms fade in and out.
 Inaudible as a fade, and it removes the click.
@@ -93,6 +109,41 @@ checked on `timeupdate`, which fires at ~4Hz, so it leaked up to 250ms of every
 word you had deleted. The 40ms `padMs` around each range is what pays for the
 early seek. The rule is `playStep` in `packages/core/src/timeline.ts`, pure and
 tested, including a test asserting that the old reactive rule bleeds.
+
+**Short gaps between cues are closed, or the captions strobe.** A cue ends at
+its last word and the next starts at its first, so the space between them is
+the space between two words — not a pause. Measured on a real 14-minute
+transcript: 275 of 307 gaps were under 500ms, median 41ms, i.e. one blank frame
+275 times. Replaying the overlay at 60Hz counted 242 sub-100ms flashes, median
+33ms. `MIN_GAP_S` in `captions.ts` closes anything under 500ms — the same rule
+broadcast subtitling uses — and real silences (32 of them, longest 6.5s) stay
+blank. It matters for the burn as much as the preview: both read `toCues`.
+
+**A caption never blanks at a splice, whatever the pause slider says.** A gap
+between two cues is one of two opposite things, and `splicePoints` is how
+`toCues` tells them apart: a **seam** is time the editor removed, and a
+**silence** is time it kept. Blanking through a seam means the caption cuts at
+every jump cut — the picture cutting is the edit, the caption cutting with it is
+gratuitous, and it is the one you notice. A fixed threshold cannot do this job:
+shortening a pause leaves a gap of exactly `maxGapMs + 2*padMs`, so at the
+default 40ms padding a 500ms cap leaves 580ms and a 2000ms cap leaves 2080ms.
+The first missed `MIN_GAP_S` by 80ms and blanked the caption at all 175 cuts;
+no constant covers the whole slider. Seams close unconditionally; silences go
+through `MIN_GAP_S`.
+
+One narrow band survives, correctly: a pause between `maxGapMs` and
+`maxGapMs + 2*padMs + mergeWithinMs` is split and then merged straight back
+(padding is wider than the material to remove), so no cut happens and the
+silence is really there. Measured 4 of 307 at a 500ms cap. The caption blanks,
+because there is genuinely nothing being said and no cut to hide.
+
+**The caption placement guide only shows while paused.** Between cues nothing is
+being said and the burn draws nothing, so the preview must draw nothing too. The
+guide exists because an empty overlay is impossible to grab; it is a placement
+aid, not a claim about the frame. It used to fall back to `cues[0]`, so every
+gap flashed the video's *first* line over whatever you were watching — half of
+the flicker above. It now holds the last line you heard, dimmed, and only when
+the picture is not moving.
 
 **Word ids are not indices.** They run `w0, w2, w4…` — assigned from the raw ASR
 array before spacing tokens are filtered out. Never parse the number out of an
@@ -166,9 +217,8 @@ audio say something new needs Overdub, and Overdub needs a TTS endpoint.
   remote service. Cuts, captions, retakes and fillers are pure functions in
   `packages/core`; ingest and render are local ffmpeg. Nothing else takes a key.
 - No speaker renaming yet. The margin shows who is talking; you cannot correct it.
-- **No multitrack, and it is not a UI gap.** `buildRenderPlan` trims `[0:v]` and
-  `[0:a]` with the *same* keep-range and concatenates them together — there is
-  exactly one `keep[]`. A track UI would offer operations the compiler cannot
+- **No multitrack, and it is not a UI gap.** `buildRenderPlan` cuts `[0:v]` and
+  `[0:a]` against the *same* keep-ranges — there is exactly one `keep[]`. A track UI would offer operations the compiler cannot
   represent, so it would be a lie. Tracks arrive when a second input does.
 - **Reordering words would render the wrong audio.** `compileEdl` decides where
   to cut with `cur.index === prev.index + 1`, which conflates "adjacent in the

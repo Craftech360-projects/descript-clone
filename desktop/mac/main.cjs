@@ -1,0 +1,135 @@
+'use strict';
+
+/**
+ * Electron main process — the desktop shell, and nothing more.
+ *
+ * It does three things: locate the ffmpeg/ffprobe binaries this app ships, start
+ * the bundled Hono server as a Node child on a free port, and point a window at
+ * it. The server it starts is byte-for-byte the server that runs in dev and
+ * Docker (see ../../apps/server) — no product logic lives here.
+ *
+ * NOTE: this file is intentionally identical in desktop/win and desktop/mac.
+ * If you edit one, edit the other. The only per-platform difference is the
+ * "build" block in package.json.
+ */
+
+const { app, BrowserWindow, Menu, dialog } = require('electron');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
+const net = require('node:net');
+
+// A native binary cannot execute from inside app.asar, so electron-builder is
+// told to leave ffmpeg-static/ffprobe-static unpacked (see asarUnpack). Rewrite
+// the require()'d path to the unpacked copy. In dev the path has no "app.asar",
+// so this is a no-op.
+const unpacked = (p) => p.replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep);
+const ffmpegPath = unpacked(require('ffmpeg-static'));
+const ffprobePath = unpacked(require('ffprobe-static').path);
+
+let serverProc = null;
+
+/** Ask the OS for a free port, so we never collide with a running dev server. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+/** Packaged: extraResources land in resourcesPath. Dev: build.mjs writes them here. */
+function resourcesDir() {
+  return app.isPackaged ? process.resourcesPath : path.join(__dirname, 'resources');
+}
+
+function startServer(port, userData) {
+  const res = resourcesDir();
+  serverProc = spawn(process.execPath, [path.join(res, 'server.mjs')], {
+    env: {
+      ...process.env,
+      // Run Electron's own Node as a plain Node, not a second app instance.
+      ELECTRON_RUN_AS_NODE: '1',
+      PORT: String(port),
+      MEDIA_DIR: path.join(userData, 'media'),
+      WEB_DIST: path.join(res, 'web'),
+      FFMPEG_PATH: ffmpegPath,
+      FFPROBE_PATH: ffprobePath,
+      // The ElevenLabs key is compiled into server.mjs at build time
+      // (see build.mjs) — nothing to inject here.
+    },
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+
+  serverProc.on('exit', (code) => {
+    const wasRunning = serverProc !== null;
+    serverProc = null;
+    if (wasRunning && !app.isQuitting) {
+      dialog.showErrorBox('Editor stopped', `The background service exited (code ${code}).`);
+      app.quit();
+    }
+  });
+}
+
+/** Poll until the server answers, so the window never opens on a refused port. */
+async function waitForServer(port, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  const url = `http://127.0.0.1:${port}/api/health`;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(url); // any HTTP answer — even 503 — means it is listening
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  return false;
+}
+
+async function main() {
+  await app.whenReady();
+  const userData = app.getPath('userData');
+  const port = await freePort();
+  startServer(port, userData);
+
+  if (!(await waitForServer(port))) {
+    dialog.showErrorBox('Startup failed', 'The editor service did not start in time.');
+    app.quit();
+    return;
+  }
+
+  // No File/Edit/View menu. Electron installs a default one, and every entry on
+  // it is either a browser control this app has no use for (Reload, Zoom,
+  // Toggle DevTools) or a promise it does not keep — a "File" menu that cannot
+  // open or save a project reads as broken, not as unfinished.
+  //
+  // Not on macOS: there the menu bar belongs to the OS, and clearing it takes
+  // Cmd+Q, Cmd+C and Cmd+V with it. The Mac gets the standard menu; Windows and
+  // Linux get their window back.
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
+
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    backgroundColor: '#0e0e12',
+    // Belt and braces: without a menu there is nothing to auto-hide, but this
+    // also stops Alt from summoning one if a menu is ever set again.
+    autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+  win.loadURL(`http://127.0.0.1:${port}`);
+}
+
+app.on('window-all-closed', () => app.quit());
+app.on('before-quit', () => {
+  app.isQuitting = true;
+  if (serverProc) {
+    const p = serverProc;
+    serverProc = null;
+    p.kill();
+  }
+});
+
+main();

@@ -1,5 +1,5 @@
 import { useEffect, type RefObject } from 'react';
-import { playStep } from '../../../../packages/core/src/timeline.ts';
+import { lookaheadFor, playStep } from '../../../../packages/core/src/timeline.ts';
 import type { Edl } from '../../../../packages/core/src/types.ts';
 
 /**
@@ -31,10 +31,36 @@ interface Options {
   edl: Edl | null;
   followEdit: boolean;
   playing: boolean;
+  /** Document speed. Drives the element's rate AND the skip loop's margin. */
+  speed: number;
   onEnded: () => void;
 }
 
-export function usePlayback({ videoRef, edl, followEdit, playing, onEnded }: Options): void {
+export function usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded }: Options): void {
+  /**
+   * Rate is its own effect because it is not a property of PLAYING.
+   *
+   * The skip loop below only mounts while playing, following the edit, with an
+   * EDL. The rate has to hold in all the states that is not: paused, scrubbing,
+   * previewing the raw source. Setting it in there would leave the element at 1x
+   * whenever the loop was absent, and the monitor would disagree with the export.
+   */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    // defaultPlaybackRate as well, and not for symmetry: load() resets
+    // playbackRate BACK to defaultPlaybackRate, and opening another project
+    // changes src on this same element. Setting only the live rate means the
+    // next project silently plays at 1x while the transport still reads 1.2x.
+    video.defaultPlaybackRate = speed;
+    video.playbackRate = speed;
+    // Match ffmpeg's atempo, which time-stretches without pitching. Chrome's
+    // default is already true, but leaving it implicit means the preview's pitch
+    // and the render's pitch agree only by coincidence.
+    video.preservesPitch = true;
+  }, [videoRef, speed]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !edl || !followEdit || !playing) return;
@@ -81,7 +107,10 @@ export function usePlayback({ videoRef, edl, followEdit, playing, onEnded }: Opt
       // where we asked.
       if (video.seeking) return;
 
-      const step = playStep(edl, video.currentTime);
+      // The margin scales with the rate — at 2x the playhead covers 33ms between
+      // frames, and a fixed 30ms lookahead would be a frame too late. See
+      // lookaheadFor.
+      const step = playStep(edl, video.currentTime, lookaheadFor(speed));
       if (step.action === 'continue') return;
       if (step.action === 'seek') return gate(step.to, step.silent);
 
@@ -99,5 +128,5 @@ export function usePlayback({ videoRef, edl, followEdit, playing, onEnded }: Opt
       // Never strand the element muted if we unmount mid-seek.
       if (restoreVolume !== null) video.volume = restoreVolume;
     };
-  }, [videoRef, edl, followEdit, playing, onEnded]);
+  }, [videoRef, edl, followEdit, playing, speed, onEnded]);
 }

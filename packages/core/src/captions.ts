@@ -1,4 +1,4 @@
-import { sourceToOutput } from './edl.ts';
+import { sourceToOutput, splicePoints } from './edl.ts';
 import {
   captionScale,
   DEFAULT_CAPTIONS,
@@ -26,6 +26,22 @@ const DEFAULTS: Required<CaptionOptions> = {
   maxChars: 42,
   maxDurationMs: 5000,
 };
+
+/**
+ * A silence shorter than this is closed by holding the earlier cue until the
+ * next one starts.
+ *
+ * A cue ends at its last word and the next begins at its first, so the space
+ * between them is the space between two words — not a pause. Measured on a real
+ * 14-minute transcript: 275 of 307 gaps were under 500ms and the MEDIAN was
+ * 41ms. At 30fps that is one blank frame, 275 times: a flicker, in the burn and
+ * the preview both. Broadcast practice (BBC, Netflix) is the same rule — a gap
+ * under ~12 frames reads as a glitch rather than a beat, so it is closed.
+ *
+ * Longer silences are real and stay blank. This threshold does NOT govern
+ * seams; see below.
+ */
+const MIN_GAP_S = 0.5;
 
 /**
  * Merge options over defaults, ignoring keys explicitly set to undefined.
@@ -100,7 +116,57 @@ export function toCues(
   }
   flush();
 
+  // Hold each cue until the next one starts, so the caption does not blank
+  // between them. Two different reasons to close a gap:
+  //
+  //   short   — the space between two words, not a pause. See MIN_GAP_S.
+  //   seam    — a splice lands in it, so this is time the editor REMOVED.
+  //
+  // The seam clause is what makes shortened pauses smooth. Shortening a pause
+  // leaves a gap of exactly maxGapMs + 2*padMs — at the default 40ms padding and
+  // a 500ms cap, 580ms, which sails past any fixed short-gap threshold. The
+  // caption then blanked at every jump cut: the picture cuts (unavoidable, it is
+  // the edit) and the caption cut with it (gratuitous, and the thing you notice).
+  // Time the editor deliberately took out is not a beat to blank through.
+  //
+  // This does not weaken "a cue never spans a cut" above — that is about which
+  // WORDS share a caption, and it still holds. This is only how long the last
+  // one stays up.
+  const splices = splicePoints(edl);
+  for (let i = 0; i < cues.length - 1; i++) {
+    const gap = cues[i + 1].start - cues[i].end;
+    if (gap <= 0) continue;
+    const seam = splices.some((s) => s > cues[i].end && s < cues[i + 1].start);
+    if (seam || gap < MIN_GAP_S) cues[i].end = cues[i + 1].start;
+  }
+
   return cues;
+}
+
+/**
+ * Re-time cues for a render at `speed`.
+ *
+ * SIDECAR FILES ONLY. A burned caption must never go through this: the burn-in
+ * filter runs before setpts (see render.ts), so its glyphs are painted at 1x and
+ * rescaled along with the frames they sit on. Scaling those cues first would
+ * apply speed twice and the captions would run ahead of the words by the square
+ * of it. A .srt has no such ride — it is read by a player against the finished
+ * file's clock, and that clock has already been divided by speed.
+ *
+ * The words go with them. toAss reads each word's start/end as a DELTA for its
+ * karaoke \k tags, so leaving them at source rate would highlight each word at
+ * 1x over a picture running at 1.2x — drifting further out with every word in
+ * the cue. They are source timestamps being reused as durations; scaling them is
+ * only meaningful because nothing downstream of here reads them as positions.
+ */
+export function scaleCues(cues: Cue[], speed: number): Cue[] {
+  if (speed === 1) return cues;
+  return cues.map((cue) => ({
+    ...cue,
+    start: cue.start / speed,
+    end: cue.end / speed,
+    words: cue.words.map((w) => ({ ...w, start: w.start / speed, end: w.end / speed })),
+  }));
 }
 
 export function toSrt(cues: Cue[]): string {

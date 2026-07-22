@@ -42,6 +42,7 @@ import {
   undoEdit,
   updateCut,
   updateCaptions,
+  updateSpeed,
   beginCaptionDrag,
   endCaptionDrag,
   useEditor,
@@ -52,7 +53,7 @@ import CaptionOverlay from './shell/CaptionOverlay.tsx';
 import { lastStartingAtOrBefore } from '../../../packages/core/src/paragraphs.ts';
 import { speakers, colorMap } from './speakers.ts';
 import { usePlayback } from './store/playback.ts';
-import type { CutSettings } from '../../../packages/core/src/doc.ts';
+import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
 import { compileEdl, outputDuration } from '../../../packages/core/src/edl.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
 
@@ -87,6 +88,7 @@ export default function App() {
   const words = doc?.words ?? [];
   const cut = doc?.cut ?? null;
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
+  const speed = doc?.speed ?? DEFAULT_SPEED;
   const history = historyState();
 
   useEffect(() => {
@@ -103,11 +105,14 @@ export default function App() {
     const id = project.id;
     setSaver(async (d) => {
       try {
-        await api.setDeleted(
-          id,
-          d.words.filter((w) => w.deleted).map((w) => w.id),
-          d.captions,
-        );
+        await api.saveDoc(id, {
+          deletedIds: d.words.filter((w) => w.deleted).map((w) => w.id),
+          captions: d.captions,
+          speed: d.speed,
+          // Infinity ("keep every pause") does not survive JSON — cutToWire maps
+          // it to the 0 the server and disk speak.
+          cut: cutToWire(d.cut),
+        });
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -197,8 +202,9 @@ export default function App() {
     words: words.length,
     kept: words.filter((w) => !w.deleted).length,
     cuts: edl?.keep.length ?? 0,
-    outputSec: edl ? outputDuration(edl) : 0,
+    outputSec: edl ? outputDuration(edl, speed) : 0,
     sourceSec: project?.duration ?? 0,
+    speed,
   };
 
   const run = async <T,>(label: string, fn: () => Promise<T>) => {
@@ -214,10 +220,13 @@ export default function App() {
   }, [job]);
 
   const openTranscript = (p: Project, defaults: CutSettings) => {
-    // Caption style is persisted per project, so it comes off the record rather
-    // than resetting to defaults the way the cut settings do.
-    if (p.transcript) loadDoc(p.transcript, defaults, p.captions ?? DEFAULT_CAPTIONS);
-    else clearDoc();
+    // Cut settings, caption style and speed are all persisted per project, so
+    // they come off the record. Anything a project saved before these existed is
+    // missing, and each falls back: cutFromWire to the engine defaults, captions
+    // to DEFAULT_CAPTIONS, speed (via clampSpeed downstream) to 1.
+    if (p.transcript) {
+      loadDoc(p.transcript, cutFromWire(p.cut, defaults), p.captions ?? DEFAULT_CAPTIONS, p.speed);
+    } else clearDoc();
   };
 
   // --- library -----------------------------------------------------------------
@@ -298,7 +307,9 @@ export default function App() {
 
   const doCaptions = (format: string) =>
     run('captions', async () => {
-      const r = await api.captions(project!.id, { format, ...cut });
+      // speed rides along: a sidecar file is read against the RENDERED clock, so
+      // its cues have to be divided the way the render's are.
+      const r = await api.captions(project!.id, { format, ...cut, speed });
       const blob = new Blob([r.content], { type: 'text/plain' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -318,6 +329,7 @@ export default function App() {
         ...cut!,
         burnCaptions: captions.enabled,
         captions,
+        speed,
       });
       setJob({ id: jobId, progress: -1, stage: 'Starting', kind: 'render' });
 
@@ -360,7 +372,7 @@ export default function App() {
 
   // Declared after onPlaybackEnded on purpose: a const is in its temporal dead
   // zone until its initialiser runs, so calling this above would throw.
-  usePlayback({ videoRef, edl, followEdit, playing, onEnded: onPlaybackEnded });
+  usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded: onPlaybackEnded });
 
   /**
    * Step to the previous/next word boundary.
@@ -403,15 +415,37 @@ export default function App() {
   }, [reveal?.nonce]);
 
   // --- editing -----------------------------------------------------------------
-  const clickWord = (index: number, shift: boolean) => {
+  /**
+   * Clicking a word always means "put the playhead here". What changes is the
+   * selection: the word you clicked, extended from the anchor on shift — or
+   * nothing at all, if that word was already the whole selection.
+   *
+   * That last case is the toggle. Without it a selection could only be cleared
+   * with Escape or by hitting a paragraph gap, so one you made by accident just
+   * sat there. The seek stays either way, which keeps the rule above true: the
+   * highlight goes away, the playhead still lands where you pointed.
+   */
+  const clickWord = (index: number, shift: boolean, clicks: number) => {
     const word = words[index];
     if (!word) return;
+
     if (shift && selection) {
       setSelection({ anchorId: selection.anchorId, focusId: word.id });
-    } else {
-      setSelection({ anchorId: word.id, focusId: word.id });
-      seek(word.start);
+      return;
     }
+
+    // Only when this word IS the selection, not merely inside it — clicking
+    // one word of a run collapses onto it, the way any text editor does, and a
+    // second click then clears.
+    //
+    // `clicks === 1` keeps the second half of a double-click out of this. That
+    // gesture means "play from here", and it would otherwise select on click
+    // one and unselect on click two, flickering on its way to playing.
+    const isWholeSelection =
+      selection?.anchorId === word.id && selection?.focusId === word.id;
+
+    setSelection(isWholeSelection && clicks === 1 ? null : { anchorId: word.id, focusId: word.id });
+    seek(word.start);
   };
 
   const doFillers = () => {
@@ -514,6 +548,7 @@ export default function App() {
                 words={words}
                 edl={edl}
                 captions={captions}
+                playing={playing}
                 getCurrentTime={getCurrentTime}
                 onDragStart={beginCaptionDrag}
                 onMove={(x, y) => updateCaptions({ ...captions, x, y })}
@@ -608,6 +643,8 @@ export default function App() {
           setFollowEdit={setFollowEdit}
           showDeleted={showDeleted}
           setShowDeleted={setShowDeleted}
+          speed={speed}
+          setSpeed={updateSpeed}
           onPlayPause={togglePlay}
           onStep={stepWord}
           onHome={() => seek(0)}

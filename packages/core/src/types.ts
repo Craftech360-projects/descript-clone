@@ -60,6 +60,22 @@ export interface CompileOptions {
   maxGapMs?: number;
   /** Ranges closer together than this get merged rather than producing a cut. */
   mergeWithinMs?: number;
+  /**
+   * The least silence a PAUSE cut must remove to be worth making, in ms.
+   *
+   * Applies only to maxGapMs. A deletion is never subject to it: that hole
+   * contains a word you asked to lose, and its size is not the point.
+   *
+   * A cut is not free. In the preview it is a seek, and a seek re-decodes from
+   * the previous H.264 keyframe — measured against this app's own media, 116ms
+   * at p50 and 215ms at p90, with the file fully buffered, so it is codec cost
+   * and not network. In the render it is a dropped range of frames plus a
+   * micro-fade each side, i.e. 2*fadeMs of ramp. Trimming 20ms off a 520ms pause spends
+   * both to save nothing anyone can hear: at a 500ms cap that described 65 of
+   * 175 cuts, each freezing the picture for longer than the silence it removed.
+   * A pause you cannot shorten usefully is a pause you leave alone.
+   */
+  minTrimMs?: number;
   /** Micro-fade length at cut boundaries. */
   fadeMs?: number;
 }
@@ -68,5 +84,6 @@ export const DEFAULT_COMPILE_OPTIONS: Required<CompileOptions> = {
   padMs: 40,
   maxGapMs: Infinity,
   mergeWithinMs: 20,
+  minTrimMs: 250,
   fadeMs: 12,
 };

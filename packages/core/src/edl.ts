@@ -24,6 +24,7 @@ export function compileEdl(transcript: Transcript, options: CompileOptions = {})
   const pad = opts.padMs / 1000;
   const maxGap = opts.maxGapMs / 1000;
   const mergeWithin = opts.mergeWithinMs / 1000;
+  const minTrim = opts.minTrimMs / 1000;
 
   // Keep original indices: a break in index continuity means a word was deleted
   // between two survivors, which forces a cut. A merely-long pause does not.
@@ -47,17 +48,21 @@ export function compileEdl(transcript: Transcript, options: CompileOptions = {})
     const gap = cur.word.start - prev.word.end;
 
     if (!contiguous) {
-      // Words were removed between these two — cut.
+      // Words were removed between these two — cut. Unconditionally: the hole
+      // holds speech you asked to lose, so leaving it in is not on the table
+      // however small it is. minTrim has no say here.
       raw.push({ start: openStart, end: prev.word.end });
       openStart = cur.word.start;
-    } else if (gap > maxGap) {
+    } else if (gap > maxGap && trimWorthMaking(gap, maxGap, pad, minTrim)) {
       // Nothing was deleted, but the pause is longer than allowed. Split and
       // drop the middle, leaving half the allowance on each side so the cut
       // lands in silence rather than against a word.
       raw.push({ start: openStart, end: prev.word.end + maxGap / 2 });
       openStart = cur.word.start - maxGap / 2;
     }
-    // Otherwise the run continues and the natural pause is preserved.
+    // Otherwise the run continues and the natural pause is preserved — either
+    // it is within the cap, or shortening it would not buy enough to pay for
+    // the cut. See minTrimMs.
   }
   raw.push({ start: openStart, end: kept[kept.length - 1].word.end });
 
@@ -71,6 +76,19 @@ export function compileEdl(transcript: Transcript, options: CompileOptions = {})
     keep: mergeAdjacent(padded, mergeWithin).filter((r) => r.end > r.start),
     fadeMs: opts.fadeMs,
   };
+}
+
+/**
+ * Would shortening this pause remove enough silence to justify a cut?
+ *
+ * Note what the padding does: it is added back to BOTH sides afterwards, so a
+ * pause of `gap` capped to `maxGap` does not leave `gap - maxGap` of hole — it
+ * leaves `gap - maxGap - 2*pad`. That is the only figure that matters, because
+ * it is what the seek skips and what the concat drops. Comparing the un-padded
+ * saving would green-light cuts that padding has already eaten.
+ */
+function trimWorthMaking(gap: number, maxGap: number, pad: number, minTrim: number): boolean {
+  return gap - maxGap - 2 * pad >= minTrim;
 }
 
 /**
@@ -96,9 +114,38 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
 
-/** Duration of the rendered output, in seconds. */
-export function outputDuration(edl: Edl): number {
-  return edl.keep.reduce((sum, r) => sum + (r.end - r.start), 0);
+/**
+ * Duration of the rendered output, in seconds.
+ *
+ * `speed` divides, because it is the last thing that happens to the render and
+ * the only thing here that is not a source timestamp: the kept ranges are spliced
+ * at 1x and the result is then played out `speed` times faster. Everything that
+ * quotes an output length — the transport clock, the export summary, ffmpeg's
+ * progress target — has to divide by exactly this, so it lives here rather than
+ * at each of them.
+ */
+export function outputDuration(edl: Edl, speed = 1): number {
+  return edl.keep.reduce((sum, r) => sum + (r.end - r.start), 0) / speed;
+}
+
+/**
+ * The output timestamps where the render jumps from one source range to the
+ * next — i.e. where the picture visibly cuts.
+ *
+ * Captions read this to tell a seam from a silence. Both look like a gap
+ * between two cues, but they are opposite things: a seam is time the editor
+ * *removed*, and blanking the caption there stacks a second discontinuity on
+ * the jump cut. A silence is time the editor *kept*, and a caption over it
+ * would be a caption over nothing.
+ */
+export function splicePoints(edl: Edl): number[] {
+  const out: number[] = [];
+  let elapsed = 0;
+  for (let i = 0; i < edl.keep.length - 1; i++) {
+    elapsed += edl.keep[i].end - edl.keep[i].start;
+    out.push(elapsed);
+  }
+  return out;
 }
 
 /**

@@ -26,8 +26,90 @@ export interface Doc {
   /** How burned captions look and where they sit. Part of the document, so it
    *  undoes with everything else and survives a reload. */
   captions: CaptionSettings;
+  /**
+   * Output speed multiplier: 1.2 renders 20% faster and 20% shorter.
+   *
+   * NOT a CutSettings field, though it is tempting. Cut settings are inputs to
+   * compileEdl, and speed is deliberately not: the EDL addresses the SOURCE, and
+   * every timestamp in it — every word, every kept range — stays a source
+   * timestamp no matter how fast we play it out. Speed is a transform on the
+   * OUTPUT, applied once at the end. Feeding it into the compiler would rescale
+   * ranges that index real bytes on disk and desynchronise the edit from the
+   * media it describes.
+   */
+  speed: number;
   /** Bumped on every committed change. The saver uses it to detect staleness. */
   rev: number;
+}
+
+/**
+ * The speed ladder offered in the transport.
+ *
+ * 1.2 rather than YouTube's 1.25 because it is the step people ask for by name,
+ * and a ladder is a list of the speeds worth having, not a geometric series.
+ */
+export const SPEEDS = [0.5, 0.75, 1, 1.2, 1.5, 1.75, 2] as const;
+
+export const DEFAULT_SPEED = 1;
+
+/**
+ * Bounds are ffmpeg's, not taste.
+ *
+ * A single `atempo` takes a tempo in [0.5, 100] — but that upper figure is
+ * recent, and atempo was capped at 2.0 for years. Holding the ladder inside
+ * [0.5, 2] means one filter instance covers every speed this app can produce, on
+ * every ffmpeg that can run it. Past 2 the graph would need a CHAIN of atempos
+ * (2.5 = 2.0 x 1.25), which is a real feature with real quality costs and no
+ * user asking for it — so the range is closed here rather than half-supported
+ * downstream.
+ */
+export const MIN_SPEED = 0.5;
+export const MAX_SPEED = 2;
+
+/**
+ * Coerce anything — a JSON body, an old project file, a stale client — into a
+ * speed the render can survive.
+ *
+ * The server takes this off the wire, so NaN and "fast" and 0 all arrive here.
+ * Zero is the one that matters: `setpts=PTS/0` is a division by zero and
+ * `atempo=0` is rejected outright, so an unvalidated 0 is a failed render rather
+ * than a silly one.
+ */
+export function clampSpeed(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_SPEED;
+  return Math.min(MAX_SPEED, Math.max(MIN_SPEED, n));
+}
+
+/**
+ * The document holds maxGapMs as Infinity for "keep every pause"; the wire and
+ * disk hold 0.
+ *
+ * Infinity does not survive JSON — JSON.stringify turns it into null — so the
+ * moment cut settings started being persisted, they needed a boundary. 0 is the
+ * chosen sentinel, documented at every crossing (the slider emits it, the
+ * capabilities route emits it, the compiler reads it). These two functions are
+ * the only sanctioned place that translation happens.
+ */
+export function cutToWire(cut: CutSettings): CutSettings {
+  return { ...cut, maxGapMs: cut.maxGapMs === Infinity ? 0 : cut.maxGapMs };
+}
+
+/**
+ * Bring a wire/disk cut back into the document, falling back field-by-field to
+ * `fallback` (already in document form) for anything missing or unparseable — a
+ * project saved by an older build, or a hand-edited record.
+ */
+export function cutFromWire(wire: Partial<CutSettings> | undefined, fallback: CutSettings): CutSettings {
+  if (!wire) return fallback;
+  const n = (v: unknown, f: number) => (typeof v === 'number' && Number.isFinite(v) ? v : f);
+  return {
+    padMs: n(wire.padMs, fallback.padMs),
+    fadeMs: n(wire.fadeMs, fallback.fadeMs),
+    mergeWithinMs: n(wire.mergeWithinMs, fallback.mergeWithinMs),
+    // 0 (or a non-finite that fell through) means "keep every pause".
+    maxGapMs: typeof wire.maxGapMs === 'number' && wire.maxGapMs > 0 ? wire.maxGapMs : Infinity,
+  };
 }
 
 /** A change to one word. `prev` and `next` hold only the fields that differ. */
@@ -41,6 +123,7 @@ export type DocPatch =
   | { kind: 'words'; edits: WordPatch[] }
   | { kind: 'cut'; prev: CutSettings; next: CutSettings }
   | { kind: 'captions'; prev: CaptionSettings; next: CaptionSettings }
+  | { kind: 'speed'; prev: number; next: number }
   /** Escape hatch for a wholesale transcript swap (re-transcribe). */
   | { kind: 'replace'; prev: Word[]; next: Word[] };
 
@@ -48,8 +131,9 @@ export function docFromTranscript(
   transcript: Transcript,
   cut: CutSettings,
   captions: CaptionSettings = DEFAULT_CAPTIONS,
+  speed: number = DEFAULT_SPEED,
 ): Doc {
-  return { words: transcript.words, cut, captions, rev: 0 };
+  return { words: transcript.words, cut, captions, speed, rev: 0 };
 }
 
 /** The word ids a patch touches. Free — the patch already lists them. */
@@ -69,6 +153,7 @@ export function affectedIds(patch: DocPatch): string[] {
     }
     case 'cut':
     case 'captions':
+    case 'speed':
       return [];
   }
 }
@@ -87,6 +172,8 @@ export function invertPatch(patch: DocPatch): DocPatch {
       return { kind: 'cut', prev: patch.next, next: patch.prev };
     case 'captions':
       return { kind: 'captions', prev: patch.next, next: patch.prev };
+    case 'speed':
+      return { kind: 'speed', prev: patch.next, next: patch.prev };
     case 'replace':
       return { kind: 'replace', prev: patch.next, next: patch.prev };
   }
@@ -115,6 +202,8 @@ export function applyPatch(doc: Doc, patch: DocPatch): Doc {
       return { ...doc, cut: { ...patch.next }, rev: doc.rev + 1 };
     case 'captions':
       return { ...doc, captions: { ...patch.next }, rev: doc.rev + 1 };
+    case 'speed':
+      return { ...doc, speed: patch.next, rev: doc.rev + 1 };
     case 'replace':
       return { ...doc, words: patch.next, rev: doc.rev + 1 };
   }
@@ -191,6 +280,8 @@ export function isEmptyPatch(patch: DocPatch): boolean {
       return (Object.keys(patch.next) as Array<keyof CaptionSettings>).every(
         (k) => patch.prev[k] === patch.next[k],
       );
+    case 'speed':
+      return patch.prev === patch.next;
     case 'replace':
       return false;
   }
@@ -203,6 +294,7 @@ export function patchBytes(patch: DocPatch): number {
       return patch.edits.length * 150;
     case 'cut':
     case 'captions':
+    case 'speed':
       return 100;
     case 'replace':
       return (patch.prev.length + patch.next.length) * 130;

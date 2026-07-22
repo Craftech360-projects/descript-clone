@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { writeFile, unlink, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { CONFIG } from './config.ts';
 import type { Edl } from '../../../packages/core/src/types.ts';
 import { buildRenderPlan } from '../../../packages/core/src/render.ts';
 import { outputDuration } from '../../../packages/core/src/edl.ts';
@@ -32,12 +33,15 @@ export async function checkTools(): Promise<{ ffmpeg: string | null; ffprobe: st
       return null;
     }
   };
-  const [ffmpeg, ffprobe] = await Promise.all([version('ffmpeg'), version('ffprobe')]);
+  const [ffmpeg, ffprobe] = await Promise.all([
+    version(CONFIG.ffmpegPath),
+    version(CONFIG.ffprobePath),
+  ]);
   return { ffmpeg, ffprobe };
 }
 
 export async function probe(path: string): Promise<MediaInfo> {
-  const out = await run('ffprobe', [
+  const out = await run(CONFIG.ffprobePath, [
     '-v', 'error',
     '-print_format', 'json',
     '-show_format',
@@ -83,7 +87,7 @@ function parseFps(rational: unknown): number | undefined {
  * paid API, wasteful.
  */
 export async function extractAudioForAsr(input: string, output: string): Promise<string> {
-  await run('ffmpeg', [
+  await run(CONFIG.ffmpegPath, [
     '-hide_banner', '-loglevel', 'error', '-y',
     '-i', input,
     '-vn',
@@ -109,14 +113,33 @@ export interface RenderHooks {
   onSpawn?: (child: ChildProcess) => void;
 }
 
+/** What to render, as one object: this was six positional arguments. */
+export interface RenderJob {
+  input: string;
+  output: string;
+  /** Audio-only sources skip the video chain entirely. */
+  hasVideo: boolean;
+  /** ASS markup to burn into the picture. Omit to render clean. */
+  subtitles?: string;
+  /** Output speed multiplier. Must already be clamped — see clampSpeed. */
+  speed?: number;
+  /**
+   * Source frame rate. The video cut re-numbers kept frames against it, so a
+   * wrong or missing value is a broken output rather than a slow one — when the
+   * project record has none, renderEdl probes for it rather than guessing.
+   */
+  fps?: number;
+}
+
 export async function renderEdl(
   edl: Edl,
-  input: string,
-  output: string,
-  hasVideo: boolean,
-  subtitles?: string,
+  job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
+  const { input, output, hasVideo, subtitles, speed = 1 } = job;
+  // Old projects were imported before fps was read off ffprobe, so their record
+  // has none. One probe costs milliseconds; getting this wrong costs the render.
+  const fps = hasVideo ? (job.fps ?? (await probe(input)).fps) : undefined;
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const scriptPath = join(tmpdir(), `edl-${stamp}.txt`);
   // libass picks the parser from the extension, so this must stay .ass.
@@ -137,15 +160,20 @@ export async function renderEdl(
   // muxer from the extension, so "video.mp4.part" fails outright with "Unable to
   // choose an output format". "video.part.mp4" still reads as mp4.
   const partial = output.replace(/(\.[^.]+)$/, '.part$1');
-  const plan = buildRenderPlan(edl, { input, output: partial, hasVideo, subtitlePath });
+  const plan = buildRenderPlan(edl, { input, output: partial, hasVideo, subtitlePath, speed, fps });
   await writeFile(scriptPath, plan.filterScript, 'utf8');
 
   // The output length is known exactly, so this progress is real, not a guess.
-  const target = outputDuration(edl);
+  //
+  // Speed divides it, and must: ffmpeg reports out_time against the OUTPUT, which
+  // at 1.2x reaches the end after 1/1.2 of the un-sped length. Measuring against
+  // the wrong target does not just skew the bar — it pins at 83% and never
+  // finishes, which reads as a hung render.
+  const target = outputDuration(edl, speed);
 
   try {
     const args = plan.args.map((a) => (a === '{SCRIPT}' ? scriptPath : a));
-    await runWithProgress('ffmpeg', args, target, hooks);
+    await runWithProgress(CONFIG.ffmpegPath, args, target, hooks);
     await rename(partial, output);
     return { output, segments: plan.segments, burnedIn: Boolean(subtitlePath && hasVideo) };
   } catch (e) {
@@ -214,7 +242,7 @@ function runWithProgress(
  * none, because you cannot use it to find the edit point you are looking for.
  */
 export async function computePeaks(input: string, buckets = 1600): Promise<number[]> {
-  const pcm = await runBinary('ffmpeg', [
+  const pcm = await runBinary(CONFIG.ffmpegPath, [
     '-hide_banner', '-loglevel', 'error',
     '-i', input,
     '-vn',

@@ -1,6 +1,6 @@
 node_modules/
 dist/
-
+.env
 media/uploads/*
 media/renders/*
 media/projects/*

@@ -9,7 +9,15 @@ interface Props {
   open: boolean;
   onClose: () => void;
   project: Project | null;
-  stats: { words: number; kept: number; cuts: number; outputSec: number; sourceSec: number };
+  stats: {
+    words: number;
+    kept: number;
+    cuts: number;
+    /** Already divided by speed — this is the finished file's length. */
+    outputSec: number;
+    sourceSec: number;
+    speed: number;
+  };
   burnCaptions: boolean;
   setBurnCaptions: (v: boolean) => void;
   onRender: () => void;
@@ -31,7 +39,9 @@ export default function ExportDialog(p: Props) {
   const [format, setFormat] = useState('srt');
   const hasVideo = Boolean(p.project?.hasVideo);
   const rendering = p.busy === 'render';
-  const removed = Math.max(0, p.stats.sourceSec - p.stats.outputSec);
+  // Not clamped at 0 any more: below 1x the render comes out LONGER than the
+  // source, and "−0:00 removed" would be a lie in both halves.
+  const removed = p.stats.sourceSec - p.stats.outputSec;
   const nothingLeft = p.stats.kept === 0;
 
   return (
@@ -48,10 +58,19 @@ export default function ExportDialog(p: Props) {
         </>
       }
     >
+      {/* Speed is set in the transport, which is behind this dialog — so say it
+        * here. It changes the file you are about to commit to, and finding that
+        * out after a two-minute render is the wrong time. */}
       <div className="hero">
         <strong>{timecode(p.stats.outputSec)}</strong>
-        <small>from {timecode(p.stats.sourceSec)} · −{timecode(removed)} removed</small>
-        <small>{p.stats.cuts} segments</small>
+        <small>
+          from {timecode(p.stats.sourceSec)} · {removed >= 0 ? '−' : '+'}
+          {timecode(Math.abs(removed))} {removed >= 0 ? 'removed' : 'longer'}
+        </small>
+        <small>
+          {p.stats.cuts} segments
+          {p.stats.speed !== 1 && ` · ${Number(p.stats.speed.toFixed(2))}x speed`}
+        </small>
       </div>
 
       {/* The server 400s on an empty EDL. Catch it before the button, not after. */}

@@ -15,6 +15,8 @@ interface Props {
   words: Word[];
   edl: Edl | null;
   captions: CaptionSettings;
+  /** Gates the placement guide — see the render below. */
+  playing: boolean;
   /** Read imperatively at 60Hz — see the rAF below. */
   getCurrentTime: () => number;
   onDragStart: () => void;
@@ -47,6 +49,10 @@ interface Box {
 export default function CaptionOverlay(p: Props) {
   const [box, setBox] = useState<Box | null>(null);
   const [cueIndex, setCueIndex] = useState(-1);
+  // The last cue that was really on screen. The placement guide falls back to
+  // it, so pausing in a silence holds the line you just heard rather than
+  // jumping to some unrelated one.
+  const [guideIndex, setGuideIndex] = useState(0);
   const dragging = useRef(false);
 
   const cues = useMemo(
@@ -118,24 +124,48 @@ export default function CaptionOverlay(p: Props) {
     let raf = 0;
     const frame = () => {
       raf = requestAnimationFrame(frame);
+
+      // Don't move the caption while the picture is in flight. Assigning
+      // currentTime updates the reported position AT ONCE, but the frame does
+      // not land until the decoder has run up from the previous H.264 keyframe
+      // — measured 116ms at p50 against this app's own media, ~7 of these
+      // frames. Reading it anyway swaps the caption to the next line over a
+      // picture still showing the last one, at every cut. usePlayback guards
+      // the same way for the same reason; the caption and the frame have to be
+      // talking about the same moment.
+      const video = p.videoRef.current;
+      if (video?.seeking) return;
+
       const output = sourceToOutput(edl, p.getCurrentTime());
-      setCueIndex(
-        output === null ? -1 : cues.findIndex((c) => output >= c.start && output < c.end),
-      );
+      // null means the playhead is in material the edit removed — a transient
+      // of playback mechanics, not a statement that nothing is being said. Hold
+      // the last cue rather than blanking through it.
+      if (output === null) return;
+
+      const i = cues.findIndex((c) => output >= c.start && output < c.end);
+      setCueIndex(i);
+      if (i >= 0) setGuideIndex(i);
     };
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [cues, p.edl, p.getCurrentTime, p.captions.enabled]);
+  }, [cues, p.edl, p.getCurrentTime, p.captions.enabled, p.videoRef]);
 
   if (!p.captions.enabled || !box) return null;
 
-  // Between cues there is nothing being said — but an empty overlay is
-  // impossible to grab. Hold the first cue as a dimmed guide so the caption is
-  // always there to place, and mark it so it never reads as real content.
+  // Between cues nothing is being said, and the burn draws nothing there — so
+  // while playing, neither does this. Showing anything in a 41ms gap is both a
+  // lie about the frame and, 275 times over a 14-minute video, the strobe this
+  // used to be: it fell back to cues[0], so every gap flashed the video's FIRST
+  // line over whatever you were watching. toCues now closes the short gaps; the
+  // ones left are real silences, and a real silence has no caption.
+  //
+  // Paused, the dimmed guide comes back — an empty overlay is impossible to
+  // grab, and placing it is the one job that needs it.
   const active = cueIndex >= 0 ? cues[cueIndex] : null;
-  const text = active?.text ?? cues[0]?.text ?? 'Captions';
   const placeholder = active === null;
+  const hidden = placeholder && p.playing;
+  const text = active?.text ?? cues[guideIndex]?.text ?? cues[0]?.text ?? 'Captions';
 
   // Every length scales off the picture height, exactly as toAss does.
   const scale = box.height / CAPTION_REFERENCE_HEIGHT;
@@ -185,6 +215,9 @@ export default function CaptionOverlay(p: Props) {
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         style={{
+          // Hidden rather than unmounted: pointer capture bypasses hit testing,
+          // so a drag that outlives its cue keeps receiving events.
+          visibility: hidden ? 'hidden' : undefined,
           left: `${p.captions.x * 100}%`,
           top: `${p.captions.y * 100}%`,
           fontFamily: fontCss(p.captions.font),

@@ -10,6 +10,7 @@ import {
   type AsrOptions,
   type Thumbs,
 } from './api.ts';
+import { renderFilename, saveAs } from './download.ts';
 import Script from './Script.tsx';
 import Timeline from './Timeline.tsx';
 import TitleBar from './shell/TitleBar.tsx';
@@ -339,10 +340,15 @@ export default function App() {
 
       setResult(r);
       setDialog(null);
+      // Offer the save without being asked. A render is a terminal act — the
+      // user came here to get a file out, and making them find a link
+      // afterwards is a step that exists only because we did not take it.
+      // The link in the monitor stays, for saving a second copy.
+      saveAs(r.url, renderFilename(project!, r));
       setNotice(
         r.captionsSkipped
           ? 'Rendered without captions — this project is audio only, so there is no picture to burn them onto.'
-          : `Rendered ${fmtShort(r.outputDuration)} in ${r.renderMs}ms.`,
+          : `Rendered ${fmtShort(r.outputDuration)} in ${r.renderMs}ms — choose where to save it.`,
       );
       return r;
     }).finally(() => setJob(null));

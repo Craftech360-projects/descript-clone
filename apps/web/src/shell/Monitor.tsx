@@ -1,5 +1,6 @@
 import { forwardRef, type ReactNode } from 'react';
 import type { Project, RenderResult } from '../api.ts';
+import { renderFilename } from '../download.ts';
 
 interface Props {
   project: Project | null;
@@ -59,9 +60,11 @@ const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
             {project.fps ? ` · ${formatFps(project.fps)}` : ''}
           </span>
         )}
-        {result && (
-          <a href={result.url} download className="dl">
-            Download render · {result.renderMs}ms
+        {/* The save already happened when the render finished. This is here for
+          * the second copy, or for a cancelled Save dialog. */}
+        {project && result && (
+          <a href={result.url} download={renderFilename(project, result)} className="dl">
+            Save render again
           </a>
         )}
       </div>

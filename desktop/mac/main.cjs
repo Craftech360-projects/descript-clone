@@ -13,7 +13,7 @@
  * "build" block in package.json.
  */
 
-const { app, BrowserWindow, Menu, dialog } = require('electron');
+const { app, BrowserWindow, Menu, dialog, session } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
@@ -119,7 +119,52 @@ async function main() {
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
+  installSaveDialog(win);
   win.loadURL(`http://127.0.0.1:${port}`);
+}
+
+/**
+ * Turn the app's one download — the finished render — into a real Save dialog.
+ *
+ * Chromium's default is to write to the downloads folder and say nothing. In a
+ * browser that is fine, because the browser has a downloads shelf to tell you
+ * where it went. Here there is no shelf, so a finished render simply vanishes:
+ * the encode succeeded, the file exists, and the user has no idea where. Ask.
+ *
+ * setSavePath must be called synchronously from the event, so this uses the
+ * blocking dialog on purpose.
+ */
+function installSaveDialog(win) {
+  // Sensible on the second save: people put their exports in one place.
+  let lastDir = null;
+
+  session.defaultSession.on('will-download', (_event, item) => {
+    const name = item.getFilename();
+    const ext = path.extname(name).replace('.', '') || 'mp4';
+    const chosen = dialog.showSaveDialogSync(win, {
+      title: 'Save render',
+      defaultPath: path.join(lastDir ?? app.getPath('videos'), name),
+      filters: [
+        { name: ext.toUpperCase(), extensions: [ext] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+
+    if (!chosen) {
+      item.cancel(); // The monitor keeps a link, so cancelling loses nothing.
+      return;
+    }
+
+    lastDir = path.dirname(chosen);
+    item.setSavePath(chosen);
+
+    item.once('done', (__event, state) => {
+      // "cancelled" is the user's own doing above; only real failures are news.
+      if (state === 'interrupted') {
+        dialog.showErrorBox('Save failed', `Could not write ${chosen}.`);
+      }
+    });
+  });
 }
 
 app.on('window-all-closed', () => app.quit());

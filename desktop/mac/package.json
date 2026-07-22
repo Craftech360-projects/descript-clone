@@ -9,7 +9,9 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --mac"
+    "dist": "npm run build && electron-builder --mac --arm64",
+    "dist:intel": "npm run build && electron-builder --mac --x64",
+    "dist:arm64-on-intel": "npm_config_arch=arm64 npm install ffmpeg-static --force && npm run dist"
   },
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
@@ -24,6 +26,7 @@
     "appId": "com.example.transcript-editor",
     "productName": "Transcript Editor",
     "directories": { "output": "dist" },
+    "afterPack": "afterPack.cjs",
     "files": ["main.cjs", "package.json"],
     "extraResources": [{ "from": "resources", "to": "." }],
     "asarUnpack": [
@@ -33,7 +36,9 @@
     "mac": {
       "target": "dmg",
       "category": "public.app-category.video",
-      "identity": null
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
     }
   }
 }

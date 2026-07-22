@@ -60,6 +60,35 @@ npm run dist
 The installer lands in `desktop/<platform>/dist/`. To smoke-test without
 packaging (opens the app straight from source): `npm start`.
 
+### Mac: which chip you build on matters
+
+`npm run dist` builds **Apple Silicon (arm64)** and must be run on an Apple
+Silicon Mac. `npm run dist:intel` builds x86_64 for older Intel Macs.
+
+**Building the arm64 app on an Intel Mac works**, with one catch. Electron and
+`codesign` cross-build without complaint, and `ffprobe-static` ships every arch —
+but `ffmpeg-static` downloads a single binary for whatever machine ran
+`npm install`. Left alone, you get an Apple Silicon app carrying an x86_64
+ffmpeg: it launches fine and dies on the first render. `afterPack.cjs` checks
+for exactly this and fails the build rather than shipping it.
+
+So from an Intel Mac, use:
+
+```
+npm run dist:arm64-on-intel
+```
+
+which refetches ffmpeg for arm64 (`npm_config_arch=arm64`) before packaging.
+
+> Afterwards this folder's `node_modules` holds an **arm64** ffmpeg, so `npm
+> start` and `npm run dist:intel` will misbehave on that Intel Mac until you run
+> a plain `npm install` to put the x64 binary back. A routine `npm install` also
+> silently reverts it — always go through the script above.
+
+An Intel build does run on Apple Silicon via Rosetta, but macOS shows a
+"Support Ending for Intel-Based Apps" warning and a future macOS will drop it.
+Build arm64 for M-series machines.
+
 ## The ElevenLabs key
 
 The key is **baked into the app at build time**. `build.mjs` reads it and esbuild
@@ -87,9 +116,24 @@ is for a couple of known users:
 - **Windows:** SmartScreen shows an "unrecognized app" warning on first run.
   Click **More info → Run anyway**, once. A code-signing cert (~$200+/yr)
   removes it.
-- **macOS:** Gatekeeper blocks an unsigned app on double-click. **Right-click →
-  Open** the first time, then confirm. A full fix needs an Apple Developer
-  account ($99/yr) and notarization, which also requires building on a Mac.
+- **macOS:** the build is **ad-hoc signed** (`afterPack.cjs`, `codesign --sign -`).
+  That is not optional on Apple Silicon: an arm64 binary with no signature at all
+  is refused by the kernel, and the app fails to launch with a bare "can't be
+  opened" — not even a Gatekeeper prompt. Ad-hoc signing costs nothing and needs
+  no Apple account.
+
+  It is still not *notarized*, so a `.dmg` that arrives by download or AirDrop
+  carries the quarantine flag and Gatekeeper stops it once. On macOS 15+ the old
+  right-click → Open trick is gone; the user must open **System Settings →
+  Privacy & Security**, scroll to the blocked-app notice, and click **Open
+  Anyway**. Or, from a terminal:
+
+  ```
+  xattr -dr com.apple.quarantine "/Applications/Transcript Editor.app"
+  ```
+
+  A full fix needs an Apple Developer account ($99/yr) plus notarization, which
+  also requires building on a Mac.
 
 ## App icon (optional)
 

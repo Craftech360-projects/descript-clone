@@ -49,7 +49,7 @@ import {
   useEditor,
   flushSave,
 } from './store/editor.ts';
-import { DEFAULT_CAPTIONS } from '../../../packages/core/src/caption-style.ts';
+import { DEFAULT_CAPTIONS, normalizeCaptions } from '../../../packages/core/src/caption-style.ts';
 import CaptionOverlay from './shell/CaptionOverlay.tsx';
 import { lastStartingAtOrBefore } from '../../../packages/core/src/paragraphs.ts';
 import { speakers, colorMap } from './speakers.ts';
@@ -223,10 +223,14 @@ export default function App() {
   const openTranscript = (p: Project, defaults: CutSettings) => {
     // Cut settings, caption style and speed are all persisted per project, so
     // they come off the record. Anything a project saved before these existed is
-    // missing, and each falls back: cutFromWire to the engine defaults, captions
-    // to DEFAULT_CAPTIONS, speed (via clampSpeed downstream) to 1.
+    // missing, and each fills in: cutFromWire to the engine defaults,
+    // normalizeCaptions per FIELD, speed (via clampSpeed downstream) to 1.
+    //
+    // Per field, not per object. This was `p.captions ?? DEFAULT_CAPTIONS`, which
+    // only covers a project that never had captions at all — one that had them
+    // before a setting was added kept the gap. See normalizeCaptions.
     if (p.transcript) {
-      loadDoc(p.transcript, cutFromWire(p.cut, defaults), p.captions ?? DEFAULT_CAPTIONS, p.speed);
+      loadDoc(p.transcript, cutFromWire(p.cut, defaults), normalizeCaptions(p.captions), p.speed);
     } else clearDoc();
   };
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toCues, toSrt, toAss, scaleCues } from './captions.ts';
+import { toCues, toSrt, toAss, scaleCues, karaokeSpans } from './captions.ts';
 import { compileEdl } from './edl.ts';
 import { buildRenderPlan, escapeSubtitlePath } from './render.ts';
 import type { Transcript } from './types.ts';
@@ -281,6 +281,59 @@ test('sidecar cues are re-timed by speed, karaoke tags included', () => {
   // toAss reads word start/end as a DELTA for \k. Left unscaled, each word would
   // hold twice as long as the picture it is painted over.
   assert.equal(fast[0].words[0].end - fast[0].words[0].start, (cues[0].words[0].end - cues[0].words[0].start) / 2);
+});
+
+test('the spans the preview animates are the spans the burn writes', () => {
+  // This is the whole contract. The preview reads karaokeSpans directly; toAss
+  // turns the same spans into \k durations. If they ever diverge, the monitor
+  // lights up a word the export does not.
+  const t = fromText('one two three four');
+  const cues = toCues(t, compileEdl(t, NO_PAD), { maxChars: 999 });
+  const spans = karaokeSpans(cues[0]);
+
+  const tags = [...toAss(cues).matchAll(/\{\\k(\d+)\}/g)].map((m) => Number(m[1]));
+  assert.equal(tags.length, spans.length, 'one \\k per word');
+
+  let t0 = cues[0].start;
+  for (let i = 0; i < spans.length; i++) {
+    assert.equal(spans[i].start, t0, `span ${i} starts where the tags before it end`);
+    assert.equal(Math.round((spans[i].end - spans[i].start) * 100), tags[i]);
+    t0 = spans[i].end;
+  }
+});
+
+test('spans run forward and never overlap', () => {
+  const t = fromText('one two three four five six');
+  const cues = toCues(t, compileEdl(t, NO_PAD), { maxChars: 999 });
+  const spans = karaokeSpans(cues[0]);
+
+  for (let i = 0; i < spans.length; i++) {
+    assert.ok(spans[i].end > spans[i].start, `span ${i} has positive length`);
+    if (i > 0) assert.equal(spans[i].start, spans[i - 1].end, 'no gap and no overlap');
+  }
+});
+
+test('the highlight colour reaches the burn as SecondaryColour', () => {
+  // Amber was hardcoded here, so the export animated in a colour the user never
+  // picked and the preview never showed.
+  const t = fromText('one two');
+  const cues = toCues(t, compileEdl(t, NO_PAD));
+  const ass = toAss(cues, { color: '#FFFFFF', highlightColor: '#FF0000' });
+
+  const style = ass.split('\n').find((l) => l.startsWith('Style: Default'))!;
+  const [primary, secondary] = style.split(',').slice(3, 5);
+  assert.equal(primary, '&H00FFFFFF', 'a spoken word lands on `color`');
+  // ASS is little-endian BGR: pure red is 0000FF, not FF0000.
+  assert.equal(secondary, '&H000000FF', 'an unspoken word waits in `highlightColor`');
+});
+
+test('turning karaoke off writes a flat line with no \\k at all', () => {
+  const t = fromText('one two three');
+  const cues = toCues(t, compileEdl(t, NO_PAD), { maxChars: 999 });
+  const ass = toAss(cues, { karaoke: false });
+
+  assert.ok(!ass.includes('\\k'), 'no karaoke tags');
+  assert.ok(ass.includes('one two three'), 'the words survive as one run of text');
 });
 
 test('scaleCues at 1x is a no-op that copies nothing', () => {

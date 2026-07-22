@@ -14,7 +14,7 @@ import * as store from './store.ts';
 import * as jobs from './jobs.ts';
 
 import {
-  DEFAULT_CAPTIONS,
+  normalizeCaptions,
   type CaptionSettings,
 } from '../../../packages/core/src/caption-style.ts';
 import { compileEdl, outputDuration } from '../../../packages/core/src/edl.ts';
@@ -257,7 +257,10 @@ app.post('/api/projects/:id/captions', async (c) => {
   const { format = 'srt', maxChars, maxDurationMs, captions: sent, speed: sentSpeed, ...cut } =
     await c.req.json<any>().catch(() => ({}));
 
-  const captions: CaptionSettings = { ...DEFAULT_CAPTIONS, ...project.captions, ...(sent ?? {}) };
+  const captions: CaptionSettings = normalizeCaptions({
+    ...normalizeCaptions(project.captions),
+    ...(sent ?? {}),
+  });
   const speed = clampSpeed(sentSpeed ?? project.speed);
 
   const edl = compileEdl(project.transcript, toCompileOptions(cut));
@@ -313,11 +316,12 @@ app.post('/api/projects/:id/render', async (c) => {
   // The style comes from the request when the client sends it and falls back to
   // what the project has stored, so a render triggered from a stale tab still
   // burns the placement the user actually set.
-  const captions: CaptionSettings = {
-    ...DEFAULT_CAPTIONS,
-    ...project.captions,
+  // normalizeCaptions per layer, because a spread lets an explicitly-undefined
+  // field from the request punch a hole through the stored value beneath it.
+  const captions: CaptionSettings = normalizeCaptions({
+    ...normalizeCaptions(project.captions),
     ...(options.captions ?? {}),
-  };
+  });
   const wantsCaptions = Boolean(options.burnCaptions ?? captions.enabled);
   const subtitles =
     wantsCaptions && project.hasVideo

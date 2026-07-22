@@ -102,16 +102,22 @@ export function Color({ value, onChange, onCommit, label }: {
   onCommit?: () => void;
   label: string;
 }) {
+  // Settings arrive from disk, where the type is a promise rather than a
+  // guarantee. `value.toUpperCase()` on a field a stored project predates threw,
+  // and a throw during render unmounts the tree — so one absent colour blanked
+  // the whole editor. A control that cannot render its input should show a
+  // fallback, not take the app down with it.
+  const hex = /^#[0-9a-f]{6}$/i.test(value) ? value : '#000000';
   return (
     <label className="color-row">
       <input
         type="color"
-        value={value}
+        value={hex}
         onChange={(e) => onChange(e.target.value)}
         onBlur={onCommit}
       />
       <span>{label}</span>
-      <code>{value.toUpperCase()}</code>
+      <code>{hex.toUpperCase()}</code>
     </label>
   );
 }

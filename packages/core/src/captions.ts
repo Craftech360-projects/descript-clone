@@ -1,5 +1,6 @@
 import { sourceToOutput, splicePoints } from './edl.ts';
 import {
+  CAPTION_MARGIN,
   captionScale,
   DEFAULT_CAPTIONS,
   hexToAss,
@@ -182,6 +183,42 @@ export function toVtt(cues: Cue[]): string {
   return `WEBVTT\n\n${body}`;
 }
 
+/** One word of a cue, placed on the OUTPUT clock. */
+export interface Span {
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * What a cue's \k tags compile to, as absolute times.
+ *
+ * Both the burn and the preview go through this, and that is the entire point.
+ * \k is a run of DURATIONS in centiseconds, so the position of the fourth word
+ * is the sum of the three before it — reconstruct that sum differently in two
+ * places and the preview highlights a word the export does not. Including the
+ * centisecond rounding: it is a real quantisation the burn performs, up to 5ms
+ * per word and cumulative across a cue, so the preview performs it too.
+ */
+export function karaokeSpans(cue: Cue): Span[] {
+  const spans: Span[] = [];
+  let t = cue.start;
+  for (let i = 0; i < cue.words.length; i++) {
+    const word = cue.words[i];
+    const next = cue.words[i + 1];
+    const end = next ? sourceGap(word, next) : word.end;
+    const seconds = karaokeCentiseconds(word.start, end) / 100;
+    spans.push({ text: word.text, start: t, end: t + seconds });
+    t += seconds;
+  }
+  return spans;
+}
+
+/** \k's unit. Floored at 1 — a zero-length syllable is skipped entirely by libass. */
+function karaokeCentiseconds(start: number, end: number): number {
+  return Math.max(1, Math.round((end - start) * 100));
+}
+
 /** The frame the captions are being burned onto. */
 export interface Frame {
   width: number;
@@ -231,7 +268,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${s.font},${fontSize},${hexToAss(s.color)},${ASS_HIGHLIGHT},${hexToAss(s.strokeColor)},${back},-1,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadow},5,40,40,40,1
+Style: Default,${s.font},${fontSize},${hexToAss(s.color)},${hexToAss(s.highlightColor)},${hexToAss(s.strokeColor)},${back},-1,0,0,0,100,100,0,0,${borderStyle},${outlineWidth},${shadow},5,${CAPTION_MARGIN},${CAPTION_MARGIN},${CAPTION_MARGIN},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
@@ -240,35 +277,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   const posY = Math.round(s.y * frame.height);
 
   const events = cues.map((cue) => {
-    // \k is in centiseconds, and colours the word as it is spoken.
-    const karaoke = cue.words
-      .map((w, i) => {
-        const next = cue.words[i + 1];
-        const wordEnd = next ? sourceGap(w, next) : w.end;
-        const cs = Math.max(1, Math.round((wordEnd - w.start) * 100));
-        return `{\\k${cs}}${assText(w.text, s.allCaps)} `;
-      })
-      .join('')
-      .trim();
+    // Karaoke off means one flat line in `color` — no \k, so SecondaryColour
+    // never shows and the burn matches a preview that is not animating either.
+    const body = s.karaoke
+      ? karaokeSpans(cue)
+          .map((span) => {
+            const cs = karaokeCentiseconds(span.start, span.end);
+            return `{\\k${cs}}${assText(span.text, s.allCaps)} `;
+          })
+          .join('')
+          .trim()
+      : assText(cue.text, s.allCaps);
 
     return (
       `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Default,,0,0,0,,` +
-      `{\\pos(${posX},${posY})}${karaoke}`
+      `{\\pos(${posX},${posY})}${body}`
     );
   });
 
   return `${header}\n${events.join('\n')}\n`;
 }
-
-/**
- * The colour a word holds until it is spoken. Not exposed as a control yet, so
- * it stays the long-standing amber default.
- *
- * Note the direction: \k starts a word in SecondaryColour and flips it to
- * PrimaryColour once sung — so this amber is the UNSPOKEN state and the user's
- * chosen colour is where each word lands.
- */
-const ASS_HIGHLIGHT = '&H0000D5FF';
 
 /**
  * Escape text for an ASS event.

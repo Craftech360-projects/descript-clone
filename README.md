@@ -229,9 +229,11 @@ audio say something new needs Overdub, and Overdub needs a TTS endpoint.
   Worth moving to once the minimum ffmpeg version is pinned — `buildRenderPlan`
   emits the flag in one place.
 - **The karaoke `\k` colours read "backwards"** from most social captions: a word
-  starts amber and turns to your chosen colour once spoken, rather than lighting
-  up as it is said. That is what `\k` does — it flips SecondaryColour to
-  PrimaryColour — and the amber is not exposed as a control yet.
+  starts in the highlight colour and turns to your chosen colour once spoken,
+  rather than lighting up as it is said. That is what `\k` does — it flips
+  SecondaryColour to PrimaryColour. Both ends are controls now ("Not yet spoken"
+  and "Spoken"), and the panel labels them in that direction rather than trying
+  to talk anyone out of the semantics.
 - **Caption fonts are limited to three, on purpose.** libass resolves families
   through fontconfig on the machine running ffmpeg. Arial / Times New Roman /
   Courier New are metric-compatible with the Liberation faces the Docker image

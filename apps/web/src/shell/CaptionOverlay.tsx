@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { sourceToOutput } from '../../../../packages/core/src/edl.ts';
-import { toCues } from '../../../../packages/core/src/captions.ts';
+import { karaokeSpans, toCues } from '../../../../packages/core/src/captions.ts';
 import {
   CAPTION_REFERENCE_HEIGHT,
   captionBoxFill,
+  captionWrapFraction,
   clampAnchor,
   fontCss,
   type CaptionSettings,
@@ -30,6 +31,8 @@ interface Box {
   top: number;
   width: number;
   height: number;
+  /** The frame's own pixel width. Wrapping is decided in these units, not CSS ones. */
+  frameWidth: number;
 }
 
 /**
@@ -49,6 +52,10 @@ interface Box {
 export default function CaptionOverlay(p: Props) {
   const [box, setBox] = useState<Box | null>(null);
   const [cueIndex, setCueIndex] = useState(-1);
+  // How many words of the current cue have started. \k flips a word to
+  // PrimaryColour at the INSTANT its syllable begins, so this is a count of
+  // spans already reached, not of spans finished.
+  const [spoken, setSpoken] = useState(0);
   // The last cue that was really on screen. The placement guide falls back to
   // it, so pausing in a silence holds the line you just heard rather than
   // jumping to some unrelated one.
@@ -64,6 +71,11 @@ export default function CaptionOverlay(p: Props) {
         : [],
     [p.words, p.edl, p.captions.maxChars],
   );
+
+  // Precomputed per cue rather than per frame: the spans for a cue never change
+  // while it is on screen, and rebuilding them at 60Hz to answer "which word"
+  // would be the one genuinely wasteful thing in this loop.
+  const spans = useMemo(() => cues.map(karaokeSpans), [cues]);
 
   // ── keep the overlay glued to the picture, not the element ──────────────────
   //
@@ -88,6 +100,7 @@ export default function CaptionOverlay(p: Props) {
         top: (rect.height - height) / 2,
         width,
         height,
+        frameWidth: vw,
       });
     };
 
@@ -144,12 +157,21 @@ export default function CaptionOverlay(p: Props) {
 
       const i = cues.findIndex((c) => output >= c.start && output < c.end);
       setCueIndex(i);
-      if (i >= 0) setGuideIndex(i);
+      if (i < 0) return;
+      setGuideIndex(i);
+
+      // Linear scan, not findIndex-and-negate: a cue is a handful of words, and
+      // this has to answer "how many have started" even when the playhead is
+      // past all of them.
+      const list = spans[i];
+      let n = 0;
+      while (n < list.length && list[n].start <= output) n++;
+      setSpoken(n);
     };
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [cues, p.edl, p.getCurrentTime, p.captions.enabled, p.videoRef]);
+  }, [cues, spans, p.edl, p.getCurrentTime, p.captions.enabled, p.videoRef]);
 
   if (!p.captions.enabled || !box) return null;
 
@@ -166,6 +188,11 @@ export default function CaptionOverlay(p: Props) {
   const placeholder = active === null;
   const hidden = placeholder && p.playing;
   const text = active?.text ?? cues[guideIndex]?.text ?? cues[0]?.text ?? 'Captions';
+
+  // Word-by-word only over a cue that is really on screen. The placement guide
+  // is a still: animating a line nobody is speaking would misrepresent the
+  // frame, and the guide exists to be grabbed, not watched.
+  const karaoke = p.captions.karaoke && active ? spans[cueIndex] : null;
 
   // Every length scales off the picture height, exactly as toAss does.
   const scale = box.height / CAPTION_REFERENCE_HEIGHT;
@@ -235,15 +262,29 @@ export default function CaptionOverlay(p: Props) {
           background: boxFill ?? 'transparent',
           // ASS reuses the outline width as the box's padding.
           padding: boxFill !== null ? `${strokeSize}px ${strokeSize * 2}px` : 0,
+          // ASS BackColour is the shadow, and toAss sets its alpha to 0x80 —
+          // a half-strength scrim, not the 0.85 this used to draw.
           textShadow:
             p.captions.backdrop === 'shadow'
-              ? `${3 * scale}px ${3 * scale}px ${2 * scale}px rgba(0,0,0,0.85)`
+              ? `${3 * scale}px ${3 * scale}px ${2 * scale}px rgba(0,0,0,0.5)`
               : undefined,
-          // ~the widest line toCues will emit, so wrapping previews truthfully.
-          maxWidth: `${Math.min(96, p.captions.maxChars * 1.9)}%`,
+          // Where libass wraps, measured — not guessed from character count.
+          maxWidth: `${captionWrapFraction(box.frameWidth) * 100}%`,
         }}
       >
-        {text}
+        {karaoke
+          ? karaoke.map((span, i) => (
+              <span
+                key={i}
+                // Before its syllable begins a word waits in highlightColor;
+                // from that instant on it holds `color`. That is \k, exactly.
+                style={{ color: i < spoken ? p.captions.color : p.captions.highlightColor }}
+              >
+                {i > 0 ? ' ' : ''}
+                {span.text}
+              </span>
+            ))
+          : text}
       </div>
     </div>
   );

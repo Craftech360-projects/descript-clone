@@ -255,8 +255,24 @@ function CaptionsField(p: Props) {
             value={c.color}
             onChange={(v) => set({ color: v })}
             onCommit={() => commit('Change caption colour')({})}
-            label="Text"
+            label={c.karaoke ? 'Spoken' : 'Text'}
           />
+
+          <Check
+            checked={c.karaoke}
+            onChange={(v) => commit(v ? 'Enable word highlight' : 'Disable word highlight')({ karaoke: v })}
+            label="Highlight each word as it is spoken"
+          />
+          {/* The direction surprises people, so the labels say it outright: the
+            * highlight is what a word waits in, and "Spoken" is where it lands. */}
+          {c.karaoke && (
+            <Color
+              value={c.highlightColor}
+              onChange={(v) => set({ highlightColor: v })}
+              onCommit={() => commit('Change highlight colour')({})}
+              label="Not yet spoken"
+            />
+          )}
           {/* One ASS field, two jobs: BorderStyle 3 fills the box with the
             * OUTLINE colour and draws no glyph outline at all. Rather than
             * offer a dead control, the label follows what it actually paints. */}

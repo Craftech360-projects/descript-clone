@@ -2,13 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CAPTION_FONTS,
+  CAPTION_MARGIN,
   DEFAULT_CAPTIONS,
   captionBoxFill,
   captionScale,
+  captionWrapFraction,
   clampAnchor,
   fontCss,
   hexToAss,
+  normalizeCaptions,
   strokeRole,
+  type CaptionSettings,
 } from './caption-style.ts';
 import { toAss, toCues } from './captions.ts';
 import { compileEdl } from './edl.ts';
@@ -181,4 +185,75 @@ test('toAss defaults are usable with no settings at all', () => {
   const ass = toAss(cuesOf('one two three'));
   assert.ok(!ass.includes('undefined'), 'a missing setting leaked into the output');
   assert.ok(styleLine(ass).startsWith('Style: Default,Arial,48,&H00FFFFFF,'));
+});
+
+test('the preview wraps where libass wraps', () => {
+  // Measured against the bundled ffmpeg at 1920x1080, Arial bold: a 1830px line
+  // stayed on one line and an 1884px line broke, so the limit sits at
+  // PlayResX - 2*CAPTION_MARGIN = 1840. The preview's old rule was
+  // `maxChars * 1.9`% — a character count, which says nothing about type size,
+  // and so broke lines the burn kept whole once the font got large.
+  assert.equal(captionWrapFraction(1920) * 1920, 1840);
+  assert.equal(captionWrapFraction(1280) * 1280, 1200);
+
+  // The margins the fraction is derived from are the ones actually written.
+  const style = styleLine(toAss(cuesOf('hello'), DEFAULT_CAPTIONS)).split(',');
+  assert.deepEqual(style.slice(-4, -1), [
+    String(CAPTION_MARGIN),
+    String(CAPTION_MARGIN),
+    String(CAPTION_MARGIN),
+  ]);
+});
+
+test('a frame narrower than its own margins does not invert the wrap width', () => {
+  // Nothing sane produces a 40px frame, but a fraction above 1 would let the
+  // preview lay text outside the picture rather than clamping to it.
+  for (const width of [0, 40, 80, NaN]) {
+    const f = captionWrapFraction(width);
+    assert.ok(f > 0 && f <= 1, `width ${width} gave ${f}`);
+  }
+});
+
+test('a project saved before a setting existed gets that setting filled in', () => {
+  // The bug this exists to stop: `stored ?? DEFAULT_CAPTIONS` only fires when
+  // there are NO stored captions. A project that saved them before
+  // highlightColor existed kept its object, so the key stayed undefined — and
+  // the colour swatch calls .toUpperCase() on it, which blanked the editor.
+  const legacy = {
+    enabled: true,
+    font: 'Arial',
+    fontSize: 64,
+    color: '#00FF00',
+    strokeColor: '#000000',
+    strokeWidth: 3,
+    backdrop: 'none',
+    allCaps: false,
+    maxChars: 42,
+    x: 0.5,
+    y: 0.85,
+  } as Partial<CaptionSettings>;
+
+  const merged = normalizeCaptions(legacy);
+  assert.equal(merged.highlightColor, DEFAULT_CAPTIONS.highlightColor);
+  assert.equal(merged.karaoke, DEFAULT_CAPTIONS.karaoke);
+  assert.equal(merged.color, '#00FF00', 'what the project DID save must survive');
+  assert.equal(merged.fontSize, 64);
+
+  for (const key of Object.keys(DEFAULT_CAPTIONS)) {
+    assert.notEqual(merged[key as keyof CaptionSettings], undefined, `${key} came back undefined`);
+  }
+});
+
+test('an explicit undefined does not punch through to overwrite a default', () => {
+  // A JSON body with an omitted field destructures to exactly this.
+  const merged = normalizeCaptions({ color: undefined, fontSize: 90 });
+  assert.equal(merged.color, DEFAULT_CAPTIONS.color);
+  assert.equal(merged.fontSize, 90);
+});
+
+test('normalizeCaptions handles no stored settings at all', () => {
+  assert.deepEqual(normalizeCaptions(undefined), DEFAULT_CAPTIONS);
+  // A fresh object each time — callers spread into it and would otherwise
+  // mutate the shared default.
+  assert.notEqual(normalizeCaptions(undefined), DEFAULT_CAPTIONS);
 });

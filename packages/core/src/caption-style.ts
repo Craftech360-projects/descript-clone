@@ -27,6 +27,23 @@ export interface CaptionSettings {
   fontSize: number;
   /** #RRGGBB. The colour a word settles on once spoken. */
   color: string;
+  /**
+   * Light words up one at a time as they are spoken — the social-captions look.
+   *
+   * This used to be unconditional in the burn and absent from the preview, which
+   * is the worst of both: the monitor showed flat white text and the export came
+   * back animated in a colour nobody had chosen. It is one setting now, and both
+   * sides read it.
+   */
+  karaoke: boolean;
+  /**
+   * #RRGGBB a word wears BEFORE it is spoken. Only meaningful with karaoke on.
+   *
+   * Note the direction, because it is the opposite of what "highlight" suggests:
+   * ASS \k starts a word in SecondaryColour and flips it to PrimaryColour once
+   * sung. So this is the WAITING colour and `color` is where each word lands.
+   */
+  highlightColor: string;
   /** #RRGGBB outline drawn around the glyphs. */
   strokeColor: string;
   /** Outline width in px at 1080p. 0 disables the outline. */
@@ -54,6 +71,10 @@ export const DEFAULT_CAPTIONS: CaptionSettings = {
   font: 'Arial',
   fontSize: 48,
   color: '#FFFFFF',
+  // Both carried over from what the burn already did, so an existing project
+  // renders exactly as it did before this became a setting.
+  karaoke: true,
+  highlightColor: '#FFD500',
   strokeColor: '#000000',
   strokeWidth: 3,
   backdrop: 'none',
@@ -99,6 +120,56 @@ export const CAPTION_FONTS: Array<{ id: string; label: string; css: string }> = 
 /** The CSS stack that previews `font`, or the sans stack if it is unknown. */
 export function fontCss(font: string): string {
   return (CAPTION_FONTS.find((f) => f.id === font) ?? CAPTION_FONTS[0]).css;
+}
+
+/**
+ * Fill in whatever a stored settings object is missing.
+ *
+ * Persisted captions are as old as the project that saved them, so any field
+ * added later arrives undefined — and `stored ?? DEFAULT_CAPTIONS` does NOT
+ * cover that: the object exists, so the fallback never fires and the new key
+ * stays missing. That shipped once. `highlightColor` came back undefined on
+ * every pre-existing project, and the colour swatch calls .toUpperCase() on it,
+ * so opening the control blanked the entire editor.
+ *
+ * Per-field, therefore, and at every door: this is the only way a
+ * CaptionSettings should ever be built from something read off disk or a wire.
+ */
+export function normalizeCaptions(stored: Partial<CaptionSettings> | undefined): CaptionSettings {
+  const merged = { ...DEFAULT_CAPTIONS };
+  if (stored) {
+    for (const key of Object.keys(DEFAULT_CAPTIONS) as Array<keyof CaptionSettings>) {
+      const value = stored[key];
+      // An explicit undefined must not overwrite the default either — that is
+      // exactly what a JSON body with an omitted field destructures to.
+      if (value !== undefined) merged[key] = value as never;
+    }
+  }
+  return merged;
+}
+
+/**
+ * ASS MarginL/MarginR/MarginV, in frame pixels.
+ *
+ * These do not move a \pos'd caption — position wins — but libass still wraps a
+ * line at PlayResX minus the horizontal pair. Measured against the bundled
+ * ffmpeg at 1920 wide: a 1830px line stays on one line and an 1884px line
+ * breaks, so the limit is the 1840 this implies.
+ */
+export const CAPTION_MARGIN = 40;
+
+/**
+ * The fraction of the frame width a caption line may fill before it wraps.
+ *
+ * The preview used to guess this as `maxChars * 1.9`, which is a statement
+ * about character COUNT and so drifts with type size: at 48px a 42-character
+ * line filled 45% of frame and neither side wrapped, but at 90px it filled 84%
+ * — past the guess, under the real limit — so the monitor broke the line in two
+ * and the export kept it on one.
+ */
+export function captionWrapFraction(frameWidth: number): number {
+  if (!Number.isFinite(frameWidth) || frameWidth <= 2 * CAPTION_MARGIN) return 1;
+  return (frameWidth - 2 * CAPTION_MARGIN) / frameWidth;
 }
 
 /** How much to multiply a 1080p-authored size by to land on this frame. */

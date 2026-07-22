@@ -4,7 +4,6 @@ import { karaokeSpans, toCues } from '../../../../packages/core/src/captions.ts'
 import {
   CAPTION_REFERENCE_HEIGHT,
   captionBoxFill,
-  captionWrapFraction,
   clampAnchor,
   fontCss,
   type CaptionSettings,
@@ -31,8 +30,6 @@ interface Box {
   top: number;
   width: number;
   height: number;
-  /** The frame's own pixel width. Wrapping is decided in these units, not CSS ones. */
-  frameWidth: number;
 }
 
 /**
@@ -43,11 +40,17 @@ interface Box {
  * from the same 1080p reference — position is a fraction of the picture, so it
  * survives the monitor being 480px wide and the render being 4K.
  *
- * It is an approximation in one respect, and deliberately: the browser and
- * libass are different text engines. The metric-compatible font list keeps the
- * widths and wrap points honest, but glyph rasterisation and outline joins will
- * differ by a pixel here and there. Placement, size and colour are exact; the
- * antialiasing is not.
+ * Line breaks are not approximated, they are shared: toCues breaks at maxChars
+ * before either engine sees the text, libass is told not to wrap (WrapStyle 2)
+ * and this is `white-space: pre`. Neither side gets a vote. That is what fixed
+ * the long-standing complaint that the preview "auto-layouts" — it was the
+ * browser and libass each choosing their own break points and agreeing only by
+ * luck.
+ *
+ * What remains approximate, and deliberately: the browser and libass are
+ * different text engines, so glyph rasterisation and outline joins differ by a
+ * pixel here and there. Placement, size, colour, break points, outline
+ * thickness and shadow offset are exact; the antialiasing is not.
  */
 export default function CaptionOverlay(p: Props) {
   const [box, setBox] = useState<Box | null>(null);
@@ -100,7 +103,6 @@ export default function CaptionOverlay(p: Props) {
         top: (rect.height - height) / 2,
         width,
         height,
-        frameWidth: vw,
       });
     };
 
@@ -251,10 +253,14 @@ export default function CaptionOverlay(p: Props) {
           fontSize: `${fontSize}px`,
           color: p.captions.color,
           textTransform: p.captions.allCaps ? 'uppercase' : 'none',
-          // paint-order puts the stroke BEHIND the fill; without it the browser
-          // centres the stroke on the glyph edge and eats half the letterform,
-          // which libass does not do.
-          WebkitTextStrokeWidth: outline > 0 ? `${outline}px` : undefined,
+          // DOUBLED, and that is not a fudge factor.
+          //
+          // libass Outline:N grows the glyph N pixels OUTWARD — measured, ink
+          // bbox grows by exactly 2N in both axes. CSS centres its stroke on the
+          // glyph path, so half falls inside the letterform and paint-order
+          // hides it under the fill. A CSS stroke of N therefore shows N/2
+          // outside, and the preview drew every outline at half strength.
+          WebkitTextStrokeWidth: outline > 0 ? `${outline * 2}px` : undefined,
           WebkitTextStrokeColor: outline > 0 ? p.captions.strokeColor : undefined,
           paintOrder: 'stroke fill',
           // Opaque, and the stroke colour — that is what libass fills a
@@ -262,14 +268,19 @@ export default function CaptionOverlay(p: Props) {
           background: boxFill ?? 'transparent',
           // ASS reuses the outline width as the box's padding.
           padding: boxFill !== null ? `${strokeSize}px ${strokeSize * 2}px` : 0,
-          // ASS BackColour is the shadow, and toAss sets its alpha to 0x80 —
-          // a half-strength scrim, not the 0.85 this used to draw.
+          // A HARD shadow, offset only. ASS Shadow:N is a copy of the glyph
+          // displaced N px down-right with no blur at all — measured, ink grows
+          // by exactly +N in width and +N in height, never more. The 2px blur
+          // this used to draw had no counterpart in the burn. Alpha is 0.5
+          // because toAss sets BackColour alpha to 0x80.
           textShadow:
             p.captions.backdrop === 'shadow'
-              ? `${3 * scale}px ${3 * scale}px ${2 * scale}px rgba(0,0,0,0.5)`
+              ? `${3 * scale}px ${3 * scale}px 0 rgba(0,0,0,0.5)`
               : undefined,
-          // Where libass wraps, measured — not guessed from character count.
-          maxWidth: `${captionWrapFraction(box.frameWidth) * 100}%`,
+          // No max-width and no wrapping. toCues already broke this text at
+          // maxChars; letting the browser break it again is the whole bug. See
+          // the WrapStyle 2 note in toAss.
+          whiteSpace: 'pre',
         }}
       >
         {karaoke

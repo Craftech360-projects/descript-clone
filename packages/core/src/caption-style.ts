@@ -151,26 +151,12 @@ export function normalizeCaptions(stored: Partial<CaptionSettings> | undefined):
 /**
  * ASS MarginL/MarginR/MarginV, in frame pixels.
  *
- * These do not move a \pos'd caption — position wins — but libass still wraps a
- * line at PlayResX minus the horizontal pair. Measured against the bundled
- * ffmpeg at 1920 wide: a 1830px line stays on one line and an 1884px line
- * breaks, so the limit is the 1840 this implies.
+ * Inert, and deliberately kept that way. They do not move a \pos'd caption —
+ * position wins — and under WrapStyle 2 they no longer bound line length
+ * either. They are written because the format expects them; nothing should
+ * start deriving a layout rule from them again.
  */
 export const CAPTION_MARGIN = 40;
-
-/**
- * The fraction of the frame width a caption line may fill before it wraps.
- *
- * The preview used to guess this as `maxChars * 1.9`, which is a statement
- * about character COUNT and so drifts with type size: at 48px a 42-character
- * line filled 45% of frame and neither side wrapped, but at 90px it filled 84%
- * — past the guess, under the real limit — so the monitor broke the line in two
- * and the export kept it on one.
- */
-export function captionWrapFraction(frameWidth: number): number {
-  if (!Number.isFinite(frameWidth) || frameWidth <= 2 * CAPTION_MARGIN) return 1;
-  return (frameWidth - 2 * CAPTION_MARGIN) / frameWidth;
-}
 
 /** How much to multiply a 1080p-authored size by to land on this frame. */
 export function captionScale(frameHeight: number): number {

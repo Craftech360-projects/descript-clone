@@ -6,7 +6,6 @@ import {
   DEFAULT_CAPTIONS,
   captionBoxFill,
   captionScale,
-  captionWrapFraction,
   clampAnchor,
   fontCss,
   hexToAss,
@@ -187,33 +186,6 @@ test('toAss defaults are usable with no settings at all', () => {
   assert.ok(styleLine(ass).startsWith('Style: Default,Arial,48,&H00FFFFFF,'));
 });
 
-test('the preview wraps where libass wraps', () => {
-  // Measured against the bundled ffmpeg at 1920x1080, Arial bold: a 1830px line
-  // stayed on one line and an 1884px line broke, so the limit sits at
-  // PlayResX - 2*CAPTION_MARGIN = 1840. The preview's old rule was
-  // `maxChars * 1.9`% — a character count, which says nothing about type size,
-  // and so broke lines the burn kept whole once the font got large.
-  assert.equal(captionWrapFraction(1920) * 1920, 1840);
-  assert.equal(captionWrapFraction(1280) * 1280, 1200);
-
-  // The margins the fraction is derived from are the ones actually written.
-  const style = styleLine(toAss(cuesOf('hello'), DEFAULT_CAPTIONS)).split(',');
-  assert.deepEqual(style.slice(-4, -1), [
-    String(CAPTION_MARGIN),
-    String(CAPTION_MARGIN),
-    String(CAPTION_MARGIN),
-  ]);
-});
-
-test('a frame narrower than its own margins does not invert the wrap width', () => {
-  // Nothing sane produces a 40px frame, but a fraction above 1 would let the
-  // preview lay text outside the picture rather than clamping to it.
-  for (const width of [0, 40, 80, NaN]) {
-    const f = captionWrapFraction(width);
-    assert.ok(f > 0 && f <= 1, `width ${width} gave ${f}`);
-  }
-});
-
 test('a project saved before a setting existed gets that setting filled in', () => {
   // The bug this exists to stop: `stored ?? DEFAULT_CAPTIONS` only fires when
   // there are NO stored captions. A project that saved them before
@@ -256,4 +228,29 @@ test('normalizeCaptions handles no stored settings at all', () => {
   // A fresh object each time — callers spread into it and would otherwise
   // mutate the shared default.
   assert.notEqual(normalizeCaptions(undefined), DEFAULT_CAPTIONS);
+});
+
+test('libass is forbidden from wrapping, so only maxChars decides a line break', () => {
+  // WrapStyle 2 means "only an explicit \N breaks a line". This is what stops
+  // the burn re-deciding a layout the preview already decided.
+  //
+  // Measured against the bundled ffmpeg at 1920 wide, 40 characters of Arial
+  // bold: under WrapStyle 0 a 105px line broke into two (962x193 of ink) while
+  // the preview kept it whole; under WrapStyle 2 it stays one line (1883x88),
+  // and at 140px it clips at exactly the frame edge — which is what the monitor
+  // shows too, now that .cap-text is white-space: pre.
+  const ass = toAss(cuesOf('hello there'), DEFAULT_CAPTIONS);
+  assert.ok(ass.includes('WrapStyle: 2'), 'automatic wrapping must stay off');
+
+  // And nothing may smuggle a line break into the text to work around it.
+  for (const line of dialogue(ass)) assert.ok(!line.includes('\N'), 'no hard breaks emitted');
+});
+
+test('a cue never exceeds maxChars, since nothing downstream will wrap it', () => {
+  // With both engines forbidden to wrap, this is the ONLY thing keeping a
+  // caption inside the frame.
+  const long = 'the quick brown fox jumps over the lazy dog and keeps on running';
+  for (const cue of cuesOf(long, 24)) {
+    assert.ok(cue.text.length <= 24, `cue ran to ${cue.text.length} chars: ${cue.text}`);
+  }
 });

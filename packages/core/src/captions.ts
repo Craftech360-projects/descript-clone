@@ -258,13 +258,32 @@ export function toAss(
   // 00 is opaque, FF is invisible, so 0x80 is a ~50% scrim.
   const back = hexToAss('#000000', 0x80);
 
+  // WrapStyle 2 is "never wrap automatically; only an explicit \N breaks a
+  // line", and it is the single most important line in this file for making the
+  // preview true.
+  //
+  // The cause of every width complaint was that layout was being decided TWICE:
+  // the browser wrapped against a CSS max-width, libass wrapped against
+  // PlayResX minus its margins, and the two agreed only by luck. They cannot be
+  // reconciled by tuning a number, because they are different text engines
+  // measuring different glyph rasterisations — at 1080p/48px a 40-character
+  // line came out 1615px here and would come out a few px either side of that
+  // in a browser, so any threshold has cues that fall on opposite sides of it.
+  //
+  // So neither engine gets to decide. toCues already breaks at `maxChars`, once,
+  // before either of them sees the text; this tells libass to honour that and
+  // nothing else, and the preview is set to `white-space: pre` for the same
+  // reason. A line too long for the frame now overflows identically in both
+  // rather than wrapping in one — measured: at 140px this clips at exactly the
+  // 1920 frame edge, which is what the monitor shows too.
+  //
   // Alignment 5 anchors the text block at its CENTRE, which is what makes \pos
   // mean "the point I dragged it to" rather than "one of nine corners".
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${Math.round(frame.width)}
 PlayResY: ${Math.round(frame.height)}
-WrapStyle: 0
+WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding

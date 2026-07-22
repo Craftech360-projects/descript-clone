@@ -429,7 +429,11 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * letterboxed content box, so these rules must not add any offset of their own.
  * The layer ignores the pointer so scrubbing and clicks reach the video; only
  * the caption itself is grabbable. */
-.cap-layer { position: absolute; pointer-events: none; }
+/* Clipped to the picture, because the frame clips too. Nothing wraps any more
+ * (see WrapStyle 2 in toAss), so a caption too long for its frame runs off the
+ * edge — and it has to run off the edge HERE in the same place, or the preview
+ * is lying about the one case it most needs to warn you about. */
+.cap-layer { position: absolute; pointer-events: none; overflow: hidden; }
 .cap-text {
   position: absolute;
   /* The anchor is the CENTRE of the block — same as ASS Alignment 5 — so the
@@ -441,7 +445,6 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   text-align: center;
   line-height: 1.2;
   font-weight: 700;
-  white-space: pre-wrap;
   border-radius: 3px;
   user-select: none;
   -webkit-user-select: none;

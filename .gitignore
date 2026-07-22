@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# Tracked once, in the first commit, so this line did nothing for it — gitignore
+# only governs files git has never seen. It took `git rm --cached .env` to
+# untrack, and the key inside it stayed in the pushed history regardless.
 .env
 media/uploads/*
 media/renders/*

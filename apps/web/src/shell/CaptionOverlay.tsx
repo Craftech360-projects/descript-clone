@@ -5,7 +5,7 @@ import {
   CAPTION_REFERENCE_HEIGHT,
   captionBoxFill,
   clampAnchor,
-  fontCss,
+  fontStack,
   type CaptionSettings,
 } from '../../../../packages/core/src/caption-style.ts';
 import type { Edl, Word } from '../../../../packages/core/src/types.ts';
@@ -15,6 +15,8 @@ interface Props {
   words: Word[];
   edl: Edl | null;
   captions: CaptionSettings;
+  /** Families of imported fonts, so a caption set to one previews in that font. */
+  customFamilies: string[];
   /** Gates the placement guide — see the render below. */
   playing: boolean;
   /** Read imperatively at 60Hz — see the rAF below. */
@@ -249,7 +251,7 @@ export default function CaptionOverlay(p: Props) {
           visibility: hidden ? 'hidden' : undefined,
           left: `${p.captions.x * 100}%`,
           top: `${p.captions.y * 100}%`,
-          fontFamily: fontCss(p.captions.font),
+          fontFamily: fontStack(p.captions.font, p.customFamilies),
           fontSize: `${fontSize}px`,
           color: p.captions.color,
           textTransform: p.captions.allCaps ? 'uppercase' : 'none',

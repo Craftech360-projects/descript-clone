@@ -1,17 +1,29 @@
 import Icon from '../ui/Icon.tsx';
+import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { SaveStatus } from '../store/editor.ts';
+
+/** The edit summary, or null when nothing is transcribed to summarise. */
+export interface EditStats {
+  words: number;
+  kept: number;
+  cuts: number;
+  outputSec: number;
+  sourceSec: number;
+}
 
 interface Props {
   name: string | null;
   saveStatus: SaveStatus;
   onRetrySave: () => void;
+  onToggleLibrary: () => void;
   canUndo: boolean;
   canRedo: boolean;
   undoLabel: string | null;
   redoLabel: string | null;
   onUndo: () => void;
   onRedo: () => void;
-  hasAsr: boolean;
+  /** The live edit summary — shown beside Export. Null hides the strip. */
+  stats: EditStats | null;
   onExport: () => void;
   canExport: boolean;
   exporting: boolean;
@@ -29,13 +41,14 @@ export default function TitleBar({
   name,
   saveStatus,
   onRetrySave,
+  onToggleLibrary,
   canUndo,
   canRedo,
   undoLabel,
   redoLabel,
   onUndo,
   onRedo,
-  hasAsr,
+  stats,
   onExport,
   canExport,
   exporting,
@@ -43,11 +56,18 @@ export default function TitleBar({
   return (
     <header className="titlebar">
       <div className="tb-left">
-        <span className="dot" />
-        <span className="tb-brand">Jumpcut</span>
-        {/* The wordmark is the app; the document is what you are doing to it.
-          * Before, the name slot held EITHER a project OR the product's name, so
-          * the app had no identity the moment you opened anything. */}
+        {/* The ☰ opens the media library + speakers, which no longer hold a
+          * permanent column. The wordmark is the app; the document name is what
+          * you are doing to it — and it only appears once something is open. */}
+        <button
+          className="icon tb-menu"
+          onClick={onToggleLibrary}
+          title="Media & speakers"
+          aria-label="Open library"
+        >
+          <Icon name="menu" size={18} />
+        </button>
+        <img className="tb-logo" src="/jumpcut.png" alt="JumpCut" draggable={false} />
         {name && <span className="tb-sep" aria-hidden="true" />}
         {name && <strong className="tb-name">{name}</strong>}
         {name && <SaveState status={saveStatus} onRetry={onRetrySave} />}
@@ -75,21 +95,30 @@ export default function TitleBar({
       </div>
 
       <div className="tb-right">
-        <span
-          className={hasAsr ? 'chip ok' : 'chip'}
-          title={
-            hasAsr
-              ? 'Transcription is live'
-              : 'No ELEVENLABS_API_KEY — the mock provider invents the words'
-          }
-        >
-          {hasAsr ? 'Scribe' : 'Mock ASR'}
-        </span>
+        {stats && <EditSummary stats={stats} />}
         <button className="primary" onClick={onExport} disabled={!canExport || exporting}>
           {exporting ? 'Exporting…' : 'Export'}
         </button>
       </div>
     </header>
+  );
+}
+
+/**
+ * The edit summary, docked beside Export.
+ *
+ * Just the output length now: the one number that is the thing you are making.
+ * The removed / segments / words-kept trio that used to sit here was fine print —
+ * it qualified the number without ever being acted on — so it is gone.
+ */
+function EditSummary({ stats }: { stats: EditStats }) {
+  return (
+    <div className="tb-stats" title="Length of the finished cut">
+      <span className="tb-stat lead">
+        <b>{timecode(stats.outputSec)}</b>
+        <i>output</i>
+      </span>
+    </div>
   );
 }
 

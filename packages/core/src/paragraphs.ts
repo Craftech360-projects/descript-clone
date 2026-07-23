@@ -109,9 +109,9 @@ export function lastStartingAtOrBefore(words: Word[], sourceTime: number): numbe
   return found;
 }
 
-/** Short label for the speaker margin: "SPEAKER_00" -> "Speaker 1". */
+/** Short label for the speaker margin: "SPEAKER_00" -> "S1". */
 export function speakerLabel(speaker: string | undefined): string {
-  if (!speaker) return 'Speaker';
+  if (!speaker) return 'S';
   const match = speaker.match(/(\d+)\s*$/);
-  return match ? `Speaker ${Number(match[1]) + 1}` : speaker;
+  return match ? `S${Number(match[1]) + 1}` : speaker;
 }

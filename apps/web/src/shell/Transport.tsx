@@ -157,14 +157,15 @@ export default function Transport({
       </label>
 
       <div className="tp-toggles">
-        {/* Checkboxes in a transport bar are the dev-app tell. These are toggles. */}
+        {/* Real switches, not highlighted buttons: the sliding knob carries the
+          * on/off state, so the control never lights its whole self up. */}
         <button
           className={followEdit ? 'toggle on' : 'toggle'}
           onClick={() => setFollowEdit(!followEdit)}
           title="Skip cut material while playing"
           aria-pressed={followEdit}
         >
-          <Icon name="scissors" size={13} />
+          <span className="sw" aria-hidden="true" />
           Preview edit
         </button>
         <button
@@ -173,6 +174,7 @@ export default function Transport({
           title="Show cut words struck through in the script"
           aria-pressed={showDeleted}
         >
+          <span className="sw" aria-hidden="true" />
           Show cuts
         </button>
         {/* Speed counts toward this now, so it can go the other way: at 0.5x the

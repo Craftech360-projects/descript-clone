@@ -29,6 +29,12 @@ export interface Project {
   asrProvider: string | null;
   verbatim: boolean;
   peaks: number[];
+  /**
+   * The source clips, in play order. Absent on single-source projects (every
+   * project today): read them through `clipsOf`, which derives one clip from the
+   * flat `sourceUrl`/`duration`/`peaks`/`thumbs` fields above when this is unset.
+   */
+  clips?: StoredClip[];
   /** Absent on audio, and on video whose filmstrip has not been built yet. */
   thumbs?: Thumbs;
   /** Caption look and placement. Absent on projects saved before captions existed. */
@@ -38,10 +44,120 @@ export interface Project {
   /** Cut settings, wire shape (maxGapMs 0 = keep every pause). Absent on projects
    *  saved before cut settings were persisted; the client falls back to defaults. */
   cut?: CutSettings;
+  /** The background-music bed, if one has been imported. Absent otherwise. */
+  music?: ProjectMusic;
   createdAt: string;
 }
 
+/**
+ * A project's background-music bed. Mirrors the server's `BgMusic` (store.ts),
+ * minus the server-only disk path.
+ *
+ * `sourceUrl` feeds the preview <audio>; `sourceDuration` bounds the length
+ * control; `volume`/`durationSec` are the two things the panel tunes. The render
+ * mixes this UNDER the finished program, so it is never cut with the words.
+ */
+export interface ProjectMusic {
+  id: string;
+  name: string;
+  sourceUrl: string;
+  sourceDuration: number;
+  volume: number;
+  /** Length cap in OUTPUT seconds; absent = plays under the whole program. */
+  durationSec?: number;
+  /** Loop the track to fill its length — how a short song covers a long video. */
+  loop?: boolean;
+}
+
+/**
+ * One source file in a project's sequence.
+ *
+ * A project is on its way from "one media file" to "an ordered sequence of clips
+ * laid end to end". A Clip is what a single-source project always was — its own
+ * media, waveform, and filmstrip — plus where it starts on the project's global
+ * timeline. `sourceUrl`/`duration`/`peaks`/`thumbs` are per-clip because a clip
+ * addresses its OWN file's timeline, exactly as Word.start/end always have.
+ */
+export interface Clip {
+  id: string;
+  sourceUrl: string;
+  duration: number;
+  hasVideo: boolean;
+  width?: number;
+  height?: number;
+  fps?: number;
+  peaks: number[];
+  thumbs?: Thumbs;
+  /** Seconds this clip begins at on the project timeline: Σ of prior durations. */
+  offset: number;
+  /**
+   * Where this clip begins in its OWN source file, in seconds (≡ 0 when absent).
+   * Whole-file clips have none; splitting a clip makes two that share one file,
+   * the second starting partway in. The <video> element addresses the file, so
+   * the file time showing global `t` is `sourceStart + (t − offset)`. See
+   * clipLocalTime / clipGlobalTime.
+   */
+  sourceStart?: number;
+}
+
+/** The element (file) time that shows global timeline time `t` for this clip. */
+export function clipLocalTime(clip: Clip, t: number): number {
+  return (clip.sourceStart ?? 0) + (t - clip.offset);
+}
+
+/** The global timeline time shown when this clip's element is at `videoTime`. */
+export function clipGlobalTime(clip: Clip, videoTime: number): number {
+  return clip.offset + (videoTime - (clip.sourceStart ?? 0));
+}
+
+/**
+ * A clip on the wire/disk. `offset` is derived from the ordering, never stored —
+ * so a reorder is a list move, not an N-clip rewrite. `clipsOf` fills it in.
+ */
+export type StoredClip = Omit<Clip, 'offset'>;
+
 export type MediaItem = Omit<Project, 'peaks' | 'transcript' | 'thumbs'>;
+
+/**
+ * The project's clips, in order, each with its computed timeline offset.
+ *
+ * The one seam every "the media is project.sourceUrl/.peaks/.thumbs" read should
+ * move behind, so the single-source path and the multi-clip path become one.
+ * Projects saved before clips existed carry no `clips` array; they read as
+ * exactly one clip derived from the flat fields — so this is total, and an old
+ * project is indistinguishable from a genuine one-clip project. Offsets are
+ * always recomputed here from durations, so a stored clip never has to keep its
+ * own offset in sync.
+ */
+export function clipsOf(project: Project): Clip[] {
+  const raw: StoredClip[] = project.clips ?? [singleClipFrom(project)];
+  let offset = 0;
+  return raw.map((c) => {
+    const withOffset: Clip = { ...c, offset };
+    offset += c.duration;
+    return withOffset;
+  });
+}
+
+/** Total project timeline length: the sum of every clip's duration. */
+export function projectDuration(project: Project): number {
+  return (project.clips ?? [singleClipFrom(project)]).reduce((sum, c) => sum + c.duration, 0);
+}
+
+/** The flat single-source fields, read as the one clip an old project holds. */
+function singleClipFrom(p: Project): StoredClip {
+  return {
+    id: p.id,
+    sourceUrl: p.sourceUrl,
+    duration: p.duration,
+    hasVideo: p.hasVideo,
+    width: p.width,
+    height: p.height,
+    fps: p.fps,
+    peaks: p.peaks,
+    thumbs: p.thumbs,
+  };
+}
 
 export interface AsrOptions {
   model: string;
@@ -60,6 +176,22 @@ export interface CutSettings {
   maxGapMs: number;
 }
 
+/**
+ * An imported caption font. Mirrors the server's `CustomFont` (fonts.ts).
+ *
+ * `family` is the load-bearing string: it is what gets stored in
+ * CaptionSettings.font, injected as the @font-face family, and burned as the ASS
+ * Fontname — so the preview and the export resolve to the very same file.
+ */
+export interface CustomFont {
+  id: string;
+  family: string;
+  label: string;
+  url: string;
+  format: 'truetype' | 'opentype' | 'woff' | 'woff2';
+  createdAt: string;
+}
+
 export interface Capabilities {
   hasAsr: boolean;
   asrModels: Array<{ id: string; label: string; hint: string; verbatim: boolean; verified: boolean }>;
@@ -76,6 +208,12 @@ export interface RenderSettings extends CutSettings {
   captions?: CaptionSettings;
   /** Output speed. Sent for the same reason as `captions` above. */
   speed?: number;
+  /**
+   * Live background-music settings, sent so a render reflects the panel even if
+   * the debounced save has not yet landed. Omit to use the stored bed as-is;
+   * `durationSec: null` means "play for the whole program".
+   */
+  music?: { volume?: number; durationSec?: number | null; loop?: boolean };
 }
 
 export type JobKind = 'transcribe' | 'render' | 'thumbs';
@@ -137,6 +275,41 @@ export const api = {
     return fetch('/api/projects', { method: 'POST', body: form }).then(json<Project>);
   },
 
+  /**
+   * Append a clip to an existing project. Returns the updated project, and — when
+   * the project was already transcribed — a `jobId` for transcribing the new clip
+   * (poll it with `waitForJob`, then re-fetch the project for the added words).
+   */
+  addClip: (id: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return fetch(`/api/projects/${id}/clips`, { method: 'POST', body: form }).then(
+      json<{ project: Project; jobId?: string }>,
+    );
+  },
+
+  /** Remove a clip. Refused if it is the project's only clip. */
+  removeClip: (id: string, clipId: string) =>
+    fetch(`/api/projects/${id}/clips/${clipId}`, { method: 'DELETE' }).then(
+      json<{ project: Project }>,
+    ),
+
+  /** Reorder clips. `order` is every clip id in the new play order. */
+  reorderClips: (id: string, order: string[]) =>
+    fetch(`/api/projects/${id}/clips/order`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order }),
+    }).then(json<{ project: Project }>),
+
+  /**
+   * Split a clip in two at `at` seconds from the clip's own start. Non-destructive
+   * — the halves share the source file — and instant (no job). Returns the updated
+   * project with one more clip.
+   */
+  splitClip: (id: string, clipId: string, at: number) =>
+    post(`/api/projects/${id}/clips/${clipId}/split`, { at }).then(json<{ project: Project }>),
+
   /** Starts a job and returns immediately. Poll it with `waitForJob`. */
   transcribe: (id: string, options: AsrOptions) =>
     post(`/api/projects/${id}/transcribe`, options).then(json<{ jobId: string }>),
@@ -178,6 +351,42 @@ export const api = {
    */
   thumbs: (id: string) =>
     post(`/api/projects/${id}/thumbs`).then(json<{ jobId?: string; thumbs?: Thumbs }>),
+
+  /**
+   * Imported caption fonts. Global to the install, so this is not scoped to a
+   * project — the same list backs every one of them.
+   */
+  fonts: {
+    list: () => fetch('/api/fonts').then(json<CustomFont[]>),
+    upload: (file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      return fetch('/api/fonts', { method: 'POST', body: form }).then(json<CustomFont>);
+    },
+    remove: (id: string) =>
+      fetch(`/api/fonts/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
+  },
+
+  /**
+   * Per-project background music. Every call returns the updated project, so the
+   * caller just swaps it into state — no separate re-fetch.
+   */
+  music: {
+    upload: (id: string, file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      return fetch(`/api/projects/${id}/music`, { method: 'POST', body: form }).then(json<Project>);
+    },
+    /** Patch volume and/or length. `durationSec: null` clears the length cap. */
+    update: (id: string, patch: { volume?: number; durationSec?: number | null; loop?: boolean }) =>
+      fetch(`/api/projects/${id}/music`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }).then(json<Project>),
+    remove: (id: string) =>
+      fetch(`/api/projects/${id}/music`, { method: 'DELETE' }).then(json<Project>),
+  },
 };
 
 /**

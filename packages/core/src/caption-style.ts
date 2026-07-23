@@ -71,10 +71,11 @@ export const DEFAULT_CAPTIONS: CaptionSettings = {
   font: 'Arial',
   fontSize: 48,
   color: '#FFFFFF',
-  // Both carried over from what the burn already did, so an existing project
-  // renders exactly as it did before this became a setting.
   karaoke: true,
-  highlightColor: '#FFD500',
+  // The brand gold (the JumpCut wordmark). The word not yet spoken waits in the
+  // product's own colour and settles to white as it is sung — not the stock
+  // #FFD500 highlighter yellow, which belongs to no palette here.
+  highlightColor: '#C8A87A',
   strokeColor: '#000000',
   strokeWidth: 3,
   backdrop: 'none',
@@ -123,6 +124,22 @@ export function fontCss(font: string): string {
 }
 
 /**
+ * The CSS font-family the preview should use for `font`, imported fonts included.
+ *
+ * A built-in resolves through its metric-compatible stack (fontCss). An imported
+ * family — one whose exact name is in `customFamilies`, loaded by an @font-face —
+ * is quoted and used directly, with a sans fallback for the flash before the file
+ * arrives. The quotes escaped so a family with one in its name cannot break out.
+ *
+ * This is the preview's mirror of the burn: toAss writes the same `font` string
+ * as the ASS Fontname, which libass resolves to the identical file via fontsdir.
+ */
+export function fontStack(font: string, customFamilies: readonly string[] = []): string {
+  if (customFamilies.includes(font)) return `"${font.replace(/"/g, '')}", sans-serif`;
+  return fontCss(font);
+}
+
+/**
  * Fill in whatever a stored settings object is missing.
  *
  * Persisted captions are as old as the project that saved them, so any field
@@ -145,8 +162,18 @@ export function normalizeCaptions(stored: Partial<CaptionSettings> | undefined):
       if (value !== undefined) merged[key] = value as never;
     }
   }
+  // The highlight default used to be #FFD500 highlighter yellow, a colour no one
+  // chose — it was just what the app shipped. Retire it: a project still carrying
+  // that exact value gets the brand gold instead, so old projects come forward to
+  // the logo colour on their own. A gold anyone deliberately picked is untouched.
+  if (merged.highlightColor.toUpperCase() === LEGACY_HIGHLIGHT) {
+    merged.highlightColor = DEFAULT_CAPTIONS.highlightColor;
+  }
   return merged;
 }
+
+/** The pre-brand highlight default, rewritten to the logo gold on load. */
+const LEGACY_HIGHLIGHT = '#FFD500';
 
 /**
  * ASS MarginL/MarginR/MarginV, in frame pixels.

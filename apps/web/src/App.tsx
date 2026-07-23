@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
+  clipsOf,
+  clipGlobalTime,
+  clipLocalTime,
   waitForJob,
   type Capabilities,
+  type Clip,
+  type CustomFont,
   type JobKind,
   type MediaItem,
   type Project,
@@ -26,6 +31,7 @@ import type { FillerMode } from './rail/ProjectPanel.tsx';
 import {
   beginCutDrag,
   clearDoc,
+  correctText,
   countFillers,
   countRetakes,
   endCutDrag,
@@ -54,9 +60,66 @@ import CaptionOverlay from './shell/CaptionOverlay.tsx';
 import { lastStartingAtOrBefore } from '../../../packages/core/src/paragraphs.ts';
 import { speakers, colorMap } from './speakers.ts';
 import { usePlayback } from './store/playback.ts';
+import { useMusicPreview } from './store/musicPreview.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
-import { compileEdl, outputDuration } from '../../../packages/core/src/edl.ts';
+import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
+import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
+
+const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
+
+/**
+ * The output(1x) time at a source moment: the kept duration lying before it.
+ *
+ * Unlike edl.ts's sourceToOutput, this never returns null inside a cut gap — it
+ * clamps to the gap's near boundary — so the music trim handle can be dragged to
+ * land anywhere on the timeline, cut material included, and still resolve to a
+ * sensible length.
+ */
+function keptBefore(edl: Edl, sourceSec: number): number {
+  let acc = 0;
+  for (const r of edl.keep) {
+    if (sourceSec <= r.start) break;
+    acc += Math.min(sourceSec, r.end) - r.start;
+    if (sourceSec < r.end) break;
+  }
+  return acc;
+}
+
+/**
+ * Shift a project's LOCAL per-clip word times onto the one global timeline.
+ *
+ * The server stores each word's start/end in its own clip's file timeline (plus
+ * a clipId). The editor runs on a single global clock, so each word is moved by
+ * its clip's offset once, at load. A single-source project has one clip at offset
+ * 0, so this returns the transcript untouched.
+ */
+function globalizeTranscript(p: Project): Transcript {
+  const t = p.transcript!;
+  const clips = clipsOf(p);
+  if (clips.length <= 1) return t;
+  const offsetOf = new Map(clips.map((c) => [c.id, c.offset]));
+  const firstId = clips[0].id;
+  return {
+    ...t,
+    duration: clips.reduce((sum, c) => sum + c.duration, 0),
+    words: t.words.map((w) => {
+      const off = offsetOf.get(w.clipId ?? firstId) ?? 0;
+      return { ...w, start: w.start + off, end: w.end + off };
+    }),
+  };
+}
+
+/** The user's saved custom filler words, or [] if none / unreadable. */
+function loadCustomFillers(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_FILLERS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((w): w is string => typeof w === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 
 export default function App() {
   const [caps, setCaps] = useState<Capabilities | null>(null);
@@ -73,9 +136,20 @@ export default function App() {
   >(null);
 
   const [dialog, setDialog] = useState<'transcribe' | 'export' | null>(null);
+  /** The media/speakers drawer behind the title-bar ☰. */
+  const [libOpen, setLibOpen] = useState(false);
   const [asr, setAsr] = useState<AsrOptions | null>(null);
   const [fillerMode, setFillerMode] = useState<FillerMode>('hesitations');
+  const [customFillers, setCustomFillers] = useState<string[]>(loadCustomFillers);
   const [retakeMin, setRetakeMin] = useState(2);
+
+  // Persist the user's custom filler words across reloads. They are a personal
+  // preference, not project data, so localStorage — not the server — is home.
+  useEffect(() => {
+    try {
+      localStorage.setItem(CUSTOM_FILLERS_KEY, JSON.stringify(customFillers));
+    } catch { /* private mode: keep them for this session only */ }
+  }, [customFillers]);
 
   const [showDeleted, setShowDeleted] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
@@ -83,7 +157,19 @@ export default function App() {
   const [followEdit, setFollowEdit] = useState(true);
   const [result, setResult] = useState<RenderResult | null>(null);
 
+  // Imported caption fonts are global — one library backs every project — so they
+  // live at the top of the app, not on a project. See importFont / the @font-face
+  // effect below.
+  const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  const [fontBusy, setFontBusy] = useState(false);
+
+  // Background music is per project, so it rides on `project.music`; this only
+  // tracks the in-flight import so the button can say so. See importMusic below.
+  const [musicBusy, setMusicBusy] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement>(null);
+  // The <audio> that plays the music bed in the monitor, on the output clock.
+  const musicRef = useRef<HTMLAudioElement>(null);
   const { doc, selection, flash, reveal, saveStatus } = useEditor();
 
   const words = doc?.words ?? [];
@@ -92,10 +178,62 @@ export default function App() {
   const speed = doc?.speed ?? DEFAULT_SPEED;
   const history = historyState();
 
+  // The project's clips, in play order with timeline offsets. One entry for a
+  // single-source project — so everything below is one code path.
+  const clips = useMemo(() => (project ? clipsOf(project) : []), [project]);
+
+  // The seams the "+" markers sit on in the timeline: the start of every clip
+  // (index 0 is the very start), plus one past the end for "append". Each carries
+  // the play-order slot a new source dropped there would take — offset in global
+  // source seconds so the timeline can place it under the current zoom/scroll.
+  const clipInsertPoints = useMemo(() => {
+    if (!project || clips.length === 0) return [];
+    const points = clips.map((c, i) => ({ index: i, time: c.offset }));
+    points.push({ index: clips.length, time: project.duration });
+    return points;
+  }, [clips, project?.duration]);
+
+  // Which clip the one <video> element is currently showing. Playback and seeks
+  // swap this as the global playhead crosses a clip seam; a single-clip project
+  // never moves off its one clip.
+  const [activeClipId, setActiveClipId] = useState<string | null>(null);
+  const activeClip = useMemo(
+    () => clips.find((c) => c.id === activeClipId) ?? clips[0] ?? null,
+    [clips, activeClipId],
+  );
+  // The rAF playback loop and imperative seeks read the live clip without
+  // re-subscribing every render.
+  const activeClipRef = useRef<Clip | null>(null);
+  activeClipRef.current = activeClip;
+
+  // Reset to the first clip whenever the project changes (not on every clips
+  // identity change — e.g. a filmstrip arriving must not yank playback to clip 0).
+  useEffect(() => {
+    setActiveClipId(clips[0]?.id ?? null);
+  }, [project?.id]);
+
   useEffect(() => {
     api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch((e) => setError(e.message));
     api.list().then(setLibrary).catch(() => {});
+    api.fonts.list().then(setCustomFonts).catch(() => {});
   }, []);
+
+  // Make every imported font available to the preview by declaring an @font-face
+  // for it — the same family libass gets from fontsdir at render, so the monitor
+  // and the burn show the identical typeface. One managed <style> holds them all;
+  // it is rebuilt whenever the library changes and its rules never accumulate.
+  useEffect(() => {
+    const el = document.createElement('style');
+    el.textContent = customFonts
+      .map(
+        (f) =>
+          `@font-face{font-family:"${f.family.replace(/"/g, '')}";` +
+          `src:url("${f.url}") format("${f.format}");font-display:swap;}`,
+      )
+      .join('\n');
+    document.head.appendChild(el);
+    return () => el.remove();
+  }, [customFonts]);
 
   // Persist the deleted set, debounced and single-flighted by the store. It used
   // to fire on every word toggle with no debounce and no ordering guarantee —
@@ -127,10 +265,25 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', flush);
   }, []);
 
-  const edl = useMemo(
-    () => (doc ? compileEdl({ mediaId: '', duration: project?.duration ?? 0, words: doc.words }, doc.cut) : null),
-    [doc?.words, doc?.cut, project?.duration],
-  );
+  const edl = useMemo(() => {
+    if (!doc) return null;
+    // One clip: the original single-source compile, byte-identical.
+    if (clips.length <= 1) {
+      return compileEdl({ mediaId: '', duration: project?.duration ?? 0, words: doc.words }, doc.cut);
+    }
+    // Several clips: hand each its own words back on its LOCAL timeline (undo the
+    // globalize) so compileSequenceEdl cuts at seams and never merges across a
+    // file boundary. The result's ranges come back global, with clip metadata.
+    const firstId = clips[0].id;
+    const seq = clips.map((c) => ({
+      clipId: c.id,
+      duration: c.duration,
+      words: doc.words
+        .filter((w) => (w.clipId ?? firstId) === c.id)
+        .map((w) => ({ ...w, start: w.start - c.offset, end: w.end - c.offset })),
+    }));
+    return compileSequenceEdl(seq, doc.cut);
+  }, [doc?.words, doc?.cut, project?.duration, clips]);
 
   // Who is in this piece, and in what colour. Keyed on the words array, whose
   // identity structural sharing preserves — so this is a full scan per edit, not
@@ -147,8 +300,14 @@ export default function App() {
   const flashSet = useMemo(() => new Set(flash), [flash]);
 
   // The timeline reads the clock imperatively at 60Hz. Passing currentTime as a
-  // prop would re-render the whole app on every animation frame.
-  const getCurrentTime = useCallback(() => videoRef.current?.currentTime ?? 0, []);
+  // prop would re-render the whole app on every animation frame. The element's
+  // currentTime is LOCAL to the loaded clip; add its offset to report the global
+  // timeline position everything else speaks. Offset 0 for a single-clip project.
+  const getCurrentTime = useCallback(() => {
+    const clip = activeClipRef.current;
+    const local = videoRef.current?.currentTime ?? 0;
+    return clip ? clipGlobalTime(clip, local) : local;
+  }, []);
 
   const selectedWords = useMemo(
     () => words.filter((w) => selectedSet.has(w.id)),
@@ -171,22 +330,6 @@ export default function App() {
     for (const w of words) { targets.push(w.start); targets.push(w.end); }
     return targets;
   }, [words]);
-
-  /** Play just the selected words, then stop at the end of them. */
-  const playSelection = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !selectionRange) return;
-    video.currentTime = selectionRange.start;
-    void video.play();
-
-    const stopAt = selectionRange.end;
-    const tick = () => {
-      if (video.paused) return;
-      if (video.currentTime >= stopAt) return video.pause();
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }, [selectionRange]);
 
   /** Dragging in the timeline selects the words that range covers. */
   const selectRange = useCallback(
@@ -230,7 +373,12 @@ export default function App() {
     // only covers a project that never had captions at all — one that had them
     // before a setting was added kept the gap. See normalizeCaptions.
     if (p.transcript) {
-      loadDoc(p.transcript, cutFromWire(p.cut, defaults), normalizeCaptions(p.captions), p.speed);
+      // The stored words hold LOCAL per-clip timestamps; the editor works on one
+      // global timeline (playhead, EDL, selection, timeline). Shift each word by
+      // its clip's offset once here, so every consumer downstream stays a single-
+      // timeline code path and only the EDL compile splits back per clip. A
+      // single-source project has offset 0, so this is a no-op for it.
+      loadDoc(globalizeTranscript(p), cutFromWire(p.cut, defaults), normalizeCaptions(p.captions), p.speed);
     } else clearDoc();
   };
 
@@ -246,6 +394,233 @@ export default function App() {
       // in place, so there is no tab to send you to.
       return p;
     });
+
+  /**
+   * Append another source file to the OPEN project, extending its timeline.
+   *
+   * This is "add a video into this project": import lands a new project, this
+   * lands a new clip on the current one. A transcribed project transcribes the
+   * newcomer (a job); either way we re-fetch to pick up the stitched transcript
+   * and the recomputed clip list. flushSave first so any pending word deletions
+   * are on the server before it rewrites the transcript.
+   */
+  const addClip = (file: File, atIndex?: number) =>
+    run('addClip', async () => {
+      flushSave();
+      // The clips present before the append — used both to spot which id is the
+      // newcomer and to rebuild the order when inserting somewhere other than end.
+      const before = clips.map((c) => c.id);
+      const { jobId } = await api.addClip(project!.id, file);
+      if (jobId) {
+        setJob({ id: jobId, progress: -1, stage: 'Transcribing new clip', kind: 'transcribe' });
+        await waitForJob(jobId, (j) =>
+          setJob({ id: jobId, progress: j.progress, stage: j.stage, kind: 'transcribe' }),
+        );
+      }
+      let fresh = await api.get(project!.id);
+      // A positional insert is an append followed by a reorder: the server only
+      // knows how to add at the end, so slot the new id into place ourselves.
+      const newId = clipsOf(fresh)
+        .map((c) => c.id)
+        .find((id) => !before.includes(id));
+      if (newId && atIndex != null && atIndex < before.length) {
+        const order = before.slice();
+        order.splice(atIndex, 0, newId);
+        await api.reorderClips(project!.id, order);
+        fresh = await api.get(project!.id);
+      }
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      setLibrary(await api.list());
+      return fresh;
+    }).finally(() => setJob(null));
+
+  /** Remove a clip from the open project. Refused server-side if it is the last. */
+  const removeClip = (clipId: string) =>
+    run('removeClip', async () => {
+      flushSave();
+      await api.removeClip(project!.id, clipId);
+      const fresh = await api.get(project!.id);
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      return fresh;
+    });
+
+  /** Move a clip one place earlier (-1) or later (+1) in play order. */
+  const moveClip = (clipId: string, delta: -1 | 1) =>
+    run('reorderClip', async () => {
+      flushSave();
+      const ids = clips.map((c) => c.id);
+      const from = ids.indexOf(clipId);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= ids.length) return project!;
+      [ids[from], ids[to]] = [ids[to], ids[from]];
+      await api.reorderClips(project!.id, ids);
+      const fresh = await api.get(project!.id);
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      return fresh;
+    });
+
+  /**
+   * Cut the clip under the playhead in two, at the playhead — the razor. The two
+   * pieces become independent clips (reorder, remove, add between). Instant and
+   * non-destructive: the halves share the one source file. Refused at the very
+   * edge of a clip, where there is nothing to cut off.
+   */
+  const splitAtPlayhead = () => {
+    const t = getCurrentTime();
+    const clip = clips.find((c) => t >= c.offset && t < c.offset + c.duration) ?? activeClip;
+    if (!clip) return;
+    const at = t - clip.offset;
+    if (at <= 0.2 || at >= clip.duration - 0.2) {
+      setNotice('Move the playhead into a clip, away from its edges, to split it.');
+      return;
+    }
+    void run('splitClip', async () => {
+      flushSave();
+      await api.splitClip(project!.id, clip.id, at);
+      const fresh = await api.get(project!.id);
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      setNotice('Clip split. The two pieces are now separate clips.');
+      return fresh;
+    });
+  };
+  // The global keydown effect below subscribes on a small dep set, so it would
+  // otherwise close over a stale splitAtPlayhead (which reads clips/project). A
+  // ref keeps the shortcut calling the current one without re-subscribing.
+  const splitRef = useRef(splitAtPlayhead);
+  splitRef.current = splitAtPlayhead;
+
+  // --- fonts (global, shared across projects) ---------------------------------
+  //
+  // Its own busy flag, not `run`'s: importing a font must not read as the app
+  // being busy, and it leaves the current selection and document untouched. The
+  // returned entry replaces any font of the same family in place, so re-importing
+  // an updated cut of a face just refreshes it.
+  const importFont = async (file: File) => {
+    setFontBusy(true);
+    setError(null);
+    try {
+      const font = await api.fonts.upload(file);
+      setCustomFonts((prev) => {
+        const rest = prev.filter((f) => f.id !== font.id);
+        return [...rest, font].sort((a, b) => a.label.localeCompare(b.label));
+      });
+      setNotice(`Imported “${font.label}”. It is available on every project.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFontBusy(false);
+    }
+  };
+
+  const removeFont = async (id: string) => {
+    setFontBusy(true);
+    setError(null);
+    try {
+      await api.fonts.remove(id);
+      setCustomFonts((prev) => prev.filter((f) => f.id !== id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFontBusy(false);
+    }
+  };
+
+  // --- background music (per project) -----------------------------------------
+  //
+  // Its own busy flag rather than `run`'s, exactly like fonts: importing a bed is
+  // not the app being "busy", and it must not touch the selection or the doc.
+  // volume/length changes are optimistic on the project, then persisted debounced
+  // — a slider drag would otherwise fire a PATCH per pixel.
+  const importMusic = async (file: File) => {
+    if (!project) return;
+    setMusicBusy(true);
+    setError(null);
+    try {
+      const p = await api.music.upload(project.id, file);
+      setProject((cur) => (cur?.id === p.id ? p : cur));
+      setNotice(`Added “${file.name}” as background music.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMusicBusy(false);
+    }
+  };
+
+  const removeMusic = async () => {
+    if (!project) return;
+    setMusicBusy(true);
+    setError(null);
+    try {
+      const p = await api.music.remove(project.id);
+      setProject((cur) => (cur?.id === p.id ? p : cur));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMusicBusy(false);
+    }
+  };
+
+  // Coalesce rapid patches (a slider emits many) into one server write. The
+  // pending patch accumulates FIELDS so a volume drag followed by a length change
+  // both land, rather than the later timer clobbering the earlier field.
+  type MusicPatch = { volume?: number; durationSec?: number | null; loop?: boolean };
+  const pendingMusic = useRef<MusicPatch>({});
+  const musicSaveTimer = useRef<number | null>(null);
+  const updateMusic = (patch: MusicPatch) => {
+    if (!project?.music) return;
+    const id = project.id;
+    // Optimistic: the panel and the preview read project.music, so reflect the
+    // change at once and let the debounced PATCH catch up.
+    setProject((cur) => {
+      if (!cur?.music) return cur;
+      const music = { ...cur.music };
+      if (patch.volume !== undefined) music.volume = patch.volume;
+      if (patch.loop !== undefined) music.loop = patch.loop;
+      if (patch.durationSec !== undefined) {
+        if (patch.durationSec === null) delete music.durationSec;
+        else music.durationSec = patch.durationSec;
+      }
+      return { ...cur, music };
+    });
+
+    pendingMusic.current = { ...pendingMusic.current, ...patch };
+    if (musicSaveTimer.current) window.clearTimeout(musicSaveTimer.current);
+    musicSaveTimer.current = window.setTimeout(() => {
+      const body = pendingMusic.current;
+      pendingMusic.current = {};
+      api.music
+        .update(id, body)
+        .then((p) => setProject((cur) => (cur?.id === p.id ? p : cur)))
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    }, 350);
+  };
+
+  // Trim/extend the bed by dragging its right edge on the timeline. The handle
+  // reports a SOURCE time; convert it to a length on the output clock. keptBefore
+  // is the output(1x) time at that source point (gap-safe, unlike sourceToOutput
+  // which is null inside a cut); ÷ speed gives the post-speed length the bed and
+  // the render both speak. Not looping caps it at the file's own length; looping
+  // lets it run to the whole program.
+  const resizeMusic = (endSourceSec: number) => {
+    if (!project?.music || !edl) return;
+    const out1x = keptBefore(edl, endSourceSec);
+    const programSec = outputDuration(edl, speed);
+    const cap = project.music.loop ? programSec : Math.min(project.music.sourceDuration, programSec);
+    const durationSec = Math.min(Math.max(0.1, out1x / speed), cap);
+    updateMusic({ durationSec });
+  };
+
+  // "Duplicate to fill": loop the track across the whole video. One gesture that
+  // turns looping on and clears the length cap so the bed runs the full program.
+  const fillMusic = () => updateMusic({ loop: true, durationSec: null });
 
   const openProject = (id: string) =>
     run('open', async () => {
@@ -335,6 +710,15 @@ export default function App() {
         burnCaptions: captions.enabled,
         captions,
         speed,
+        // The bed's live settings ride along too, so an Export fired mid-debounce
+        // still uses the volume/length on screen rather than the last saved ones.
+        music: project!.music
+          ? {
+              volume: project!.music.volume,
+              durationSec: project!.music.durationSec ?? null,
+              loop: Boolean(project!.music.loop),
+            }
+          : undefined,
       });
       setJob({ id: jobId, progress: -1, stage: 'Starting', kind: 'render' });
 
@@ -358,18 +742,94 @@ export default function App() {
     }).finally(() => setJob(null));
 
   // --- playback ----------------------------------------------------------------
-  const seek = useCallback((t: number) => {
+
+  // Live clips for the imperative seek/swap paths, without re-subscribing.
+  const clipsRef = useRef<Clip[]>([]);
+  clipsRef.current = clips;
+
+  // A seek waiting on a clip's media to load. The swap sets the element's src via
+  // activeClipId (React), then this lands the local time once the file is ready.
+  const pendingSeekRef = useRef<{ clipId: string; local: number; resume: boolean } | null>(null);
+
+  /**
+   * Move the playhead to GLOBAL time `t`, swapping the loaded clip if `t` lives
+   * in another one. Same-clip is an immediate local seek; cross-clip defers the
+   * seek until the new src reports ready (see the effect below). A single-clip
+   * project only ever takes the same-clip branch.
+   */
+  const requestClipSeek = useCallback((t: number, resume: boolean) => {
     const video = videoRef.current;
     if (!video) return;
-    video.currentTime = t;
-    setCurrentTime(t);
+    const list = clipsRef.current;
+    const clip =
+      list.find((c) => t >= c.offset && t < c.offset + c.duration) ?? list[list.length - 1] ?? null;
+    if (!clip) {
+      video.currentTime = t;
+      if (resume) void video.play();
+      return;
+    }
+    const local = clipLocalTime(clip, t);
+    if (clip.id === activeClipRef.current?.id) {
+      video.currentTime = local;
+      if (resume) void video.play();
+      return;
+    }
+    pendingSeekRef.current = { clipId: clip.id, local, resume };
+    setActiveClipId(clip.id);
   }, []);
+
+  // Land a pending cross-clip seek once its media is loaded. activeClipId changing
+  // has already swapped the element's src (via Monitor); here we wait for the new
+  // file to know its timeline, then seek into it and resume if we were playing.
+  useEffect(() => {
+    const video = videoRef.current;
+    const pending = pendingSeekRef.current;
+    if (!video || !pending || pending.clipId !== activeClipId) return;
+
+    const apply = () => {
+      if (pendingSeekRef.current !== pending) return;
+      video.currentTime = pending.local;
+      if (pending.resume) void video.play();
+      pendingSeekRef.current = null;
+    };
+    if (video.readyState >= 1) apply();
+    else video.addEventListener('loadedmetadata', apply, { once: true });
+    return () => video.removeEventListener('loadedmetadata', apply);
+  }, [activeClipId]);
+
+  const seek = useCallback(
+    (t: number) => {
+      requestClipSeek(t, false);
+      setCurrentTime(t);
+    },
+    [requestClipSeek],
+  );
+
+  /**
+   * Play just the selected words, then stop at the end of them. Defined here,
+   * after the seek coordinator, because it references requestClipSeek — its
+   * dependency array would otherwise touch that const in its temporal dead zone.
+   */
+  const playSelection = useCallback(() => {
+    if (!selectionRange) return;
+    // Global start; requestClipSeek loads the right clip and plays. The stop test
+    // reads the global clock too, so it holds whichever clip is showing.
+    requestClipSeek(selectionRange.start, true);
+
+    const stopAt = selectionRange.end;
+    const tick = () => {
+      const video = videoRef.current;
+      if (!video || video.paused) return;
+      if (getCurrentTime() >= stopAt) return video.pause();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, [selectionRange, requestClipSeek, getCurrentTime]);
 
   // timeupdate now only feeds the karaoke highlight (~4Hz is plenty — words
   // average ~400ms). Skipping cut material is usePlayback's job, on rAF.
   const onTimeUpdate = () => {
-    const video = videoRef.current;
-    if (video) setCurrentTime(video.currentTime);
+    if (videoRef.current) setCurrentTime(getCurrentTime());
   };
 
   const togglePlay = useCallback(() => {
@@ -382,7 +842,61 @@ export default function App() {
 
   // Declared after onPlaybackEnded on purpose: a const is in its temporal dead
   // zone until its initialiser runs, so calling this above would throw.
-  usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded: onPlaybackEnded });
+  usePlayback({
+    videoRef,
+    edl,
+    followEdit,
+    playing,
+    speed,
+    onEnded: onPlaybackEnded,
+    activeClipRef,
+    activeClipId,
+    seekAcrossClip: requestClipSeek,
+  });
+
+  // The music bed's length on the OUTPUT clock: the shortest of any length the
+  // user set, the music file itself, and the program — the same three-way cap the
+  // server resolves for the render, so the preview ends where the export does.
+  const musicEndSec = useMemo(() => {
+    const m = project?.music;
+    if (!m || !edl) return 0;
+    const outLen = outputDuration(edl, speed);
+    // Looping lets the bed run to the program length; otherwise the file's own
+    // length caps it. Mirrors the server's render resolve.
+    const fileCap = m.loop ? outLen : m.sourceDuration;
+    return Math.min(m.durationSec ?? outLen, fileCap, outLen);
+  }, [project?.music, edl, speed]);
+
+  useMusicPreview({
+    musicRef,
+    edl,
+    playing,
+    speed,
+    getCurrentTime,
+    volume: project?.music?.volume ?? 0,
+    endSec: musicEndSec,
+    loop: Boolean(project?.music?.loop),
+    sourceDuration: project?.music?.sourceDuration ?? 0,
+  });
+
+  // The bed drawn as a lane on the timeline. The timeline is SOURCE time and the
+  // bed lives on the OUTPUT clock, so map its end back: musicEndSec is post-speed,
+  // so × speed gives the un-sped output position, which outputToSource turns into
+  // the source time where the bed stops. It spans from the first kept moment
+  // (output 0) to there — covering the cut gaps in between, which is honest: the
+  // music plays straight through them in the finished cut.
+  const musicLane = useMemo(() => {
+    const m = project?.music;
+    if (!m || !edl || edl.keep.length === 0 || musicEndSec <= 0) return null;
+    const sum = outputDuration(edl, 1); // un-sped output length
+    const endOut = Math.min(musicEndSec * speed, sum);
+    const startSec = edl.keep[0].start;
+    const endSec =
+      endOut >= sum - 1e-6
+        ? edl.keep[edl.keep.length - 1].end
+        : outputToSource(edl, endOut) ?? edl.keep[edl.keep.length - 1].end;
+    return { name: m.name, startSec, endSec, loop: Boolean(m.loop) };
+  }, [project?.music, edl, musicEndSec, speed]);
 
   /**
    * Step to the previous/next word boundary.
@@ -396,7 +910,7 @@ export default function App() {
     (direction: -1 | 1) => {
       const video = videoRef.current;
       if (!video || words.length === 0) return;
-      const now = video.currentTime;
+      const now = getCurrentTime();
       const i = lastStartingAtOrBefore(words, now);
 
       if (direction === 1) {
@@ -410,7 +924,7 @@ export default function App() {
       if (current && now - current.start > 0.15) return seek(current.start);
       if (i > 0) seek(words[i - 1].start);
     },
-    [words, seek],
+    [words, seek, getCurrentTime],
   );
 
   // Undo/redo reveal: scroll the change into view and, when paused, seek to it.
@@ -459,9 +973,21 @@ export default function App() {
   };
 
   const doFillers = () => {
-    const n = removeFillers(fillerMode === 'all');
+    const n = removeFillers(fillerMode === 'all', customFillers);
     setResult(null);
     setNotice(n === 0 ? 'No filler words found to cut.' : `${n} filler words cut.`);
+  };
+
+  // Normalize on the way in so the chip matches what the detector matches:
+  // trimmed, lowercased, no duplicates, no blanks. A pasted "Um, " becomes "um".
+  const addCustomFiller = (raw: string) => {
+    const word = raw.trim().toLowerCase();
+    if (!word) return;
+    setCustomFillers((prev) => (prev.includes(word) ? prev : [...prev, word]));
+  };
+
+  const removeCustomFiller = (word: string) => {
+    setCustomFillers((prev) => prev.filter((w) => w !== word));
   };
 
   const doRetakes = () => {
@@ -501,52 +1027,122 @@ export default function App() {
 
       if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); setSelectionDeleted(true); }
       else if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); setSelectionDeleted(false); }
-      else if (e.key === 'Escape') setSelection(null);
+      // Escape closes the drawer first if it's open, otherwise clears selection.
+      else if (e.key === 'Escape') { if (libOpen) setLibOpen(false); else setSelection(null); }
       else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      // The razor: cut the clip under the playhead in two. Bare S, like an NLE.
+      else if (!mod && e.key.toLowerCase() === 's') { e.preventDefault(); splitRef.current(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay]);
+  }, [togglePlay, libOpen]);
 
   if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
 
   // --- workspace ---------------------------------------------------------------
   return (
-    <div className="app">
+    <div
+      className="app"
+      // Give the dock the extra height the music lane needs, rather than stealing
+      // it from the waveform. Only when a bed is attached; no bed, no change.
+      style={musicLane ? ({ '--h-dock': '298px' } as React.CSSProperties) : undefined}
+    >
       <TitleBar
         name={project?.name ?? null}
         saveStatus={saveStatus}
         onRetrySave={retrySave}
+        onToggleLibrary={() => setLibOpen((v) => !v)}
         canUndo={history.canUndo}
         canRedo={history.canRedo}
         undoLabel={history.undoLabel}
         redoLabel={history.redoLabel}
         onUndo={() => { const l = undoEdit(); if (l) setNotice(`Undid: ${l}`); }}
         onRedo={() => { const l = redoEdit(); if (l) setNotice(`Redid: ${l}`); }}
-        hasAsr={caps.hasAsr}
+        stats={doc ? stats : null}
         onExport={() => setDialog('export')}
         canExport={!!doc}
         exporting={busy === 'render'}
       />
 
-      {/* ---- media library + speakers ---- */}
+      {/* ---- media library + speakers: a drawer behind the ☰ ---- */}
       <Library
         library={library}
         openId={project?.id ?? null}
         speakers={cast}
         hasScript={!!doc}
         importing={busy === 'import'}
-        onOpen={openProject}
+        clips={clips}
+        activeClipId={activeClip?.id ?? null}
+        addingClip={busy === 'addClip'}
+        onAddClip={addClip}
+        onRemoveClip={removeClip}
+        onMoveClip={moveClip}
+        onSelectClip={(c) => seek(c.offset)}
+        open={libOpen}
+        onClose={() => setLibOpen(false)}
+        onOpen={(id) => { setLibOpen(false); void openProject(id); }}
         onImport={importFile}
         onSeek={seek}
       />
 
-        <Splitter className="sp1" variable="--w-library" min={180} max={320} initial={216} side="left" />
+      {/* ---- the transcript: the left column, the surface you edit on ---- */}
+      <main
+        className="script"
+        // A press anywhere on the surface that isn't a word clears the
+        // selection — the whole scroll area, not just the 640px text column.
+        // Words keep their own selection via onWordClick; the drag gesture
+        // presses on a word too, so its mousedown is caught by closest('.w').
+        // Guarded on `selection` so an ordinary click on empty space doesn't
+        // churn the store when there's nothing to clear.
+        onMouseDown={(e) => {
+          if (selection && !(e.target as HTMLElement).closest('.w')) setSelection(null);
+        }}
+      >
+        {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
+        {notice && !error && <p className="notice" onClick={() => setNotice(null)}>{notice}</p>}
+
+        {!project && (
+          <div className="canvas-empty">
+            <h2>Nothing open</h2>
+            <p>Open the ☰ menu to import media. Nothing is transcribed until you ask for it.</p>
+          </div>
+        )}
+
+        {project && !doc && (
+          <div className="canvas-empty">
+            <h2>{project.name}</h2>
+            <p>
+              {clock(project.duration)} · {project.hasVideo ? `${project.width}×${project.height}` : 'audio only'}
+            </p>
+            <p className="sub">
+              No script yet. Choose your settings in the Transcribe panel and run it.
+            </p>
+          </div>
+        )}
+
+        {doc && project && (
+          <Script
+            transcript={{ mediaId: project.id, duration: project.duration, words }}
+            selection={selectedSet}
+            flash={flashSet}
+            playingIndex={playingIndex}
+            showDeleted={showDeleted}
+            colors={castColors}
+            onWordClick={clickWord}
+            onCorrectWord={correctText}
+            onSelectRange={(anchorId, focusId) => setSelection({ anchorId, focusId })}
+            onRetranscribe={() => setDialog('transcribe')}
+          />
+        )}
+      </main>
+
+        <Splitter className="sp1" variable="--w-script" min={300} max={640} initial={440} side="left" />
 
         {/* ---- the program monitor holds the centre stage ---- */}
         <Monitor
           ref={videoRef}
           project={project}
+          activeClip={activeClip}
           result={result}
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
@@ -558,6 +1154,7 @@ export default function App() {
                 words={words}
                 edl={edl}
                 captions={captions}
+                customFamilies={customFonts.map((f) => f.family)}
                 playing={playing}
                 getCurrentTime={getCurrentTime}
                 onDragStart={beginCaptionDrag}
@@ -568,49 +1165,21 @@ export default function App() {
           }
         />
 
-        <Splitter className="sp2" variable="--w-rail" min={380} max={860} initial={560} side="right" />
+        {/* The music bed, played on the output clock by useMusicPreview. Hidden
+          * and controlled entirely in code — the dock transport is the only
+          * transport. Keyed on the music id so swapping the bed reloads the src. */}
+        <audio
+          ref={musicRef}
+          key={project?.music?.id ?? 'no-music'}
+          src={project?.music?.sourceUrl}
+          preload="auto"
+          hidden
+        />
 
-        {/* ---- the document, and the inspector for whatever is selected ---- */}
-        <div className="right">
-          <main className="script">
-            {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
-            {notice && !error && <p className="notice" onClick={() => setNotice(null)}>{notice}</p>}
+        <Splitter className="sp2" variable="--w-rail" min={300} max={560} initial={372} side="right" />
 
-            {!project && (
-              <div className="canvas-empty">
-                <h2>Nothing open</h2>
-                <p>Import media from the left. Nothing is transcribed until you ask for it.</p>
-              </div>
-            )}
-
-            {project && !doc && (
-              <div className="canvas-empty">
-                <h2>{project.name}</h2>
-                <p>
-                  {clock(project.duration)} · {project.hasVideo ? `${project.width}×${project.height}` : 'audio only'}
-                </p>
-                <p className="sub">
-                  No script yet. Choose your settings in the Transcribe panel and run it.
-                </p>
-              </div>
-            )}
-
-            {doc && project && (
-              <Script
-                transcript={{ mediaId: project.id, duration: project.duration, words }}
-                selection={selectedSet}
-                flash={flashSet}
-                playingIndex={playingIndex}
-                showDeleted={showDeleted}
-                colors={castColors}
-                onWordClick={clickWord}
-                onWordDoubleClick={(i) => { seek(words[i].start); videoRef.current?.play(); }}
-                onBackgroundClick={() => setSelection(null)}
-              />
-            )}
-          </main>
-
-          <Rail
+        {/* ---- the inspector for whatever is selected: the full-height right column ---- */}
+        <Rail
             project={project}
             hasScript={!!doc}
             selectedWords={selectedWords}
@@ -625,11 +1194,22 @@ export default function App() {
             setCaptions={updateCaptions}
             onCaptionDragStart={beginCaptionDrag}
             onCaptionDragEnd={endCaptionDrag}
+            customFonts={customFonts}
+            onImportFont={importFont}
+            onRemoveFont={removeFont}
+            fontBusy={fontBusy}
+            onImportMusic={importMusic}
+            onUpdateMusic={updateMusic}
+            onRemoveMusic={removeMusic}
+            musicBusy={musicBusy}
             fillerMode={fillerMode}
             setFillerMode={setFillerMode}
+            customFillers={customFillers}
+            onAddCustomFiller={addCustomFiller}
+            onRemoveCustomFiller={removeCustomFiller}
             retakeMin={retakeMin}
             setRetakeMin={setRetakeMin}
-            fillerCount={doc ? countFillers(fillerMode === 'all') : 0}
+            fillerCount={doc ? countFillers(fillerMode === 'all', customFillers) : 0}
             retakeCount={doc ? countRetakes(retakeMin) : 0}
             onRemoveFillers={doFillers}
             onRemoveRetakes={doRetakes}
@@ -641,7 +1221,6 @@ export default function App() {
             onPlaySelection={playSelection}
             busy={busy}
           />
-        </div>
 
       <footer className="tl">
         <Transport
@@ -671,6 +1250,13 @@ export default function App() {
           selection={selectionRange}
           snapTargets={snapTargets}
           onSelectRange={selectRange}
+          insertPoints={clipInsertPoints}
+          clipBusy={busy === 'addClip' || busy === 'removeClip' || busy === 'reorderClip' || busy === 'splitClip'}
+          onInsertClip={addClip}
+          onSplit={project ? splitAtPlayhead : undefined}
+          music={musicLane}
+          onMusicResize={resizeMusic}
+          onMusicFill={fillMusic}
         />
       </footer>
 
@@ -684,6 +1270,9 @@ export default function App() {
         onTranscribe={doTranscribe}
         busy={busy}
         hasScript={!!doc}
+        wordCount={stats.words}
+        asrProvider={project?.asrProvider ?? null}
+        verbatim={project?.verbatim ?? true}
         job={job?.kind === 'transcribe' ? job : null}
         onCancelJob={cancelJob}
       />

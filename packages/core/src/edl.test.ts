@@ -1,6 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileEdl, outputDuration, sourceToOutput, outputToSource, splicePoints } from './edl.ts';
+import {
+  compileEdl,
+  compileSequenceEdl,
+  outputDuration,
+  sourceToOutput,
+  outputToSource,
+  splicePoints,
+  clipAt,
+  localRange,
+  type SequenceClip,
+} from './edl.ts';
 import type { Transcript, Word } from './types.ts';
 
 /** "hello"(0-1) "there"(1-2) "world"(2-3) — one word per second, no pauses. */
@@ -249,6 +259,92 @@ test.skip('LANDMINE: reordering words renders the wrong audio', () => {
   // start to the last word's end — [{0, 2}]. That renders "A B" and drops C
   // entirely. Not merely the wrong order: missing audio, no error.
   assert.notDeepEqual(edl.keep, [{ start: 0, end: 2 }], 'today: one range, C vanishes');
+});
+
+// ── multi-clip sequences ───────────────────────────────────────────────────────
+
+/** A clip of one-word-per-second speech, ids and clipId prefixed so they're unique. */
+function clip(id: string, specs: Array<[string, number, number] | [string, number, number, boolean]>): SequenceClip {
+  const words: Word[] = specs.map(([text, start, end, deleted], i) => ({
+    id: `${id}-w${i}`,
+    text,
+    start,
+    end,
+    clipId: id,
+    deleted: deleted ?? false,
+  }));
+  return { clipId: id, duration: Math.max(...words.map((w) => w.end)) + 1, words };
+}
+
+test('a one-clip sequence matches compileEdl and adds clip metadata', () => {
+  const specs: Array<[string, number, number]> = [['a', 0, 1], ['b', 1, 2], ['c', 2, 3]];
+  const seq = compileSequenceEdl([clip('c0', specs)], NO_PAD);
+  const single = compileEdl({ mediaId: 'c0', duration: 4, words: clip('c0', specs).words }, NO_PAD);
+
+  assert.deepEqual(seq.keep, single.keep, 'ranges identical to the single-clip compile');
+  assert.deepEqual(seq.clips, [{ clipId: 'c0', offset: 0, sourceDuration: 4 }]);
+  assert.equal(seq.sourceDuration, 4);
+});
+
+test('two clips concatenate on a global timeline, second shifted by the first duration', () => {
+  // Clip A: 3s of speech, duration 4. Clip B: 2s, duration 3. B's ranges start at +4.
+  const a = clip('A', [['hello', 0, 1], ['there', 1, 2], ['world', 2, 3]]);
+  const b = clip('B', [['second', 0, 1], ['clip', 1, 2]]);
+  const edl = compileSequenceEdl([a, b], NO_PAD);
+
+  assert.deepEqual(edl.keep, [
+    { start: 0, end: 3 }, // A, global == local
+    { start: 4, end: 6 }, // B, shifted by A's duration (4)
+  ]);
+  assert.deepEqual(edl.clips, [
+    { clipId: 'A', offset: 0, sourceDuration: 4 },
+    { clipId: 'B', offset: 4, sourceDuration: 3 },
+  ]);
+  assert.equal(edl.sourceDuration, 7, 'total timeline is 4 + 3');
+  assert.equal(outputDuration(edl), 5, 'kept 3s from A and 2s from B');
+});
+
+test('ranges never merge across a clip seam even when the numbers would touch', () => {
+  // A's kept tail ends at its global 3; B's kept head would be at local 0 but
+  // globally 4 — and even if B started at local 0 with A ending at duration, the
+  // seam is a file boundary, never a splice. Here they are one output-second
+  // apart in output terms but MUST stay two ranges: two files.
+  const a = clip('A', [['x', 0, 1]]); // duration 2
+  const b = clip('B', [['y', 0, 1]]); // duration 2
+  const edl = compileSequenceEdl([a, b], { padMs: 0, mergeWithinMs: 1000 });
+  assert.equal(edl.keep.length, 2, 'two clips are two ranges, whatever mergeWithin says');
+});
+
+test('a deletion inside the second clip cuts only that clip', () => {
+  const a = clip('A', [['keep', 0, 1], ['keep', 1, 2]]); // duration 3
+  const b = clip('B', [['keep', 0, 1], ['cut', 1, 2, true], ['keep', 2, 3]]); // duration 4
+  const edl = compileSequenceEdl([a, b], NO_PAD);
+  assert.deepEqual(edl.keep, [
+    { start: 0, end: 2 },   // A whole
+    { start: 3, end: 4 },   // B first word (global 3-4)
+    { start: 5, end: 6 },   // B last word (global 5-6), the deletion at 4-5 is gone
+  ]);
+});
+
+test('clipAt maps a global time to its clip; localRange strips the offset', () => {
+  const a = clip('A', [['x', 0, 1]]); // duration 2, occupies [0,2)
+  const b = clip('B', [['y', 0, 1]]); // duration 2, occupies [2,4)
+  const edl = compileSequenceEdl([a, b], NO_PAD);
+
+  assert.equal(clipAt(edl, 0.5)?.clipId, 'A');
+  assert.equal(clipAt(edl, 2.5)?.clipId, 'B', 'a time past the first clip lands in the second');
+  assert.equal(clipAt(edl, 4)?.clipId, 'B', 'the exact tail resolves to the last clip');
+  assert.equal(clipAt(edl, -1), null);
+
+  const local = localRange(edl, edl.keep[1]); // B's range, global 2-3
+  assert.equal(local?.clip.clipId, 'B');
+  assert.deepEqual([local?.start, local?.end], [0, 1], 'offset subtracted back to the file timeline');
+});
+
+test('clipAt on a single-source EDL presents one implicit clip', () => {
+  const edl = compileEdl({ mediaId: '', duration: 5, words: clip('c0', [['a', 0, 1]]).words }, NO_PAD);
+  assert.equal(edl.clips, undefined, 'no clip metadata on a plain single-source EDL');
+  assert.equal(clipAt(edl, 0.5)?.clipId, '', 'still resolves, to the implicit clip');
 });
 
 test('speed divides the output duration', () => {

@@ -1,9 +1,12 @@
 import { forwardRef, type ReactNode } from 'react';
-import type { Project, RenderResult } from '../api.ts';
+import { clipsOf, type Clip, type Project, type RenderResult } from '../api.ts';
 import { renderFilename } from '../download.ts';
 
 interface Props {
   project: Project | null;
+  /** The clip the monitor is showing. Playback swaps this as the playhead crosses
+   *  a seam; for a single-source project it is the one clip. */
+  activeClip?: Clip | null;
   result: RenderResult | null;
   onTimeUpdate: () => void;
   onPlay: () => void;
@@ -29,17 +32,22 @@ interface Props {
  * and it survives the monitor being hidden.
  */
 const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
-  { project, result, onTimeUpdate, onPlay, onPause, overlay },
+  { project, activeClip, result, onTimeUpdate, onPlay, onPause, overlay },
   ref,
 ) {
+  // The clip the monitor is showing. Playback drives it by playhead via
+  // `activeClip`; falling back to the first clip covers the initial render before
+  // the active clip is set and the single-source case.
+  const clip = activeClip ?? (project ? clipsOf(project)[0] : null);
+
   return (
     <div className="monitor">
       <div className="stage">
-        {project ? (
+        {project && clip ? (
           <>
             <video
               ref={ref}
-              src={project.sourceUrl}
+              src={clip.sourceUrl}
               onTimeUpdate={onTimeUpdate}
               onPlay={onPlay}
               onPause={onPause}

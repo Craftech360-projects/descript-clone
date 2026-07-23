@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CONFIG } from './config.ts';
 import type { Edl } from '../../../packages/core/src/types.ts';
-import { buildRenderPlan } from '../../../packages/core/src/render.ts';
+import {
+  buildRenderPlan,
+  buildSequenceRenderPlan,
+  type BgMusicRender,
+  type SequenceRenderClip,
+} from '../../../packages/core/src/render.ts';
 import { outputDuration } from '../../../packages/core/src/edl.ts';
 
 export interface MediaInfo {
@@ -63,7 +68,16 @@ export async function probe(path: string): Promise<MediaInfo> {
     hasAudio: true,
     width: video?.width,
     height: video?.height,
-    fps: parseFps(video?.r_frame_rate) ?? parseFps(video?.avg_frame_rate),
+    // avg_frame_rate FIRST, and the order is the whole ballgame. The render's
+    // video cut renumbers kept frames to a constant rate with setpts=N/fps, so
+    // fps must be frames÷duration — the AVERAGE rate — to reproduce real time.
+    // r_frame_rate is the timebase base rate: equal to the average on constant-
+    // frame-rate media, but far higher on a variable-frame-rate source (screen
+    // grabs, phone video, browser/OBS captures — exactly what gets imported).
+    // Feed r_frame_rate into setpts=N/fps there and the frames pack too tightly,
+    // so the export runs FASTER than real time and ahead of the audio. Fall back
+    // to r_frame_rate only when avg is unusable ("0/0").
+    fps: parseFps(video?.avg_frame_rate) ?? parseFps(video?.r_frame_rate),
   };
 }
 
@@ -72,7 +86,8 @@ export async function probe(path: string): Promise<MediaInfo> {
  *
  * It was already in the -show_streams response we parse; nothing read it. Two
  * traps: audio streams report "0/0", which divides to NaN, and a variable-rate
- * stream can report "0/0" on avg_frame_rate too.
+ * stream can report "0/0" on avg_frame_rate too — which is why the caller keeps
+ * r_frame_rate as a fallback.
  */
 function parseFps(rational: unknown): number | undefined {
   if (typeof rational !== 'string') return undefined;
@@ -121,6 +136,11 @@ export interface RenderJob {
   hasVideo: boolean;
   /** ASS markup to burn into the picture. Omit to render clean. */
   subtitles?: string;
+  /**
+   * Directory of imported font files to hand libass, so a burned caption can use
+   * an imported family. Inert without `subtitles`. See fonts.ts / render.ts.
+   */
+  fontsDir?: string;
   /** Output speed multiplier. Must already be clamped — see clampSpeed. */
   speed?: number;
   /**
@@ -129,6 +149,22 @@ export interface RenderJob {
    * project record has none, renderEdl probes for it rather than guessing.
    */
   fps?: number;
+  /**
+   * The source files for a multi-clip stitch, in the SAME order as edl.clips.
+   * Present (and matching edl.clips length) makes renderEdl concatenate these
+   * into one output instead of cutting the single `input`. Any clip missing its
+   * fps is probed. `input` is still required and names the first clip.
+   */
+  clips?: SequenceRenderClip[];
+  /** Canonical output frame size for a multi-clip stitch — the first video clip's. */
+  width?: number;
+  height?: number;
+  /**
+   * A background-music bed mixed under the finished program. Omit for none. Works
+   * on both the single-input and the multi-clip path, and on audio-only projects.
+   * Its `durationSec` is already resolved to the output clock by the caller.
+   */
+  bgMusic?: BgMusicRender;
 }
 
 export async function renderEdl(
@@ -136,10 +172,17 @@ export async function renderEdl(
   job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
-  const { input, output, hasVideo, subtitles, speed = 1 } = job;
-  // Old projects were imported before fps was read off ffprobe, so their record
-  // has none. One probe costs milliseconds; getting this wrong costs the render.
-  const fps = hasVideo ? (job.fps ?? (await probe(input)).fps) : undefined;
+  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic } = job;
+  // A multi-clip stitch when the caller handed us one file per EDL clip. A single
+  // clip falls through to the original single-input path, byte-identical.
+  const sequence = Boolean(edl.clips && edl.clips.length > 1 && job.clips && job.clips.length === edl.clips.length);
+  // fps drives the video cut's frame renumbering (setpts=N/fps), so a wrong value
+  // is a wrong-speed picture, not a slow render. Probe fresh rather than trust the
+  // stored project.fps: a project imported before the avg_frame_rate fix holds
+  // r_frame_rate, which is wrong for variable-frame-rate media and would keep
+  // exporting too fast. One probe costs milliseconds; getting this wrong costs the
+  // whole encode. An explicit job.fps still wins, for a caller that already probed.
+  const fps = hasVideo && !sequence ? (job.fps ?? (await probe(input)).fps) : undefined;
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const scriptPath = join(tmpdir(), `edl-${stamp}.txt`);
   // libass picks the parser from the extension, so this must stay .ass.
@@ -160,7 +203,45 @@ export async function renderEdl(
   // muxer from the extension, so "video.mp4.part" fails outright with "Unable to
   // choose an output format". "video.part.mp4" still reads as mp4.
   const partial = output.replace(/(\.[^.]+)$/, '.part$1');
-  const plan = buildRenderPlan(edl, { input, output: partial, hasVideo, subtitlePath, speed, fps });
+  // fontsDir only matters when there is a subtitle to burn; both plan builders
+  // ignore it otherwise, so passing it unconditionally is harmless.
+  let plan;
+  if (sequence) {
+    // Resolve every clip's own fps (the frame renumber needs it), then pick the
+    // canonical output rate as the fastest clip so no clip has frames dropped to
+    // hit it. Size is the first video clip's, letterboxing the rest.
+    const clips = await Promise.all(
+      job.clips!.map(async (c) => ({
+        input: c.input,
+        fps: hasVideo ? (c.fps ?? (await probe(c.input)).fps) : undefined,
+        sourceStart: c.sourceStart,
+      })),
+    );
+    const canonFps = Math.max(0, ...clips.map((c) => c.fps ?? 0)) || 30;
+    plan = buildSequenceRenderPlan(edl, {
+      clips,
+      output: partial,
+      hasVideo,
+      width: job.width ?? 1920,
+      height: job.height ?? 1080,
+      fps: canonFps,
+      subtitlePath,
+      speed,
+      fontsDir: subtitlePath ? fontsDir : undefined,
+      bgMusic,
+    });
+  } else {
+    plan = buildRenderPlan(edl, {
+      input,
+      output: partial,
+      hasVideo,
+      subtitlePath,
+      speed,
+      fps,
+      fontsDir: subtitlePath ? fontsDir : undefined,
+      bgMusic,
+    });
+  }
   await writeFile(scriptPath, plan.filterScript, 'utf8');
 
   // The output length is known exactly, so this progress is real, not a guess.

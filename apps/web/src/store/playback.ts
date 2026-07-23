@@ -1,6 +1,8 @@
 import { useEffect, type RefObject } from 'react';
 import { lookaheadFor, playStep } from '../../../../packages/core/src/timeline.ts';
+import { clipAt } from '../../../../packages/core/src/edl.ts';
 import type { Edl } from '../../../../packages/core/src/types.ts';
+import { clipGlobalTime, clipLocalTime, type Clip } from '../api.ts';
 
 /**
  * Play the edit: skip cut material as it comes, without letting any of it out.
@@ -34,9 +36,38 @@ interface Options {
   /** Document speed. Drives the element's rate AND the skip loop's margin. */
   speed: number;
   onEnded: () => void;
+  /**
+   * The clip the <video> currently shows, via a ref so the rAF loop reads the
+   * live value without re-subscribing. Its `offset` converts the element's LOCAL
+   * currentTime to the global timeline the EDL speaks. Null / offset 0 for a
+   * single-source project, which keeps that path byte-identical.
+   */
+  activeClipRef: RefObject<Clip | null>;
+  /**
+   * The active clip's id, as a value. Only a re-run trigger: when a seam hand-off
+   * swaps clips, the skip loop must re-mount against the newly loaded file — this
+   * being a dependency is what makes that happen.
+   */
+  activeClipId: string | null;
+  /**
+   * Cross a clip seam: seek to GLOBAL time `to`, loading its clip first. Only
+   * called for multi-clip projects; the app swaps the element's src and lands the
+   * seek once the new media is ready. `resume` keeps playback going after.
+   */
+  seekAcrossClip: (to: number, resume: boolean) => void;
 }
 
-export function usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded }: Options): void {
+export function usePlayback({
+  videoRef,
+  edl,
+  followEdit,
+  playing,
+  speed,
+  onEnded,
+  activeClipRef,
+  activeClipId,
+  seekAcrossClip,
+}: Options): void {
   /**
    * Rate is its own effect because it is not a property of PLAYING.
    *
@@ -91,6 +122,10 @@ export function usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded
       video.currentTime = to;
     };
 
+    // Several clips means the EDL runs on a global timeline and the element on a
+    // local one; a single clip keeps offset 0 and this whole distinction collapses.
+    const multi = Boolean(edl.clips && edl.clips.length > 1);
+
     const frame = () => {
       raf = requestAnimationFrame(frame);
 
@@ -106,13 +141,37 @@ export function usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded
       // whole 27s that was left. Let the browser finish; it is already going
       // where we asked.
       if (video.seeking) return;
+      // Mid clip-swap the element is loading a new file: its currentTime is stale
+      // and readyState has dropped. Acting now would seek against the wrong clip,
+      // so wait for the swap coordinator to land the pending seek. Guarded on
+      // `multi` so the single-clip path never gains a new early-return.
+      if (multi && video.readyState < 2) return;
+
+      // Local element (file) time to the global clock the EDL is cut on. A split
+      // clip starts partway into its file, so this is not a bare +offset — see
+      // clipGlobalTime.
+      const clip = activeClipRef.current;
+      const global = clip ? clipGlobalTime(clip, video.currentTime) : video.currentTime;
 
       // The margin scales with the rate — at 2x the playhead covers 33ms between
       // frames, and a fixed 30ms lookahead would be a frame too late. See
       // lookaheadFor.
-      const step = playStep(edl, video.currentTime, lookaheadFor(speed));
+      const step = playStep(edl, global, lookaheadFor(speed));
       if (step.action === 'continue') return;
-      if (step.action === 'seek') return gate(step.to, step.silent);
+      if (step.action === 'seek') {
+        // A seam between two clips is a different file — hand it to the app to
+        // swap the src and resume. Within the current clip it is a plain local
+        // seek, muted across the gap exactly as before.
+        if (multi) {
+          const target = clipAt(edl, step.to);
+          if (target && target.clipId !== activeClipRef.current?.id) {
+            cancelAnimationFrame(raf);
+            seekAcrossClip(step.to, true);
+            return;
+          }
+        }
+        return gate(clip ? clipLocalTime(clip, step.to) : step.to, step.silent);
+      }
 
       // The edit is over. Stop the loop with it — otherwise it keeps calling
       // pause() and onEnded() every frame until React gets around to unmounting.
@@ -128,5 +187,5 @@ export function usePlayback({ videoRef, edl, followEdit, playing, speed, onEnded
       // Never strand the element muted if we unmount mid-seek.
       if (restoreVolume !== null) video.volume = restoreVolume;
     };
-  }, [videoRef, edl, followEdit, playing, speed, onEnded]);
+  }, [videoRef, edl, followEdit, playing, speed, onEnded, activeClipRef, activeClipId, seekAcrossClip]);
 }

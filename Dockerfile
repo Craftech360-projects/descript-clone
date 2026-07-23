@@ -41,6 +41,11 @@ FROM node:24-bookworm-slim
 #              on Debian. Liberation Sans is metric-compatible and fontconfig
 #              substitutes it, so captions keep their intended size. With no
 #              fonts at all libass renders nothing and the burn silently no-ops.
+#              IMPORTED fonts take a different path: libass loads them straight
+#              from the media/fonts dir (passed as the burn's fontsdir), and
+#              FreeType reads TTF/OTF/WOFF unconditionally and WOFF2 via brotli —
+#              which bookworm's libfreetype ships with, so an imported WOFF2 burns
+#              here. A FreeType built WITHOUT brotli would fall back on WOFF2.
 # tini       — node as PID 1 does not reap exited children, and this process
 #              spawns an ffmpeg per render.
 RUN apt-get update && apt-get install -y --no-install-recommends \

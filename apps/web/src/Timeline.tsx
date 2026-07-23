@@ -30,6 +30,25 @@ interface Props {
   /** Word boundaries and cut points — the snap targets. */
   snapTargets: number[];
   onSelectRange: (range: { start: number; end: number } | null) => void;
+  /** Clip seams a "+" rides on: `time` in source seconds, `index` the play-order
+   *  slot a source dropped there would take. Empty when nothing is open. */
+  insertPoints?: { index: number; time: number }[];
+  /** A clip op is in flight — the "+" markers freeze while the server rewrites. */
+  clipBusy?: boolean;
+  onInsertClip?: (file: File, index: number) => void;
+  /** Cut the clip under the playhead in two, at the playhead. Absent = no project. */
+  onSplit?: () => void;
+  /**
+   * The background-music bed, drawn as a lane under the waveform. Its extent is
+   * in SOURCE seconds (App maps the output-clock bed back), so it shares the same
+   * x-mapping as everything else here. Null when no bed is attached.
+   */
+  music?: { name: string; startSec: number; endSec: number; loop: boolean } | null;
+  /** Drag the bed's right edge to trim/extend it — reports the new end, in source
+   *  seconds. App turns that into a length on the output clock. */
+  onMusicResize?: (endSourceSec: number) => void;
+  /** "Duplicate to fill": loop the bed across the whole video. */
+  onMusicFill?: () => void;
 }
 
 const RULER_H = 22;
@@ -59,10 +78,31 @@ export default function Timeline({
   selection,
   snapTargets,
   onSelectRange,
+  insertPoints,
+  clipBusy,
+  onInsertClip,
+  onSplit,
+  music,
+  onMusicResize,
+  onMusicFill,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const staticRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+
+  // One hidden input backs every "+"; the marker that opened it leaves the
+  // play-order slot to drop into behind, read back on change.
+  const fileRef = useRef<HTMLInputElement>(null);
+  const pendingIndex = useRef(0);
+  const openPicker = (index: number) => {
+    pendingIndex.current = index;
+    fileRef.current?.click();
+  };
+  const onInsertFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // same file twice fires no change unless cleared
+    if (file) onInsertClip?.(file, pendingIndex.current);
+  };
 
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState({ pxPerSec: 0, scrollSec: 0 });
@@ -264,6 +304,28 @@ export default function Timeline({
     }
   };
 
+  // Dragging the music bed's right edge. Its own pointer capture on the handle,
+  // separate from the canvas scrub/select, so the two never fight. Each move maps
+  // the pointer to a source time and reports it; App turns that into a length.
+  const musicResizing = useRef(false);
+  const onMusicHandleDown = (e: React.PointerEvent) => {
+    if (!onMusicResize) return;
+    e.stopPropagation();
+    e.preventDefault();
+    (e.target as Element).setPointerCapture(e.pointerId);
+    musicResizing.current = true;
+  };
+  const onMusicHandleMove = (e: React.PointerEvent) => {
+    if (!musicResizing.current || !music) return;
+    const t = clamp(timeAt(e.clientX), music.startSec + 0.05, duration);
+    onMusicResize?.(t);
+  };
+  const onMusicHandleUp = (e: React.PointerEvent) => {
+    if (!musicResizing.current) return;
+    musicResizing.current = false;
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
   const visible = size.width > 0 && view.pxPerSec > 0 ? size.width / view.pxPerSec : duration;
   const zoomedIn = duration > 0 && visible < duration - 0.01;
 
@@ -274,14 +336,28 @@ export default function Timeline({
           {timecode(view.scrollSec, { ms: view.pxPerSec > 20 })} –{' '}
           {timecode(Math.min(duration, view.scrollSec + visible), { ms: view.pxPerSec > 20 })}
         </span>
-        <div className="tl-zoom">
-          <button onClick={() => setView((p) => zoomStep(p, size.width, duration, 1 / 1.5))} title="Zoom out (−)" aria-label="Zoom out">
-            <Icon name="minus" size={13} />
-          </button>
-          <button onClick={() => setView((p) => zoomStep(p, size.width, duration, 1.5))} title="Zoom in (+)" aria-label="Zoom in">
-            <Icon name="plus" size={13} />
-          </button>
-          <button onClick={zoomToFit} disabled={!zoomedIn} title="Zoom to fit (\)">Fit</button>
+        <div className="tl-tools">
+          {onSplit && (
+            <button
+              className="tl-split"
+              onClick={onSplit}
+              disabled={clipBusy || duration === 0}
+              title="Split the clip at the playhead (S)"
+              aria-label="Split clip at playhead"
+            >
+              <Icon name="scissors" size={14} />
+              Split
+            </button>
+          )}
+          <div className="tl-zoom">
+            <button onClick={() => setView((p) => zoomStep(p, size.width, duration, 1 / 1.5))} title="Zoom out (−)" aria-label="Zoom out">
+              <Icon name="minus" size={13} />
+            </button>
+            <button onClick={() => setView((p) => zoomStep(p, size.width, duration, 1.5))} title="Zoom in (+)" aria-label="Zoom in">
+              <Icon name="plus" size={13} />
+            </button>
+            <button onClick={zoomToFit} disabled={!zoomedIn} title="Zoom to fit (\)">Fit</button>
+          </div>
         </div>
       </div>
 
@@ -296,7 +372,94 @@ export default function Timeline({
       >
         <canvas ref={staticRef} className="tl-layer" />
         <canvas ref={overlayRef} className="tl-layer tl-overlay" />
+
+        {/* The "+" markers ride on the clip seams — the start of each clip, and
+          * one past the end. They live in the DOM (not the canvas) so they take a
+          * click, and they follow zoom/scroll because `map` is recomputed from
+          * `view` on every render. pointerdown stops here so a click on a marker
+          * does not also start a scrub/select on the strip beneath it. */}
+        {onInsertClip &&
+          view.pxPerSec > 0 &&
+          (insertPoints ?? []).map((p) => {
+            const x = map.toX(p.time);
+            if (x < -20 || x > size.width + 20) return null;
+            const last = p.index === (insertPoints?.length ?? 1) - 1;
+            const where = p.index === 0 ? 'at the start' : last ? 'at the end' : `here`;
+            return (
+              <button
+                key={`${p.index}:${p.time}`}
+                className="tl-add"
+                style={{ left: clamp(x, 11, Math.max(11, size.width - 11)), top: RULER_H + filmH / 2 }}
+                disabled={clipBusy}
+                title={`Add a clip ${where}`}
+                aria-label={`Add a clip ${where}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => openPicker(p.index)}
+              >
+                <Icon name="plus" size={18} />
+              </button>
+            );
+          })}
       </div>
+
+      {/* The background-music lane. A track beneath the waveform showing where the
+        * bed plays — same x-mapping as the strip above, so it lines up under zoom
+        * and scroll. It is editable: drag the right edge to trim or extend, and
+        * "Fill" loops the track across the whole video. The bar clamps to the
+        * viewport rather than disappearing when one end scrolls off; the edge
+        * handle only shows when the real end is on screen. */}
+      {music && (() => {
+        const rawEnd = map.toX(music.endSec);
+        const x0 = Math.max(0, map.toX(music.startSec));
+        const x1 = Math.min(size.width, rawEnd);
+        const endOnScreen = rawEnd <= size.width + 2;
+        return (
+          <div className="tl-music" title={`Background music — ${music.name}`}>
+            {x1 > x0 && (
+              <div
+                className={`tl-music-clip${music.loop ? ' looped' : ''}`}
+                style={{ left: x0, width: x1 - x0 }}
+              >
+                <Icon name="audio" size={12} className="tl-music-ico" />
+                <span className="tl-music-name">
+                  {music.name}
+                  {music.loop && <span className="tl-music-badge">loop</span>}
+                </span>
+
+                {onMusicFill && (
+                  <button
+                    className="tl-music-fill"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={onMusicFill}
+                    title="Duplicate the track to fill the whole video"
+                    aria-label="Loop music to fill the video"
+                  >
+                    Fill
+                  </button>
+                )}
+
+                {onMusicResize && endOnScreen && (
+                  <span
+                    className="tl-music-handle"
+                    title="Drag to trim or extend the music"
+                    onPointerDown={onMusicHandleDown}
+                    onPointerMove={onMusicHandleMove}
+                    onPointerUp={onMusicHandleUp}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="video/*,audio/*"
+        className="tl-add-file"
+        onChange={onInsertFile}
+      />
     </div>
   );
 }

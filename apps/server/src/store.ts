@@ -8,6 +8,76 @@ import type { CaptionSettings } from '../../../packages/core/src/caption-style.t
 import type { CutSettings } from '../../../packages/core/src/doc.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
+/**
+ * One source file in a project's sequence, server side.
+ *
+ * The counterpart of the client's Clip, plus `sourcePath` — the on-disk file the
+ * render, probe, and transcribe passes read. A project is moving from one media
+ * file to an ordered list of these; a single-source project is exactly one clip,
+ * derived on demand by `clipsOf` from the flat fields below. `offset` is derived
+ * from ordering, never stored, so a reorder is a list move.
+ */
+export interface StoredClip {
+  id: string;
+  sourcePath: string;
+  sourceUrl: string;
+  duration: number;
+  hasVideo: boolean;
+  width?: number;
+  height?: number;
+  fps?: number;
+  peaks: number[];
+  thumbs?: Thumbs;
+  /**
+   * Where in its source file this clip begins, in seconds. Absent (≡ 0) for a
+   * whole-file clip — every clip until one is split. Splitting a clip makes two
+   * clips that share one file: the first keeps sourceStart 0 and a shortened
+   * `duration`, the second gets sourceStart at the cut. `duration` is always the
+   * clip's own length (out − in), so the file window is [sourceStart, +duration].
+   * The render adds this to each kept range to address the real file frames.
+   */
+  sourceStart?: number;
+}
+
+export interface Clip extends StoredClip {
+  /** Seconds this clip begins at on the project timeline: Σ of prior durations. */
+  offset: number;
+}
+
+/**
+ * A background-music bed attached to a project.
+ *
+ * Per-project, not global like fonts: a bed is a creative choice about THIS
+ * piece. The file lives in uploads/ alongside the sources; the render mixes it
+ * UNDER the finished program (post-cut, post-speed) so it is never chopped by the
+ * word edits — see BgMusicRender in render.ts.
+ */
+export interface BgMusic {
+  id: string;
+  /** Original filename, for display in the panel. */
+  name: string;
+  /** Absolute path to the imported audio on disk. Server-only. */
+  sourcePath: string;
+  /** Browser-reachable URL, for the preview <audio> element. */
+  sourceUrl: string;
+  /** The music file's own length in seconds, probed on import. Bounds the trim. */
+  sourceDuration: number;
+  /** Linear gain, 0..N. 1 is unity; the panel defaults it lower so it sits under. */
+  volume: number;
+  /**
+   * How long the bed plays, in OUTPUT seconds. Absent means "as long as the
+   * program runs" — the mix caps it at the program length regardless.
+   */
+  durationSec?: number;
+  /**
+   * Loop the track to fill its length. Off: a bed shorter than `durationSec`
+   * stops early (and the length is capped at the file's own duration). On: the
+   * track repeats to cover the whole requested length — how a short song fills a
+   * long video. See BgMusicRender.loop.
+   */
+  loop?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -29,6 +99,14 @@ export interface Project {
   asrOptions?: AsrOptions;
   /** Whether the transcript actually preserves fillers. Drives a UI warning. */
   verbatim: boolean;
+
+  /**
+   * The source clips, in play order. Absent on single-source projects (every
+   * project today): read them through `clipsOf`, which derives one clip from the
+   * flat fields when this is unset. Populated only once a project holds more than
+   * one source.
+   */
+  clips?: StoredClip[];
 
   /** Waveform envelope, computed at import (it is free and always useful). */
   peaks: number[];
@@ -59,6 +137,11 @@ export interface Project {
    * before this; the client falls back to the engine defaults via cutFromWire.
    */
   cut?: CutSettings;
+  /**
+   * The background-music bed, if one has been imported. Absent on projects with
+   * no music (all of them, until asked for). Mixed under the render — see BgMusic.
+   */
+  music?: BgMusic;
   createdAt: string;
 }
 
@@ -130,4 +213,83 @@ export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'
     .filter((p): p is Project => p !== null)
     .map(({ peaks, transcript, ...rest }) => rest)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/**
+ * The project's clips, in order, each with its computed timeline offset.
+ *
+ * The server seam mirroring the client's `clipsOf`: everything reading
+ * project.sourcePath / .duration / .peaks / .thumbs as "the media" — render,
+ * thumbs, transcribe — should move behind this so single-source and multi-clip
+ * are one path. A project with no `clips` array reads as one clip derived from
+ * the flat fields, offset 0, so it is total and old projects need no migration.
+ */
+export function clipsOf(project: Project): Clip[] {
+  const raw: StoredClip[] = project.clips ?? [singleClipFrom(project)];
+  let offset = 0;
+  return raw.map((c) => {
+    const withOffset: Clip = { ...c, offset };
+    offset += c.duration;
+    return withOffset;
+  });
+}
+
+/**
+ * Ensure `project.clips` exists, materialising the implicit single clip if not.
+ *
+ * The moment a project gains a second source it stops being describable by the
+ * flat fields alone, so the first clip is written out explicitly. Existing
+ * transcript words carry no clipId (they predate clips); they are stamped with
+ * the first clip's id here, so from this point every word names its clip and the
+ * incremental transcribe path can tell which clips still need words. Returns the
+ * now-guaranteed clips array (the same reference stored on the project).
+ */
+export function ensureClips(project: Project): StoredClip[] {
+  if (!project.clips) {
+    const first = singleClipFrom(project);
+    project.clips = [first];
+    if (project.transcript) {
+      for (const w of project.transcript.words) if (w.clipId === undefined) w.clipId = first.id;
+    }
+  }
+  return project.clips;
+}
+
+/**
+ * Re-derive the project-level aggregates from its clips, after an append/remove.
+ *
+ * The flat fields stay meaningful for code paths that read the "primary" clip
+ * (clip 0): sourcePath/sourceUrl/width/height/fps follow it. `duration` and
+ * `peaks`, though, describe the WHOLE timeline — that is what the client's edl
+ * and ruler span — so they are the concatenation across clips. hasVideo is true
+ * if any clip has a picture. The transcript's duration tracks the total too.
+ */
+export function recomputeAggregates(project: Project): void {
+  const clips = ensureClips(project);
+  const first = clips[0];
+  project.sourcePath = first.sourcePath;
+  project.sourceUrl = first.sourceUrl;
+  project.width = first.width;
+  project.height = first.height;
+  project.fps = first.fps;
+  project.hasVideo = clips.some((c) => c.hasVideo);
+  project.duration = clips.reduce((sum, c) => sum + c.duration, 0);
+  project.peaks = clips.flatMap((c) => c.peaks);
+  if (project.transcript) project.transcript.duration = project.duration;
+}
+
+/** The flat single-source fields, read as the one clip an old project holds. */
+function singleClipFrom(p: Project): StoredClip {
+  return {
+    id: p.id,
+    sourcePath: p.sourcePath,
+    sourceUrl: p.sourceUrl,
+    duration: p.duration,
+    hasVideo: p.hasVideo,
+    width: p.width,
+    height: p.height,
+    fps: p.fps,
+    peaks: p.peaks,
+    thumbs: p.thumbs,
+  };
 }

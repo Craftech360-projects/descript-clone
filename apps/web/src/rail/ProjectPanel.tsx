@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { Field, Hint, Slider, Segmented, Warn, Check, Color } from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
@@ -7,7 +8,7 @@ import {
   type Backdrop,
   type CaptionSettings,
 } from '../../../../packages/core/src/caption-style.ts';
-import type { Project } from '../api.ts';
+import type { CustomFont, Project } from '../api.ts';
 
 export type FillerMode = 'off' | 'hesitations' | 'all';
 
@@ -27,8 +28,23 @@ interface Props {
   onCaptionDragStart: () => void;
   onCaptionDragEnd: (label: string) => void;
 
+  /** Imported caption fonts, shared across every project. */
+  customFonts: CustomFont[];
+  onImportFont: (file: File) => void;
+  onRemoveFont: (id: string) => void;
+  fontBusy: boolean;
+
+  /** Background music, per project — lives on `project.music`. */
+  onImportMusic: (file: File) => void;
+  onUpdateMusic: (patch: { volume?: number; durationSec?: number | null; loop?: boolean }) => void;
+  onRemoveMusic: () => void;
+  musicBusy: boolean;
+
   fillerMode: FillerMode;
   setFillerMode: (m: FillerMode) => void;
+  customFillers: string[];
+  onAddCustomFiller: (word: string) => void;
+  onRemoveCustomFiller: (word: string) => void;
   retakeMin: number;
   setRetakeMin: (n: number) => void;
   fillerCount: number;
@@ -39,6 +55,55 @@ interface Props {
   onRestoreAll: () => void;
   onRetranscribe: () => void;
   busy: string | null;
+}
+
+/**
+ * The user's own filler words, added on top of the built-in hesitation shapes.
+ *
+ * Holds only the draft text of the input; the committed list lives in App so it
+ * can be persisted and fed to the detector. Enter or the Add button commits;
+ * App normalizes and de-dupes, so this stays dumb.
+ */
+function CustomFillers({ words, onAdd, onRemove }: {
+  words: string[];
+  onAdd: (word: string) => void;
+  onRemove: (word: string) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const commit = () => {
+    onAdd(draft);
+    setDraft('');
+  };
+
+  return (
+    <div className="custom-fillers">
+      <div className="chip-input">
+        <input
+          type="text"
+          value={draft}
+          placeholder="Add a word — e.g. basically, literally"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commit();
+            }
+          }}
+        />
+        <button type="button" onClick={commit} disabled={!draft.trim()}>Add</button>
+      </div>
+      {words.length > 0 && (
+        <ul className="chips">
+          {words.map((w) => (
+            <li key={w} className="chip">
+              <span>{w}</span>
+              <button type="button" aria-label={`Remove ${w}`} onClick={() => onRemove(w)}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /** What the mode flags, said once, instead of inside all three option labels. */
@@ -61,58 +126,21 @@ const FILLER_HINT: Record<FillerMode, string> = {
  * width sat unused.
  */
 export default function ProjectPanel(p: Props) {
-  const removed = Math.max(0, p.stats.sourceSec - p.stats.outputSec);
   // 0 is the sentinel for "keep every pause": Infinity does not survive JSON, so
   // the wire speaks 0 and the document holds Infinity.
   const gap = p.cut.maxGapMs === Infinity ? 0 : p.cut.maxGapMs;
 
   return (
     <div className="panel panel-project">
-      {/* The one big number, and the three facts that qualify it. Stacked, these
-        * were four short lines rattling around a 560px well; the width was
-        * already paid for. */}
-      <div className="hero stat">
-        <div className="hero-main">
-          <strong>{timecode(p.stats.outputSec)}</strong>
-          <small>output</small>
-        </div>
-        <dl className="hero-stats">
-          <div>
-            <dt>Removed</dt>
-            <dd>−{timecode(removed)}</dd>
-          </div>
-          <div>
-            <dt>Segments</dt>
-            <dd>{p.stats.cuts}</dd>
-          </div>
-          <div>
-            <dt>Words kept</dt>
-            <dd>
-              {p.stats.kept}
-              <span className="of">/{p.stats.words}</span>
-            </dd>
-          </div>
-        </dl>
-      </div>
+      {/* The output-length summary that led this panel now lives in the title bar,
+        * beside Export — it is the document's running state, not a control. */}
 
-      {/* Left: the words — where they came from, and which of them survive. */}
+      {/* Left: the words — which of them survive. The transcript's provenance and
+        * the Re-transcribe action moved out: the summary lives in the Transcribe
+        * dialog (it is the "before" a re-transcribe replaces), and the entry point
+        * sits at the end of the script itself. */}
       <div className="pcol">
-        <Field label="Transcript">
-          <Hint>
-            {p.stats.words} words · {p.asrProvider ?? 'unknown model'}
-            {p.verbatim ? ' · verbatim' : ' · not verbatim'}
-          </Hint>
-          {!p.verbatim && (
-            <Warn>
-              This transcript is not verbatim — the model dropped fillers before you saw them, so
-              the filler tool will find little to nothing. Re-transcribe with ElevenLabs Scribe v2
-              to keep them.
-            </Warn>
-          )}
-          <button onClick={p.onRetranscribe} disabled={!!p.busy}>Re-transcribe…</button>
-        </Field>
-
-        <Field label="Clean up">
+        <Field label="Clean up" collapsible>
           <Segmented
             name="filler"
             value={p.fillerMode}
@@ -132,6 +160,16 @@ export default function ProjectPanel(p: Props) {
               "Sort of" and "kind of" are sometimes load-bearing. Review before cutting — these are
               flagged, never cut automatically.
             </Warn>
+          )}
+
+          {/* Your own words fold into the same sweep as the built-in hesitations.
+            * Hidden when the tool is off, since nothing is flagged then. */}
+          {p.fillerMode !== 'off' && (
+            <CustomFillers
+              words={p.customFillers}
+              onAdd={p.onAddCustomFiller}
+              onRemove={p.onRemoveCustomFiller}
+            />
           )}
 
           {/* The count lives IN the label, so you know the outcome before you
@@ -169,7 +207,7 @@ export default function ProjectPanel(p: Props) {
         * blank with them OFF — which is the default. Pauses is the ballast that
         * keeps this column real in both states. */}
       <div className="pcol">
-        <Field label="Pauses">
+        <Field label="Pauses" collapsible>
           <Slider
             value={gap}
             min={0}
@@ -184,11 +222,174 @@ export default function ProjectPanel(p: Props) {
           />
         </Field>
 
+        <MusicField {...p} />
+
         <CaptionsField {...p} />
       </div>
 
       <Advanced {...p} />
     </div>
+  );
+}
+
+/**
+ * The caption font control: the built-in families, the imported ones, and the
+ * import/remove affordances that manage the shared library inline.
+ *
+ * The dropdown value is CaptionSettings.font — a built-in id for the built-ins,
+ * and the real family NAME for an imported font (that name is what the burn's ASS
+ * Fontname and the preview's @font-face both key off, so it is the stable handle,
+ * not the opaque id). Remove is offered only while an imported font is selected;
+ * it is the one place that library is destructive, so it stays out of reach until
+ * you are actually looking at the font it would delete.
+ */
+function FontPicker({ value, onChange, customFonts, onImport, onRemove, busy }: {
+  value: string;
+  onChange: (font: string) => void;
+  customFonts: CustomFont[];
+  onImport: (file: File) => void;
+  onRemove: (id: string) => void;
+  busy: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const selectedCustom = customFonts.find((f) => f.family === value) ?? null;
+
+  return (
+    <div className="font-picker">
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <optgroup label="Built-in">
+          {CAPTION_FONTS.map((f) => (
+            <option key={f.id} value={f.id}>{f.label}</option>
+          ))}
+        </optgroup>
+        {customFonts.length > 0 && (
+          <optgroup label="Imported">
+            {customFonts.map((f) => (
+              <option key={f.id} value={f.family}>{f.label}</option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+
+      <div className="font-actions">
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".ttf,.otf,.ttc,.woff,.woff2"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) onImport(file);
+            // Clear the value so re-importing the SAME file fires onChange again.
+            e.target.value = '';
+          }}
+        />
+        <button className="link" onClick={() => inputRef.current?.click()} disabled={busy}>
+          {busy ? 'Importing…' : 'Import font…'}
+        </button>
+        {selectedCustom && (
+          <button className="link danger" onClick={() => onRemove(selectedCustom.id)} disabled={busy}>
+            Remove “{selectedCustom.label}”
+          </button>
+        )}
+      </div>
+
+      <Hint>TTF, OTF, WOFF or WOFF2. Imported fonts are saved for every project.</Hint>
+    </div>
+  );
+}
+
+/**
+ * The background-music bed: import, volume, and how long it plays.
+ *
+ * The defining behaviour, said in the hint because it is the surprising part:
+ * the bed rides UNDER the finished cut and is never chopped with the words. So
+ * its length is measured on the OUTPUT clock — "play music for the first 20s of
+ * the final video" — not on the source. Volume and length persist per project
+ * (debounced by App); there is no history entry, so no drag-commit dance.
+ */
+function MusicField(p: Props) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const music = p.project.music;
+
+  const pick = () => inputRef.current?.click();
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) p.onImportMusic(file);
+    e.target.value = ''; // let the same file re-fire onChange
+  };
+
+  // Length lives on the output clock. Without looping it can be no longer than
+  // the file itself (a bed would otherwise trail off into silence); with looping
+  // it can run the whole program. Either way the video length is the ceiling.
+  const loop = Boolean(music?.loop);
+  const lenCeil = loop ? p.stats.outputSec : Math.min(music?.sourceDuration ?? 0, p.stats.outputSec);
+  const maxLen = Math.max(1, Math.floor(lenCeil));
+  const trimmed = music?.durationSec !== undefined;
+  const lenValue = Math.min(maxLen, Math.round(music?.durationSec ?? maxLen));
+
+  return (
+    <Field label="Background music" collapsible>
+      <input ref={inputRef} type="file" accept="audio/*" hidden onChange={onFile} />
+
+      {!music ? (
+        <>
+          <button onClick={pick} disabled={p.musicBusy}>
+            {p.musicBusy ? 'Importing…' : 'Import music…'}
+          </button>
+          <Hint>
+            A music bed under the finished video. It plays across the whole cut — never chopped with
+            the words — and you set its volume and how long it runs.
+          </Hint>
+        </>
+      ) : (
+        <>
+          <div className="music-file">
+            <span className="music-name" title={music.name}>{music.name}</span>
+            <div className="font-actions">
+              <button className="link" onClick={pick} disabled={p.musicBusy}>Replace…</button>
+              <button className="link danger" onClick={p.onRemoveMusic} disabled={p.musicBusy}>Remove</button>
+            </div>
+          </div>
+
+          <Slider
+            value={Math.round(music.volume * 100)}
+            min={0}
+            max={100}
+            step={5}
+            onChange={(v) => p.onUpdateMusic({ volume: v / 100 })}
+            format={(v) => `${v}% volume`}
+          />
+
+          <Check
+            checked={loop}
+            onChange={(v) => p.onUpdateMusic(v ? { loop: true, durationSec: null } : { loop: false })}
+            label="Loop to fill the video"
+          />
+
+          <Check
+            checked={trimmed}
+            onChange={(v) => p.onUpdateMusic({ durationSec: v ? maxLen : null })}
+            label="Limit how long it plays"
+          />
+          {trimmed && (
+            <Slider
+              value={lenValue}
+              min={1}
+              max={maxLen}
+              step={1}
+              onChange={(v) => p.onUpdateMusic({ durationSec: v })}
+              format={(v) => `Plays for ${timecode(v)}`}
+            />
+          )}
+
+          <Hint>
+            Or drag the music track’s right edge in the timeline to trim it, and “Fill” to loop it
+            across the whole video.
+          </Hint>
+        </>
+      )}
+    </Field>
   );
 }
 
@@ -213,7 +414,7 @@ function CaptionsField(p: Props) {
   };
 
   return (
-    <Field label="Captions">
+    <Field label="Captions" collapsible>
       <Check
         checked={c.enabled && hasVideo}
         onChange={(v) => commit(v ? 'Enable captions' : 'Disable captions')({ enabled: v })}
@@ -229,14 +430,14 @@ function CaptionsField(p: Props) {
         <>
           <Hint>Drag the caption on the monitor to place it.</Hint>
 
-          <select
+          <FontPicker
             value={c.font}
-            onChange={(e) => commit('Change caption font')({ font: e.target.value })}
-          >
-            {CAPTION_FONTS.map((f) => (
-              <option key={f.id} value={f.id}>{f.label}</option>
-            ))}
-          </select>
+            onChange={(font) => commit('Change caption font')({ font })}
+            customFonts={p.customFonts}
+            onImport={p.onImportFont}
+            onRemove={p.onRemoveFont}
+            busy={p.fontBusy}
+          />
 
           <Slider
             value={c.fontSize}

@@ -14,6 +14,11 @@ interface Props {
   onTranscribe: () => void;
   busy: string | null;
   hasScript: boolean;
+  /** The current script's word count — shown as the "what you have now" summary. */
+  wordCount: number;
+  /** The model that produced the current script, and whether it kept fillers. */
+  asrProvider: string | null;
+  verbatim: boolean;
   job: { progress: number; stage: string } | null;
   onCancelJob: () => void;
 }
@@ -39,6 +44,9 @@ export default function TranscribeDialog({
   onTranscribe,
   busy,
   hasScript,
+  wordCount,
+  asrProvider,
+  verbatim,
   job,
   onCancelJob,
 }: Props) {
@@ -70,10 +78,26 @@ export default function TranscribeDialog({
         * of this dialog, so this is where you look for it. */}
       {job && <Progress progress={job.progress} stage={job.stage} onCancel={onCancelJob} />}
 
+      {/* What the project holds right now — the summary that used to sit in the
+        * Project rail. It belongs here: it is the state a re-transcribe replaces,
+        * so it reads as the "before" to this dialog's action. */}
       {hasScript && (
-        <Warn>
-          Re-transcribing replaces the script, and the cuts you have made go with it.
-        </Warn>
+        <>
+          <p className="dl-sub">
+            {wordCount} words · {asrProvider ?? 'unknown model'}
+            {verbatim ? ' · verbatim' : ' · not verbatim'}
+          </p>
+          {!verbatim && (
+            <Warn>
+              This transcript is not verbatim — the model dropped fillers before you saw them, so
+              the filler tool will find little to nothing. Re-transcribe with ElevenLabs Scribe v2
+              to keep them.
+            </Warn>
+          )}
+          <Warn>
+            Re-transcribing replaces the script, and the cuts you have made go with it.
+          </Warn>
+        </>
       )}
 
       <Field label="Model">

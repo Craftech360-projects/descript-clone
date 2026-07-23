@@ -5,7 +5,7 @@ import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
-import type { Project } from '../api.ts';
+import type { CustomFont, Project } from '../api.ts';
 
 interface Props {
   project: Project | null;
@@ -25,8 +25,21 @@ interface Props {
   onCaptionDragStart: () => void;
   onCaptionDragEnd: (label: string) => void;
 
+  customFonts: CustomFont[];
+  onImportFont: (file: File) => void;
+  onRemoveFont: (id: string) => void;
+  fontBusy: boolean;
+
+  onImportMusic: (file: File) => void;
+  onUpdateMusic: (patch: { volume?: number; durationSec?: number | null }) => void;
+  onRemoveMusic: () => void;
+  musicBusy: boolean;
+
   fillerMode: FillerMode;
   setFillerMode: (m: FillerMode) => void;
+  customFillers: string[];
+  onAddCustomFiller: (word: string) => void;
+  onRemoveCustomFiller: (word: string) => void;
   retakeMin: number;
   setRetakeMin: (n: number) => void;
   fillerCount: number;
@@ -117,8 +130,19 @@ export default function Rail(p: Props) {
         setCaptions={p.setCaptions}
         onCaptionDragStart={p.onCaptionDragStart}
         onCaptionDragEnd={p.onCaptionDragEnd}
+        customFonts={p.customFonts}
+        onImportFont={p.onImportFont}
+        onRemoveFont={p.onRemoveFont}
+        fontBusy={p.fontBusy}
+        onImportMusic={p.onImportMusic}
+        onUpdateMusic={p.onUpdateMusic}
+        onRemoveMusic={p.onRemoveMusic}
+        musicBusy={p.musicBusy}
         fillerMode={p.fillerMode}
         setFillerMode={p.setFillerMode}
+        customFillers={p.customFillers}
+        onAddCustomFiller={p.onAddCustomFiller}
+        onRemoveCustomFiller={p.onRemoveCustomFiller}
         retakeMin={p.retakeMin}
         setRetakeMin={p.setRetakeMin}
         fillerCount={p.fillerCount}

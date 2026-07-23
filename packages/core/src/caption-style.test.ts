@@ -8,6 +8,7 @@ import {
   captionScale,
   clampAnchor,
   fontCss,
+  fontStack,
   hexToAss,
   normalizeCaptions,
   strokeRole,
@@ -91,6 +92,18 @@ test('clampAnchor keeps a dragged caption inside the frame', () => {
 test('every offered font has a css stack, and unknown names fall back', () => {
   for (const f of CAPTION_FONTS) assert.ok(fontCss(f.id).length > 0);
   assert.equal(fontCss('Impact'), CAPTION_FONTS[0].css, 'unknown must not yield undefined');
+});
+
+test('fontStack previews built-ins by stack and imported families by name', () => {
+  // A built-in resolves exactly as fontCss does, imported list or not.
+  assert.equal(fontStack('Arial', ['Bebas Neue']), fontCss('Arial'));
+  // An imported family is quoted and used directly, with a sans fallback.
+  assert.equal(fontStack('Bebas Neue', ['Bebas Neue']), '"Bebas Neue", sans-serif');
+  // A name not in the imported list is NOT treated as custom — it falls back to
+  // the sans stack rather than being quoted blind, so a stale selection is safe.
+  assert.equal(fontStack('Bebas Neue', []), CAPTION_FONTS[0].css);
+  // A quote in a family name cannot break out of the CSS string.
+  assert.equal(fontStack('Ev"il', ['Ev"il']), '"Evil", sans-serif');
 });
 
 test('toAss scales size and position to the frame it is burning onto', () => {

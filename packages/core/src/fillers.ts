@@ -46,6 +46,15 @@ const DISCOURSE_PHRASES: string[][] = [
 export interface FillerOptions {
   /** Also flag discourse markers ("you know", "I mean"). Default false. */
   includeDiscourseMarkers?: boolean;
+
+  /**
+   * Extra words the user wants treated as fillers — e.g. "basically",
+   * "literally", "actually", or a personal verbal tic the shape-matcher above
+   * can't know about. Matched exactly (after normalize) against single words,
+   * so an entry only ever catches the word itself, never a substring of a
+   * longer one. Blank entries are ignored.
+   */
+  customWords?: string[];
 }
 
 /**
@@ -61,10 +70,15 @@ export function detectFillers(transcript: Transcript, options: FillerOptions = {
   const words = transcript.words;
   let found = 0;
 
+  // User-defined fillers, normalized to match how words are compared below.
+  // A Set makes the per-word check O(1) no matter how long the list grows.
+  const custom = new Set((options.customWords ?? []).map(normalize).filter(Boolean));
+
   for (const word of words) word.isFiller = false;
 
   for (let i = 0; i < words.length; i++) {
-    if (HESITATION.test(normalize(words[i].text))) {
+    const n = normalize(words[i].text);
+    if (HESITATION.test(n) || custom.has(n)) {
       words[i].isFiller = true;
       found++;
     }

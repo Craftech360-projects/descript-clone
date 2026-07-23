@@ -329,24 +329,28 @@ export function endCaptionDrag(label: string): void {
  * So it runs against throwaway clones; letting it touch doc.words would mutate
  * the live document behind the store's back, with no patch and no history.
  */
-function findFillerIds(words: Word[], includeDiscourseMarkers: boolean): Set<string> {
+function findFillerIds(
+  words: Word[],
+  includeDiscourseMarkers: boolean,
+  customWords: string[] = [],
+): Set<string> {
   const scratch: Transcript = { mediaId: '', duration: 0, words: words.map((w) => ({ ...w })) };
-  detectFillers(scratch, { includeDiscourseMarkers });
+  detectFillers(scratch, { includeDiscourseMarkers, customWords });
   return new Set(scratch.words.filter((w) => w.isFiller).map((w) => w.id));
 }
 
-export function countFillers(includeDiscourseMarkers: boolean): number {
+export function countFillers(includeDiscourseMarkers: boolean, customWords: string[] = []): number {
   const { doc } = state;
   if (!doc) return 0;
-  const ids = findFillerIds(doc.words, includeDiscourseMarkers);
+  const ids = findFillerIds(doc.words, includeDiscourseMarkers, customWords);
   return doc.words.filter((w) => ids.has(w.id) && !w.deleted).length;
 }
 
-export function removeFillers(includeDiscourseMarkers: boolean): number {
+export function removeFillers(includeDiscourseMarkers: boolean, customWords: string[] = []): number {
   const { doc } = state;
   if (!doc) return 0;
 
-  const flagged = findFillerIds(doc.words, includeDiscourseMarkers);
+  const flagged = findFillerIds(doc.words, includeDiscourseMarkers, customWords);
   const ids = new Set(doc.words.filter((w) => flagged.has(w.id) && !w.deleted).map((w) => w.id));
   if (ids.size === 0) return 0;
 
@@ -360,11 +364,11 @@ export function removeFillers(includeDiscourseMarkers: boolean): number {
 }
 
 /** Tag fillers without cutting them, so the script can flag them in amber. */
-export function tagFillers(includeDiscourseMarkers: boolean): number {
+export function tagFillers(includeDiscourseMarkers: boolean, customWords: string[] = []): number {
   const { doc } = state;
   if (!doc) return 0;
 
-  const flagged = findFillerIds(doc.words, includeDiscourseMarkers);
+  const flagged = findFillerIds(doc.words, includeDiscourseMarkers, customWords);
   // Set on matches and clear on the rest, so re-running with a narrower mode
   // drops the tags it no longer stands behind.
   const on = buildWordPatch(doc.words, flagged, { isFiller: true });

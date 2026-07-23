@@ -5,7 +5,30 @@ import { useId, type ReactNode } from 'react';
  * it, so they live here now.
  */
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+/**
+ * A titled group of controls.
+ *
+ * `collapsible` turns it into a native <details> — the section header becomes a
+ * disclosure you click to reveal the controls, collapsed by default. The rail
+ * uses this so its sections read as a short list of headers until you open the
+ * one you want; dialogs leave it off, since a control you opened a dialog to
+ * reach should already be on screen. Native <details> keeps full keyboard and
+ * screen-reader support with no JS.
+ */
+export function Field({ label, children, collapsible, defaultOpen }: {
+  label: string;
+  children: ReactNode;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+}) {
+  if (collapsible) {
+    return (
+      <details className="field field-c" open={defaultOpen}>
+        <summary>{label}</summary>
+        <div className="field-body">{children}</div>
+      </details>
+    );
+  }
   return (
     <section className="field">
       <h3>{label}</h3>
@@ -69,6 +92,14 @@ export function Segmented({ name, value, onChange, options }: {
   );
 }
 
+/**
+ * A single on/off setting, drawn as a toggle switch rather than a checkbox.
+ *
+ * Still a native <input type="checkbox"> underneath — role="switch" so assistive
+ * tech announces "on/off" instead of "checked", the label wraps it so the whole
+ * row is the hit target, and the state survives with CSS off. The track and thumb
+ * are the paint; the checkbox is the behaviour. See `.switch` in app.css.
+ */
 export function Check({ checked, onChange, label, disabled }: {
   checked: boolean;
   onChange: (v: boolean) => void;
@@ -76,14 +107,18 @@ export function Check({ checked, onChange, label, disabled }: {
   disabled?: boolean;
 }) {
   return (
-    <label className="check">
+    <label className={`switch${disabled ? ' disabled' : ''}`}>
       <input
         type="checkbox"
+        role="switch"
         checked={checked}
         disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
       />
-      {label}
+      <span className="switch-track" aria-hidden="true">
+        <span className="switch-thumb" />
+      </span>
+      <span className="switch-label">{label}</span>
     </label>
   );
 }

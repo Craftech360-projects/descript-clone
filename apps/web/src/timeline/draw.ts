@@ -37,16 +37,16 @@ export function readPalette(el: HTMLElement): Palette {
   // missing entirely, but a stale fallback is how the old blue #5b8cff outlived
   // two palettes in this exact function.
   return {
-    kept: v('--wave-kept', '#ffb224'),
-    cut: v('--wave-cut', '#2e2e2e'),
-    playhead: v('--playhead', '#fff'),
-    line: v('--line', '#262626'),
-    faint: v('--faint', '#6e6e6e'),
-    dim: v('--dim', '#a3a3a3'),
-    accent: v('--accent', '#ffb224'),
-    selection: v('--accent-dim', '#4d3609'),
-    chrome: v('--chrome', '#0b0b0b'),
-    ruler: v('--ruler-bg', '#060606'),
+    kept: v('--wave-kept', '#c8a87a'),
+    cut: v('--wave-cut', '#322b20'),
+    playhead: v('--playhead', '#fdf6e8'),
+    line: v('--line', '#2f281c'),
+    faint: v('--faint', '#726957'),
+    dim: v('--dim', '#a89e8b'),
+    accent: v('--accent', '#c8a87a'),
+    selection: v('--accent-dim', '#4a3a23'),
+    chrome: v('--chrome', '#15110a'),
+    ruler: v('--ruler-bg', '#080604'),
     film: v('--film-bg', '#000000'),
   };
 }
@@ -141,6 +141,40 @@ export function drawStatic(
 
   // Strike the cut regions so a removed pause reads as removed, not as silence.
   if (edl) drawCutStrikes(ctx, map, edl, mid, palette, dpr);
+
+  // Mark where one clip ends and the next begins — a seam is a file boundary, not
+  // an edit, so it gets its own full-height accent line rather than a cut strike.
+  if (edl?.clips && edl.clips.length > 1) drawClipSeams(ctx, geo, map, edl, palette, dpr);
+}
+
+/**
+ * A vertical accent line at every internal clip boundary (clip 2..N's start).
+ *
+ * These are the seams of a multi-clip project — where playback swaps to another
+ * source file. Drawn full height, under the ruler, so they read as structure
+ * spanning both the filmstrip and the waveform.
+ */
+function drawClipSeams(
+  ctx: CanvasRenderingContext2D,
+  geo: Geometry,
+  map: TimeMap,
+  edl: Edl,
+  palette: Palette,
+  dpr: number,
+): void {
+  ctx.save();
+  ctx.strokeStyle = palette.accent;
+  ctx.globalAlpha = 0.8;
+  ctx.lineWidth = 1;
+  for (const clip of edl.clips!.slice(1)) {
+    const x = crisp(map.toX(clip.offset), dpr);
+    if (x < 0 || x > geo.width) continue;
+    ctx.beginPath();
+    ctx.moveTo(x, geo.rulerH);
+    ctx.lineTo(x, geo.height);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /**

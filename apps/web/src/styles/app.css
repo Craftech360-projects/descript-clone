@@ -25,11 +25,48 @@ button.primary:active:not(:disabled) { background: var(--accent-press); border-c
 button.primary:disabled { background: var(--chrome); border-color: var(--line); color: var(--text); }
 button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
-.check {
-  display: flex; align-items: center; gap: 7px;
+/* ---- toggle switch ----
+ * A yes/no, drawn as a switch. Off is a recessed well (--sunk / --line) with a
+ * dim thumb; on is solid logo gold with a warm-black thumb sliding right — the
+ * same "this one is active IS the brand colour" the segmented control and a
+ * selected row already use, so nothing new is invented.
+ *
+ * The native checkbox stays for behaviour and a11y (role="switch"); it is taken
+ * out of flow and made invisible, and the track/thumb siblings do the painting.
+ * The <label> wraps it, so the whole row toggles. */
+.switch {
+  display: flex; align-items: center; gap: 9px;
   font-size: var(--t-ui); color: var(--dim); cursor: pointer;
+  position: relative; user-select: none;
 }
-.check input { accent-color: var(--accent); flex-shrink: 0; }
+.switch input {
+  position: absolute; opacity: 0; width: 0; height: 0; margin: 0;
+}
+.switch-track {
+  position: relative; flex-shrink: 0;
+  width: 34px; height: 20px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.switch-thumb {
+  position: absolute; top: 50%; left: 2px;
+  width: 14px; height: 14px;
+  transform: translateY(-50%);
+  background: var(--dim);
+  border-radius: 50%;
+  transition: left var(--dur-1) var(--ease), background var(--dur-1) var(--ease);
+}
+.switch input:checked + .switch-track {
+  background: var(--accent); border-color: var(--accent);
+}
+.switch input:checked + .switch-track .switch-thumb {
+  left: calc(100% - 16px); background: var(--accent-fg);
+}
+/* :focus-visible so a mouse click does not leave the ring behind. */
+.switch input:focus-visible + .switch-track { box-shadow: var(--ring); }
+.switch.disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---- segmented control ----
  * One question, three answers, 28px. This was `.radios` — a column of three
@@ -67,8 +104,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .seg-opt:hover:not(.on) { background: var(--hover); color: var(--text); }
 .seg-opt.on {
-  background: var(--selected); color: var(--text);
-  box-shadow: inset 0 0 0 1px var(--accent-dim);
+  /* Solid logo gold, warm-black label — the checked segment IS the brand colour,
+   * matching a selected media row. */
+  background: var(--accent); color: var(--accent-fg);
 }
 /* :focus-visible on the input, not :focus-within on the label — otherwise a
  * mouse click leaves the ring behind. */
@@ -86,28 +124,29 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * Grid, with the column widths owned by React as custom properties. Splitters
  * write --w-* directly on .app during a drag, so resizing never re-renders.
  *
- * The monitor holds the centre stage and the script sits in the right column —
- * the standard NLE arrangement. The old layout had this inverted and starved
- * the monitor to 418px while the 640px script page floated in a 947px column
- * with ~150px of dead gutter on each side. Monitor.tsx claimed "surplus width
- * flows here by construction"; it did not, because the rail was capped below
- * the surplus. The stage is now ~700px wide — about 3.8x the area.
+ * The designed arrangement (see the layout mock): the transcript is the LEFT
+ * column, the program monitor holds the centre stage, and the controls run the
+ * full-height RIGHT column. The media library is not a permanent column any
+ * more — it is behind the ☰ in the title bar, a drawer that slides over the
+ * transcript. That is the whole reason the transcript can sit on the left and
+ * still breathe: nothing competes with it for the edge.
  *
- * The dock spans only the library and the stage: the right column runs the full
- * height beneath the title bar. A transport that ran under the document would
- * be claiming to transport it; it transports the picture.
+ * The dock (the editor / timeline) spans the transcript and the stage: the
+ * right column runs the full height beneath the title bar. A transport that ran
+ * under the controls would be claiming to transport them; it transports the
+ * picture and the document beneath it.
  */
 .app {
   display: grid;
-  grid-template-columns: var(--w-library, 216px) 1px 1fr 1px var(--w-rail, clamp(480px, 40vw, 720px));
+  grid-template-columns: var(--w-script, 440px) 1px 1fr 1px var(--w-rail, 372px);
   /* 260, not 208: the dock now carries a 54px filmstrip lane on top of the
    * 22px ruler, and at 208 that left the waveform ~45px — a smear rather than
    * an envelope you can read. */
   grid-template-rows: 48px 1fr var(--h-dock, 260px);
   grid-template-areas:
-    'title title title  title title'
-    'lib   sp1   center sp2   right'
-    'dock  dock  dock   sp2   right';
+    'title  title title  title title'
+    'script sp1   center sp2   rail'
+    'dock   dock  dock   sp2   rail';
   height: 100%;
   background: var(--void);
 }
@@ -121,26 +160,52 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   border-bottom: 1px solid var(--line);
   position: relative; z-index: var(--z-sticky);
 }
-.tb-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-/* No glow. On black a 10px amber bloom around a 9px dot is a smudge twice the
- * size of the dot, which is exactly the "AI made this" tell. */
-.tb-left .dot {
-  width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
-  flex-shrink: 0;
-}
+.tb-left { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
+/* The ☰ that opens the library drawer. Slightly inset from the logo so the two
+ * read as a pair — menu, then brand. */
+.tb-menu { margin-left: -4px; }
+/* The wordmark itself, at title-bar height. It is gold on transparent, so it
+ * lands on the warm-black chrome without a plate. No text brand beside it — the
+ * mark says "JumpCut" already. */
+.tb-logo { height: 21px; width: auto; display: block; flex-shrink: 0; user-select: none; }
 .tb-brand {
   font-size: var(--t-base); font-weight: 650; letter-spacing: -.02em;
   color: var(--text); flex-shrink: 0;
 }
-.tb-sep { width: 1px; height: 13px; background: var(--line); flex-shrink: 0; }
+.tb-sep { width: 1px; height: 14px; background: var(--line); flex-shrink: 0; }
 .tb-name {
   font-size: var(--t-base); font-weight: 450; letter-spacing: -.01em;
   color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px;
 }
 .tb-mid { display: flex; gap: var(--s-1); }
-.tb-right { display: flex; align-items: center; gap: 10px; }
+.tb-right { display: flex; align-items: center; gap: var(--s-4); }
 .tb-right .primary { padding: 6px 16px; font-size: var(--t-ui); }
+
+/* ---- the edit summary, docked in the chrome beside Export ----
+ * Was the hero block at the top of the Project rail. It is the running state of
+ * the document — output length, how much came out — not a control, so it reads
+ * as chrome. Each metric is a value over a micro label; the output leads in the
+ * brand gold because it is the thing you are making. Tabular figures so the
+ * numbers do not jitter as the edit changes. */
+.tb-stats {
+  display: flex; align-items: center; gap: var(--s-4);
+  padding-right: var(--s-4);
+  border-right: 1px solid var(--line);
+}
+.tb-stat {
+  display: flex; flex-direction: column; gap: 1px;
+  line-height: 1.05;
+}
+.tb-stat b {
+  font-size: var(--t-ui); font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+.tb-stat i {
+  font-size: var(--t-micro); font-style: normal; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--faint); font-weight: 700;
+}
+.tb-stat.lead b { font-size: var(--t-base); color: var(--accent); letter-spacing: -.02em; }
 
 /* A square box holding a 24-grid SVG. Nothing here sizes the glyph any more —
  * the icon is geometry, so the box and the drawing agree by construction rather
@@ -187,20 +252,47 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .splitter.sp1 { grid-area: sp1; }
 .splitter.sp2 { grid-area: sp2; }
 
-/* ===================== left rail ===================== */
+/* ===================== library drawer ===================== */
 /**
- * This panel used to be 216px holding a single row: about 780px of pure void,
- * which is the loudest "unfinished" signal in the whole window. It now carries
- * the two things that are genuinely navigational — what media is open, and who
- * is talking in it.
+ * The two genuinely navigational things — what media is open, and who is
+ * talking in it — no longer hold a permanent column. They live in a drawer
+ * behind the ☰, so the transcript owns the left edge. The drawer slides over
+ * the transcript from the left, above a scrim; Esc or a click on the scrim
+ * closes it.
  */
+.lib-scrim {
+  position: fixed; inset: 48px 0 0 0; z-index: calc(var(--z-menu) - 1);
+  background: var(--scrim); backdrop-filter: blur(2px);
+  animation: fade var(--dur-2) var(--ease);
+}
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
 .library {
-  grid-area: lib;
-  background: var(--chrome);
-  border-right: 1px solid var(--line-soft);
+  position: fixed; top: 48px; left: 0; bottom: 0; width: 292px;
+  z-index: var(--z-menu);
+  background: var(--raised);
   overflow-y: auto; min-width: 0;
   display: flex; flex-direction: column; gap: var(--s-5);
-  padding: var(--s-4) 10px var(--s-5);
+  padding: 0 10px var(--s-5);
+  transform: translateX(-100%);
+  transition: transform var(--dur-3) var(--ease-out);
+  box-shadow: var(--shadow-drawer);
+}
+.library.open { transform: translateX(0); }
+
+/* Sticky header so the drawer always shows what it is and how to leave it. */
+.lib-top {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s-3) var(--s-1) var(--s-2);
+  margin: 0 -10px var(--s-1);
+  padding-left: var(--s-3); padding-right: var(--s-2);
+  background: var(--raised);
+  border-bottom: 1px solid var(--line-soft);
+}
+.lib-top h2 {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .12em;
+  color: var(--dim); font-weight: 700;
 }
 .lib-section { display: flex; flex-direction: column; gap: var(--s-2); }
 .lib-head { display: flex; align-items: center; justify-content: space-between; padding: 0 var(--s-1); }
@@ -229,11 +321,13 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .item:hover { background: var(--hover); }
 .item.on {
-  background: var(--selected); border-color: var(--accent-dim);
-  box-shadow: inset 2px 0 0 var(--accent);
+  /* Solid logo gold, warm-black label: the highlight IS the brand colour, not a
+   * dark wash of it. The label inherits --accent-fg; the icon flips to match. */
+  background: var(--accent); border-color: var(--accent);
+  color: var(--accent-fg);
 }
 .item .kind { color: var(--faint); flex-shrink: 0; display: flex; }
-.item.on .kind { color: var(--accent); }
+.item.on .kind { color: var(--accent-fg); }
 .item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .st {
   font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em;
@@ -241,6 +335,47 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   flex-shrink: 0; font-weight: 600;
 }
 .item .st.done { color: var(--ok); border-color: var(--ok-line); }
+
+/* ---- clips (the open project's source files, in play order) ---- */
+.clip-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
+.clip-row {
+  display: flex; align-items: center; gap: 4px;
+  border-radius: var(--r-2); border: 1px solid transparent;
+}
+/* Solid logo gold, same as a selected media row. Everything inside — name,
+ * duration, the move/remove icons and their hovers — flips to warm-black so it
+ * stays legible on the gold. */
+.clip-row.on { background: var(--accent); border-color: var(--accent); }
+.clip-row.on .clip-main,
+.clip-row.on .clip-dur,
+.clip-row.on .clip-move,
+.clip-row.on .clip-x { color: var(--accent-fg); }
+.clip-row.on .clip-main:hover { background: var(--accent-hover); }
+.clip-row.on .clip-move:hover:not(:disabled),
+.clip-row.on .clip-x:hover:not(:disabled) { color: var(--accent-fg); }
+.clip-main {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
+  padding: 8px var(--s-2); background: none; border: 0; box-shadow: none;
+  font: inherit; font-size: var(--t-ui); color: var(--text); text-align: left; cursor: pointer;
+  border-radius: var(--r-2);
+}
+.clip-main:hover { background: var(--hover); }
+.clip-row.on .clip-main .kind { color: var(--accent-fg); }
+.clip-main .kind { color: var(--faint); flex-shrink: 0; display: flex; }
+.clip-nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-dur {
+  font-size: var(--t-micro); color: var(--faint); font-variant-numeric: tabular-nums; flex-shrink: 0;
+}
+.clip-order { display: flex; flex-direction: column; flex-shrink: 0; }
+.clip-move {
+  color: var(--faint); font-size: 8px; line-height: 1; padding: 1px 3px;
+  background: none; border: 0; cursor: pointer;
+}
+.clip-move:hover:not(:disabled) { color: var(--text); }
+.clip-move:disabled { opacity: .3; cursor: default; }
+.clip-x { color: var(--faint); flex-shrink: 0; }
+.clip-x:hover:not(:disabled) { color: var(--text); }
+.clip-x:disabled { opacity: .35; cursor: default; }
 
 /* ---- speakers ---- */
 /**
@@ -273,17 +408,43 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .lib-empty { font-size: var(--t-small); color: var(--faint); padding: 0 var(--s-1); line-height: 1.6; }
 
 /* ===================== script ===================== */
-/* Lives inside .right now, not in its own grid column. min-height:0 is what
- * lets it scroll instead of forcing the flex column taller than the viewport. */
+/* The transcript is the left column of the grid now — its own area, not nested
+ * in a wrapper. min-height:0 is what lets it scroll instead of forcing the grid
+ * row taller than the viewport. Its right edge is the sp1 splitter; its bottom
+ * edge meets the dock, which carries the dividing hairline. */
 .script {
-  flex: 1; min-height: 0; min-width: 0;
-  overflow-y: auto; padding: var(--s-5) var(--s-4) var(--s-6);
+  grid-area: script;
+  overflow-y: auto; min-height: 0; min-width: 0;
+  padding: var(--s-5) var(--s-4) var(--s-6);
   background: var(--bg);
-  border-bottom: 1px solid var(--line);
 }
 /* The measure. This cap is why the monitor can grow for free: past 640px the
  * script cannot use another pixel, so the surplus is not taken from anything. */
-.page { max-width: 640px; margin: 0 auto; }
+.page {
+  max-width: 640px; margin: 0 auto;
+  /* Selecting words is the app's job — a press-and-drag paints the amber run,
+   * not the browser's blue text selection. Turn native selection off so the two
+   * never fight (see the drag handlers in Script.tsx). */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The script's end-matter: a single quiet action where the prose runs out. It
+ * aligns to the text column (not the 40px speaker margin) and sits behind a
+ * hairline so it reads as "the page ends here", not another paragraph. */
+.script-end {
+  margin: var(--s-4) 0 var(--s-6) 40px;
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line);
+}
+.script-end .retrans {
+  font-size: var(--t-ui);
+  color: var(--dim);
+}
+.script-end .retrans:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--line-strong, var(--line));
+}
 
 .canvas-empty { max-width: 460px; margin: 12vh auto 0; text-align: center; }
 .canvas-empty h2 { font-size: var(--t-title); font-weight: 500; margin-bottom: var(--s-1); letter-spacing: -.02em; }
@@ -298,9 +459,10 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
 }
-/* 64px, not 86: the script column is now ~600px rather than ~950, and every
- * pixel the margin takes comes straight off the measure. */
-.speaker { width: 64px; flex-shrink: 0; text-align: right; padding-top: 5px; }
+/* 40px, not 64: the labels are "S1" now, not "Speaker 1", so the margin no
+ * longer needs to hold a word — just a two-char tag over a timecode. Reclaiming
+ * those 24px moves the whole transcript left, off the dead gutter. */
+.speaker { width: 40px; flex-shrink: 0; text-align: right; padding-top: 5px; }
 .speaker .name {
   display: block; font-size: var(--t-small); font-weight: 650;
   color: var(--spk, var(--dim));
@@ -322,8 +484,10 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   line-height: 1.7;
   letter-spacing: -.011em;
   /* The speaker's colour, carried down the whole turn. Consecutive paragraphs
-   * from one speaker share a --spk, so the rule reads as continuous. */
-  border-left: 2px solid color-mix(in srgb, var(--spk, var(--line)) 30%, transparent);
+   * from one speaker share a --spk, so the rule reads as continuous. Solid, at
+   * full strength — the rule is a coloured element, so it shows the real colour,
+   * not a 30% ghost of it. Falls back to the neutral hairline with no speaker. */
+  border-left: 2px solid var(--spk, var(--line));
   padding-left: var(--s-4);
 }
 
@@ -355,6 +519,21 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * .w.sel has already committed the text to black, so the fill has to stay light
  * enough to carry it. Measured 6.2:1. */
 .w.sel.cut { background: var(--cut-sel); }
+
+/* A word being spelling-corrected in place. It reads as a field, not a
+ * highlight: a lifted surface with a gold ring and a real text caret, so it is
+ * obvious you are typing into it and not just selecting it. --text overrides
+ * any .sel/.cut colour the word carried, since it is now editable prose. */
+.w.editing {
+  background: var(--raised);
+  color: var(--text);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+  text-decoration: none;
+  cursor: text;
+  white-space: pre;
+}
 
 /* The space between two selected words. Without this the highlight breaks into
  * discrete pills instead of reading as one continuous run. The padding matches
@@ -471,12 +650,6 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 
 /* ===================== right column ===================== */
-.right {
-  grid-area: right;
-  background: var(--chrome);
-  border-left: 1px solid var(--line-soft);
-  display: flex; flex-direction: column; min-height: 0; min-width: 0;
-}
 .dims {
   font-size: var(--t-small); color: var(--faint);
   font-variant-numeric: tabular-nums; letter-spacing: .01em;
@@ -489,11 +662,15 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * reflects the selection instead — and with nothing selected, the context is
  * the document itself.
  */
-/* The script above takes the slack; the inspector takes what it needs and caps
- * out, so a long Project panel can never squeeze the document to nothing. */
+/* The full-height right column. It runs from under the title bar to the floor,
+ * so a long Project panel has all the room it needs and simply scrolls — the
+ * old 46% cap existed only because the rail used to share a column with the
+ * transcript, and it no longer does. */
 .rail {
-  flex: 0 0 auto; max-height: 46%;
-  display: flex; flex-direction: column; min-height: 0;
+  grid-area: rail;
+  background: var(--chrome);
+  border-left: 1px solid var(--line-soft);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
   /* The panels inside lay themselves out against the RAIL's width, not the
    * viewport's. That width is a splitter drag away from anything between 380
    * and 860px (App.tsx), and the drag writes --w-rail straight to CSS without a
@@ -514,7 +691,8 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   flex: 1; overflow-y: auto; padding: var(--s-4) var(--s-4) var(--s-6);
   display: flex; flex-direction: column; gap: var(--s-5);
 }
-.panel .field > button { width: 100%; }
+.panel .field > button,
+.panel .field-body > button { width: 100%; }
 
 /* ---- the Project panel's arrangement ----
  * The rail is WIDE and SHORT: 380-860px across, but capped at 46% of the column
@@ -551,7 +729,6 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * this degrades to the single stack, in the same order. */
 @container rail (min-width: 540px) {
   .panel-project { grid-template-columns: 1fr 1fr; }
-  .panel-project > .hero,
   .panel-project > .advanced { grid-column: 1 / -1; }
   /* A hairline, because on black that is what a boundary is — a 16px gap
    * between two columns of controls is not a boundary, it is a coincidence.
@@ -574,28 +751,6 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   letter-spacing: -.03em;
 }
 .hero small { font-size: var(--t-small); color: var(--faint); }
-
-/* ---- the Project hero: the number, then the facts that qualify it ----
- * Four stacked lines in a 560px well. The number keeps the left, the stats take
- * the right, and the well stops being mostly air. Wraps rather than crushes,
- * because the rail goes to 380. */
-.hero.stat { flex-direction: row; align-items: center; flex-wrap: wrap; gap: var(--s-3) var(--s-4); }
-.hero-main { display: flex; flex-direction: column; gap: var(--s-0); flex-shrink: 0; }
-.hero-stats {
-  display: flex; gap: var(--s-5);
-  margin-left: auto;
-}
-.hero-stats > div { display: flex; flex-direction: column; gap: var(--s-0); }
-.hero-stats dt {
-  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .07em;
-  color: var(--faint); font-weight: 700;
-}
-.hero-stats dd {
-  font-size: var(--t-base); color: var(--text);
-  font-variant-numeric: tabular-nums slashed-zero;
-}
-/* "of 400" is the denominator, not the reading. */
-.hero-stats .of { color: var(--faint); }
 
 /* ===================== progress ===================== */
 .progress {
@@ -671,6 +826,33 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--faint); font-weight: 700;
 }
 
+/* ---- collapsible field ----
+ * The rail's sections are <details>: a header you click to reveal the controls,
+ * closed by default, so the panel is a short list of headings until you open
+ * one. The chevron is the drawn triangle the Advanced disclosure uses (borders,
+ * not a font glyph — see ui/Icon.tsx), rotating on open. */
+.field.field-c { display: block; }
+.field.field-c > summary {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700; cursor: pointer; list-style: none;
+  display: flex; align-items: center; gap: var(--s-1);
+  padding: var(--s-1) 0;
+}
+.field.field-c > summary::-webkit-details-marker { display: none; }
+.field.field-c > summary::before {
+  content: ''; width: 0; height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform var(--dur-1) var(--ease);
+}
+.field.field-c[open] > summary::before { transform: rotate(90deg); }
+.field.field-c > summary:hover { color: var(--dim); }
+.field-body {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+
 .hint { font-size: var(--t-small); line-height: 1.6; color: var(--faint); }
 .empty-panel { font-size: var(--t-ui); color: var(--faint); }
 
@@ -683,6 +865,54 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 .slider { display: flex; flex-direction: column; gap: var(--s-1); }
 .slider span { font-size: var(--t-small); color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* Custom filler words: a chip editor. The field text input is full-width by
+ * default, so it flexes here and the Add button sits beside it rather than
+ * being pushed to a second row. The chips wrap below and borrow --filler
+ * (orchid) so they read as the same class of word the script paints. */
+.custom-fillers { display: flex; flex-direction: column; gap: var(--s-2); }
+.chip-input { display: flex; gap: var(--s-1); }
+.chip-input input[type='text'] { flex: 1; min-width: 0; }
+.chip-input button { flex-shrink: 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-1); list-style: none; padding: 0; margin: 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px var(--s-1) 2px var(--s-2);
+  font-size: var(--t-small); color: var(--filler);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-full);
+}
+.chip button {
+  display: grid; place-items: center;
+  width: 16px; height: 16px; padding: 0;
+  border: none; background: none; border-radius: var(--r-full);
+  color: var(--faint); font-size: 14px; line-height: 1;
+}
+.chip button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+
+/* The caption font control: the dropdown, then a row of text-button actions —
+ * import always, remove only while an imported font is selected. The actions read
+ * as links rather than buttons so they sit quietly under the select. */
+.font-picker { display: flex; flex-direction: column; gap: var(--s-1); }
+.font-actions { display: flex; gap: var(--s-2); align-items: baseline; }
+.font-actions .link {
+  padding: 0; border: none; background: none; border-radius: 0;
+  font-size: var(--t-small); color: var(--accent); cursor: pointer;
+}
+.font-actions .link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.font-actions .link:disabled { opacity: var(--disabled-opacity); cursor: default; }
+.font-actions .link.danger { color: var(--faint); margin-left: auto; }
+.font-actions .link.danger:hover:not(:disabled) { color: var(--filler); }
+
+/* The imported bed's filename and its manage links, on one row. The name
+ * truncates rather than wrapping, so a long filename never pushes the links off. */
+.music-file { display: flex; align-items: baseline; gap: var(--s-2); }
+.music-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--t-small); color: var(--faint);
+}
+.music-file .font-actions { flex: none; }
+.music-file .link.danger { margin-left: 0; }
 
 /* A swatch, a name, and the hex — the hex because "which black is that" is a
  * real question once a stroke and a backdrop are both in play. */
@@ -811,15 +1041,36 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .tp-speed select.fast { border-color: var(--accent); color: var(--text); }
 
 .tp-toggles { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
+/* A switch, not a lit button. The button stays flat in both states — the knob
+ * is what moves and the track is the only thing that takes the accent. "Show
+ * cuts" on and off must look like the SAME control set two ways, not like two
+ * different buttons, which a full-fill highlight made them. */
 .toggle {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: var(--s-2);
   font-size: var(--t-small); padding: 5px 10px;
   color: var(--dim); background: var(--sunk);
 }
-.toggle.on {
-  background: var(--selected); border-color: var(--accent); color: var(--text);
+.toggle:hover:not(:disabled) { color: var(--text); }
+.toggle.on { color: var(--text); }
+
+/* The switch itself: a pill track with a sliding knob. Off is a neutral grey
+ * track; on is gold — the one element that takes the accent. The knob rides
+ * from left to right, exactly the affordance in the reference. */
+.sw {
+  position: relative; flex-shrink: 0;
+  width: 26px; height: 15px;
+  border-radius: var(--r-full);
+  background: var(--line-strong);
+  transition: background var(--dur-1) var(--ease);
 }
-.toggle.on svg { color: var(--accent); }
+.sw::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--text);
+  transition: transform var(--dur-2) var(--ease), background var(--dur-1) var(--ease);
+}
+.toggle.on .sw { background: var(--accent); }
+.toggle.on .sw::after { transform: translateX(11px); background: var(--accent-fg); }
 /* Rose, not orchid: this number is how much the edit REMOVES, so it belongs to
  * the cut family. It read as --filler only because --filler used to be amber. */
 .tp-saved {
@@ -845,6 +1096,22 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .tl-range { font-size: var(--t-small); color: var(--faint); font-variant-numeric: tabular-nums; }
 
+/* The right cluster of the timeline bar: the razor and the zoom group, kept
+ * together so the range readout owns the left and these own the right. */
+.tl-tools { display: flex; align-items: center; gap: var(--s-3); }
+
+/* The razor. A labelled button, not a bare icon: splitting is a deliberate
+ * structural edit, and it earns a word next to the scissors. Amber on hover the
+ * way the app's one "do this" colour is used elsewhere. */
+.tl-split {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 10px;
+  font-size: var(--t-small); line-height: 1; color: var(--dim);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+}
+.tl-split:hover:not(:disabled) { color: var(--accent); border-color: var(--accent-dim); }
+.tl-split:disabled { opacity: .4; cursor: default; }
+
 .tl-zoom { display: flex; gap: var(--s-1); }
 .tl-zoom button {
   min-width: 26px; height: 24px; padding: 0 var(--s-2);
@@ -863,3 +1130,85 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .tl-layer { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .tl-overlay { pointer-events: none; }
+
+/* The "+" markers that ride on the clip seams (and the two ends). Real DOM
+ * buttons over the canvas, placed by JS at each seam's x under the current
+ * zoom/scroll — so a source can be added right where the picture changes, on
+ * the timeline itself rather than in a side list. Amber discs, so they read as
+ * the app's one "do this" colour against the strip. */
+.tl-add-file { display: none; }
+.tl-add {
+  position: absolute; transform: translate(-50%, -50%); z-index: 3;
+  width: 30px; height: 30px; border-radius: var(--r-full); padding: 0;
+  display: grid; place-items: center;
+  color: var(--accent-fg); background: var(--accent);
+  border: 2px solid var(--void);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+  opacity: .55; cursor: pointer;
+  transition: opacity var(--dur-1) var(--ease), background var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+.tl-canvas:hover .tl-add:not(:disabled) { opacity: .9; }
+.tl-add:hover:not(:disabled) { opacity: 1; background: var(--accent-hover); transform: translate(-50%, -50%) scale(1.12); }
+.tl-add:focus-visible { opacity: 1; box-shadow: var(--ring); }
+.tl-add:disabled { opacity: .3; cursor: default; }
+
+/* ---- background-music lane ----
+ * A track beneath the waveform, its own fixed-height band. It is flex-shrink:0,
+ * so the waveform above gives up the ~34px rather than the dock growing. The clip
+ * bar inside is placed by JS at the bed's source x-extent, so it lines up under
+ * the same zoom and scroll as the strip. */
+.tl-music {
+  position: relative; flex-shrink: 0; height: 34px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--void);
+}
+.tl-music-clip {
+  position: absolute; top: 5px; bottom: 5px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px; min-width: 0;
+  border-radius: var(--r-1);
+  background: var(--selected);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text); overflow: hidden;
+}
+/* A repeating hatch reads as "this is duplicated to fill" when looping. */
+.tl-music-clip.looped {
+  background-image: repeating-linear-gradient(
+    90deg, transparent 0, transparent 22px,
+    color-mix(in srgb, var(--accent) 28%, transparent) 22px,
+    color-mix(in srgb, var(--accent) 28%, transparent) 23px
+  );
+}
+.tl-music-ico { color: var(--accent); flex-shrink: 0; }
+.tl-music-name {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: var(--t-small); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tl-music-badge {
+  flex-shrink: 0;
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .06em; font-weight: 700;
+  color: var(--accent-fg); background: var(--accent);
+  padding: 1px 5px; border-radius: var(--r-full);
+}
+/* Fill sits at the right of the bar, before the drag handle. It is a quiet pill
+ * until hovered so it does not shout over the track name. */
+.tl-music-fill {
+  flex-shrink: 0; margin-left: auto;
+  padding: 2px 8px; border-radius: var(--r-full);
+  font-size: var(--t-micro); font-weight: 600;
+  color: var(--text); background: var(--sunk); border: 1px solid var(--line);
+  cursor: pointer;
+}
+.tl-music-fill:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+/* The trim/extend grip: a wide-enough hit target on the bar's right edge. */
+.tl-music-handle {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 10px;
+  cursor: ew-resize; touch-action: none;
+  border-top-right-radius: var(--r-1); border-bottom-right-radius: var(--r-1);
+}
+.tl-music-handle::after {
+  content: ''; position: absolute; top: 50%; right: 3px;
+  width: 2px; height: 14px; transform: translateY(-50%);
+  background: var(--accent); border-radius: 1px; opacity: .8;
+}
+.tl-music-handle:hover::after { opacity: 1; }

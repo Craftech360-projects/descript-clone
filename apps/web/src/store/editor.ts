@@ -11,6 +11,16 @@ import {
 } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
 import { frameLabel, normalizeFrame, type FrameSettings } from '../../../../packages/core/src/frame.ts';
+import { colorLabel, normalizeColor, type ColorSettings } from '../../../../packages/core/src/color.ts';
+import {
+  addMove,
+  createMove,
+  moveLabel,
+  removeMove,
+  updateMove,
+  type FrameMove,
+  type FramePoint,
+} from '../../../../packages/core/src/frame-track.ts';
 import {
   breakCoalescing,
   canRedo,
@@ -120,6 +130,7 @@ export function loadDoc(
   speed?: number,
   studioSound?: boolean,
   frame?: Partial<FrameSettings> | null,
+  color?: Partial<ColorSettings> | null,
 ): void {
   savedRev = 0;
   set({
@@ -130,6 +141,7 @@ export function loadDoc(
       clampSpeed(speed),
       Boolean(studioSound),
       normalizeFrame(frame),
+      normalizeColor(color),
     ),
     history: emptyHistory(),
     selection: null,
@@ -360,6 +372,147 @@ export function endFrameDrag(label: string): void {
 
   set({ doc: { ...doc, frame: prev } });
   apply({ kind: 'frame', prev, next }, { label });
+}
+
+// ── colour grade (transient-aware) ────────────────────────────────────────────
+//
+// Six sliders, so six continuous gestures, and they get the same treatment as
+// the frame and caption drags above for the same reason: without the bracket a
+// single sweep of the contrast slider pushes ~40 undo steps.
+
+let transientColor: ColorSettings | null = null;
+
+export function beginColorDrag(): void {
+  if (state.doc) transientColor = state.doc.color;
+}
+
+export function updateColor(color: ColorSettings): void {
+  const { doc } = state;
+  if (!doc) return;
+  if (transientColor) {
+    set({ doc: { ...doc, color, rev: doc.rev + 1 } });
+    return;
+  }
+  apply({ kind: 'color', prev: doc.color, next: color }, { label: colorLabel(color) });
+}
+
+export function endColorDrag(label: string): void {
+  const { doc } = state;
+  const prev = transientColor;
+  transientColor = null;
+  if (!doc || !prev) return;
+  const next = doc.color;
+  if (isEmptyPatch({ kind: 'color', prev, next })) return;
+
+  // Rewind, then commit once, so the single entry's inverse is the pre-drag value.
+  set({ doc: { ...doc, color: prev } });
+  apply({ kind: 'color', prev, next }, { label });
+}
+
+// ── push-ins: mark a portion of the picture and zoom into it ─────────────────
+//
+// These are edits to doc.frame.moves, so they ride the frame patch above and
+// inherit its transient/commit split for free — dragging a marquee over the
+// monitor is a continuous gesture exactly as panning is, and one history entry
+// per pointermove would bury every real edit.
+//
+// What is NOT here: reading the playhead. The store deliberately holds no
+// currentTime (it changes at 60Hz), so every function below takes the source
+// time it needs as an argument from the caller that already has it.
+
+/**
+ * Mark a stretch of the video for a push-in.
+ *
+ * Returns the new move's id so the caller can select it and start framing, or
+ * null when the range clashes with a move that is already there — addMove
+ * returns the original array in that case, which makes this a no-op patch that
+ * the history correctly refuses to record.
+ */
+export function addPunchIn(start: number, end: number): string | null {
+  const { doc } = state;
+  if (!doc) return null;
+
+  const id = newMoveId();
+  const move = createMove(start, end, id);
+  const moves = addMove(doc.frame.moves, move);
+  if (moves === doc.frame.moves) return null;
+
+  apply(
+    { kind: 'frame', prev: doc.frame, next: { ...doc.frame, moves } },
+    { label: moveLabel(move, 'Add') },
+  );
+  return id;
+}
+
+/**
+ * Change one move.
+ *
+ * `label` matters here in a way it does not for the sliders. A slider is wrapped
+ * in beginFrameDrag/endFrameDrag and its label arrives with the drag's end; a
+ * one-shot change like accepting a marquee has no gesture around it and falls
+ * through to updateFrame's own commit — whose label is frameLabel, which
+ * announces the PRESET ("Set frame to Reel"). Undo would then offer to undo
+ * something the user did not do.
+ */
+export function setMove(id: string, patch: Partial<FrameMove>, label?: string): void {
+  const { doc } = state;
+  if (!doc) return;
+  const move = doc.frame.moves.find((m) => m.id === id);
+  if (!move) return;
+
+  const next = { ...doc.frame, moves: updateMove(doc.frame.moves, id, patch) };
+  // Mid-gesture, updateFrame writes through to the live doc and records nothing;
+  // the single entry lands on endFrameDrag with the label the control chose.
+  if (transientFrame) return updateFrame(next);
+  apply({ kind: 'frame', prev: doc.frame, next }, { label: label ?? moveLabel(move, 'Adjust') });
+}
+
+export function deletePunchIn(id: string): void {
+  const { doc } = state;
+  if (!doc) return;
+  const move = doc.frame.moves.find((m) => m.id === id);
+  if (!move) return;
+  apply(
+    { kind: 'frame', prev: doc.frame, next: { ...doc.frame, moves: removeMove(doc.frame.moves, id) } },
+    { label: moveLabel(move, 'Remove') },
+  );
+}
+
+/**
+ * Attach a tracked path to a move — the "follow this object" result.
+ *
+ * One entry, whatever the tracker sampled, and NOT through the drag machinery:
+ * tracking is a single decision that produced a hundred numbers, so backing it
+ * out has to be one Cmd+Z. An empty path clears the follow and gives back the
+ * framing that was set by hand — see FrameMove.path.
+ */
+export function setMovePath(id: string, path: FramePoint[]): void {
+  const { doc } = state;
+  if (!doc) return;
+  const move = doc.frame.moves.find((m) => m.id === id);
+  if (!move) return;
+  apply(
+    {
+      kind: 'frame',
+      prev: doc.frame,
+      next: { ...doc.frame, moves: updateMove(doc.frame.moves, id, { path }) },
+    },
+    { label: moveLabel(move, path.length > 0 ? 'Track' : 'Untrack') },
+  );
+}
+
+/**
+ * crypto.randomUUID, with a counter behind it.
+ *
+ * The fallback is not paranoia about old browsers: randomUUID is restricted to
+ * SECURE contexts, and this app is routinely opened over plain http on a LAN
+ * address to check a render on a phone. There it is simply undefined, and a move
+ * with an undefined id is one the panel cannot address.
+ */
+let moveSeq = 0;
+function newMoveId(): string {
+  moveSeq++;
+  return globalThis.crypto?.randomUUID?.() ?? `mv-${Date.now()}-${moveSeq}`;
 }
 
 // ── bulk actions, client-side ─────────────────────────────────────────────────

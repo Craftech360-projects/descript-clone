@@ -10,6 +10,9 @@ import {
   type BgMusicRender,
   type SequenceRenderClip,
 } from '../../../packages/core/src/render.ts';
+import type { Grade } from '../../../packages/core/src/color.ts';
+import type { FrameRender } from '../../../packages/core/src/frame.ts';
+import type { OutputMove } from '../../../packages/core/src/frame-track.ts';
 import { outputDuration } from '../../../packages/core/src/edl.ts';
 
 export interface MediaInfo {
@@ -171,6 +174,35 @@ export interface RenderJob {
    * the bed. See studioSoundStages in render.ts.
    */
   studioSound?: boolean;
+  /**
+   * The crop into a target resolution, already resolved to concrete pixels by the
+   * caller — resolveFrame returns null when the setting would change nothing, and
+   * that null is why an unreframed project emits no scale/crop at all.
+   *
+   * This field was missing while index.ts was already passing it, so the value
+   * was dropped on the floor here and every export came out at the source's
+   * shape however the Frame panel was set. Nothing caught it: the plan builders
+   * treat an absent frame as "no reframe", which is a legitimate render.
+   */
+  frame?: FrameRender;
+  /**
+   * The colour grade, already resolved to a matrix and an affine by the caller —
+   * resolveColor returns null when the grade is neutral. Omit to leave the
+   * picture's values untouched. See colorFilterStages in render.ts.
+   */
+  color?: Grade;
+  /**
+   * Animated push-ins over the finished frame, already mapped onto the OUTPUT
+   * clock by the caller (movesToOutput) and carrying the delivered frame's size.
+   *
+   * The frame RATE is deliberately not here. zoompan generates its own
+   * timestamps from it, so a stale one is a video of the wrong length — and the
+   * correct value is the one this function probes for the frame renumber, or the
+   * canonical rate it picks for a stitch. Both are resolved below, so the punch
+   * takes whichever applies rather than making the caller guess which path it is
+   * on. This is the same class of bug the `frame` field's comment records.
+   */
+  punch?: { moves: OutputMove[]; width: number; height: number };
 }
 
 export async function renderEdl(
@@ -178,7 +210,8 @@ export async function renderEdl(
   job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
-  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound } = job;
+  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound, frame, color } =
+    job;
   // A multi-clip stitch when the caller handed us one file per EDL clip. A single
   // clip falls through to the original single-input path, byte-identical.
   const sequence = Boolean(edl.clips && edl.clips.length > 1 && job.clips && job.clips.length === edl.clips.length);
@@ -236,6 +269,11 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      frame,
+      color,
+      // The canonical rate every clip was resampled to — not any one clip's, or
+      // zoompan would re-time the join to a rate the join does not have.
+      punch: job.punch ? { ...job.punch, fps: canonFps } : undefined,
     });
   } else {
     plan = buildRenderPlan(edl, {
@@ -248,6 +286,12 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      frame,
+      color,
+      // The same freshly-probed rate the frame renumber uses. Undefined when the
+      // probe could not say, and punchFilterStage then emits nothing rather than
+      // guessing — losing the move is recoverable, a mistimed export is not.
+      punch: job.punch && fps ? { ...job.punch, fps } : undefined,
     });
   }
   await writeFile(scriptPath, plan.filterScript, 'utf8');

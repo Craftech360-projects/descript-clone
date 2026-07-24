@@ -1,4 +1,5 @@
 import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
+import type { ColorSettings } from '../../../packages/core/src/color.ts';
 import type { FrameSettings } from '../../../packages/core/src/frame.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
@@ -56,6 +57,8 @@ export interface Project {
   /** Output frame: target resolution plus the zoom/pan that fills it. Absent on
    *  projects that have never left the source's own resolution. */
   frame?: FrameSettings;
+  /** Colour grade: which look, and where its knobs sit. Absent on ungraded projects. */
+  color?: ColorSettings;
   /** The background-music bed, if one has been imported. Absent otherwise. */
   music?: ProjectMusic;
   createdAt: string;
@@ -262,6 +265,8 @@ export interface RenderSettings extends CutSettings {
   /** Live frame settings, sent for the same reason as `captions` above — an Export
    *  fired mid-debounce should reframe to what is on screen, not to the last save. */
   frame?: FrameSettings;
+  /** Live colour grade, sent for the same reason as `frame` above. */
+  color?: ColorSettings;
   /**
    * Live background-music settings, sent so a render reflects the panel even if
    * the debounced save has not yet landed. Omit to use the stored bed as-is;
@@ -402,6 +407,7 @@ export const api = {
       cut?: CutSettings;
       studioSound?: boolean;
       frame?: FrameSettings;
+      color?: ColorSettings;
     },
   ) =>
     fetch(`/api/projects/${id}/transcript`, {

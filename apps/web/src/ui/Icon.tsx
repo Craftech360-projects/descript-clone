@@ -44,9 +44,11 @@ export type IconName =
    * before it is read — that is the whole reason these exist. */
   | 'clock'
   | 'crop'
+  | 'target'
   | 'sparkle'
   | 'music'
   | 'captions'
+  | 'contrast'
   | 'sliders';
 
 /**
@@ -171,6 +173,29 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M7 2.5v14.5h14.5" />
       <path d="M2.5 7H17v14.5" />
+    </>
+  ),
+  /* Marking a subject: reticle corners around a target, on the same 24px grid.
+   * Corners rather than a full rectangle because that is what the gesture leaves
+   * on the picture, and because a closed rectangle at this size reads as the
+   * crop mark next to it — which is the one thing this must not be mistaken for. */
+  target: (
+    <>
+      <path d="M3.5 8.5v-5h5" />
+      <path d="M15.5 3.5h5v5" />
+      <path d="M20.5 15.5v5h-5" />
+      <path d="M8.5 20.5h-5v-5" />
+      <circle cx="12" cy="12" r="3.25" />
+    </>
+  ),
+  /* The universal grading mark: a circle with one half filled. Drawn as a
+   * stroked ring plus a filled half-disc rather than as two arcs, so the fill
+   * meets the ring exactly at the diameter instead of leaving a hairline of
+   * background between them at fractional device pixels. */
+  contrast: (
+    <>
+      <circle cx="12" cy="12" r="9.25" />
+      <path d="M12 2.75a9.25 9.25 0 0 1 0 18.5z" fill="currentColor" stroke="none" />
     </>
   ),
   /* A four-point star with concave sides, not a five-point one: the pointed

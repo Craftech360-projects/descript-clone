@@ -6,6 +6,7 @@ import {
   hexToAss,
   type CaptionSettings,
 } from './caption-style.ts';
+import { layoutCaption } from './caption-layout.ts';
 import type { Edl, Transcript, Word } from './types.ts';
 
 export interface Cue {
@@ -17,7 +18,14 @@ export interface Cue {
 }
 
 export interface CaptionOptions {
-  /** Wrap a cue past this many characters. ~42 is the broadcast convention. */
+  /**
+   * Start a new cue past this many characters. ~42 is the broadcast convention.
+   *
+   * This is how much TEXT one caption holds, which is a different question from
+   * how wide it is drawn — the caption box answers that, and re-flows these same
+   * characters onto more or fewer lines without changing which of them share a
+   * cue. See CaptionSettings.boxWidth.
+   */
   maxChars?: number;
   /** Never hold a cue longer than this. */
   maxDurationMs?: number;
@@ -270,12 +278,13 @@ export function toAss(
   // line came out 1615px here and would come out a few px either side of that
   // in a browser, so any threshold has cues that fall on opposite sides of it.
   //
-  // So neither engine gets to decide. toCues already breaks at `maxChars`, once,
-  // before either of them sees the text; this tells libass to honour that and
-  // nothing else, and the preview is set to `white-space: pre` for the same
-  // reason. A line too long for the frame now overflows identically in both
-  // rather than wrapping in one — measured: at 140px this clips at exactly the
-  // 1920 frame edge, which is what the monitor shows too.
+  // So neither engine gets to decide. layoutCaption breaks the text against the
+  // caption box, once, before either of them sees it; this tells libass to
+  // honour that and nothing else, and the preview is set to `white-space: pre`
+  // for the same reason. A line too long for the frame — a single word wider
+  // than the box — now overflows identically in both rather than wrapping in one
+  // — measured: at 140px this clips at exactly the 1920 frame edge, which is
+  // what the monitor shows too.
   //
   // Alignment 5 anchors the text block at its CENTRE, which is what makes \pos
   // mean "the point I dragged it to" rather than "one of nine corners".
@@ -295,23 +304,53 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   const posX = Math.round(s.x * frame.width);
   const posY = Math.round(s.y * frame.height);
 
-  const events = cues.map((cue) => {
+  // One Dialogue PER LINE, each with its own \pos, rather than one event whose
+  // text carries \N.
+  //
+  // The reason is the caption box's height. ASS has no leading control at all —
+  // hand libass a \N and it stacks the lines at whatever its own font metrics
+  // say, which is a number the monitor cannot know and therefore cannot draw.
+  // Positioning each line ourselves makes the vertical step a value we computed
+  // in layoutCaption, so "drag the box taller and the lines spread" is a real
+  // property of the burn and not a preview-only flourish.
+  //
+  // It costs nothing else: the lines share the cue's start and end, so they
+  // appear and leave together exactly as one wrapped event would, and box mode
+  // already drew one box per line.
+  const events = cues.flatMap((cue) => {
+    const lines = layoutCaption(cue.words.map((w) => w.text), s, frame);
     // Karaoke off means one flat line in `color` — no \k, so SecondaryColour
     // never shows and the burn matches a preview that is not animating either.
-    const body = s.karaoke
-      ? karaokeSpans(cue)
-          .map((span) => {
-            const cs = karaokeCentiseconds(span.start, span.end);
-            return `{\\k${cs}}${assText(span.text, s.allCaps)} `;
-          })
-          .join('')
-          .trim()
-      : assText(cue.text, s.allCaps);
+    const spans = s.karaoke ? karaokeSpans(cue) : null;
 
-    return (
-      `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Default,,0,0,0,,` +
-      `{\\pos(${posX},${posY})}${body}`
-    );
+    return lines.map((line) => {
+      let body: string;
+      if (spans) {
+        // \k is a run of DURATIONS counted from the EVENT's start, and every
+        // line here starts at the cue's start — so the second line's first word
+        // would light up with the first line's first word unless the time before
+        // it is spent. That is what the lead-in tag does: a \k on an empty chunk
+        // draws nothing and advances the karaoke clock, which is the standard
+        // way an ASS file waits before its first syllable.
+        const lead = spans
+          .slice(0, line.from)
+          .reduce((cs, span) => cs + karaokeCentiseconds(span.start, span.end), 0);
+        body =
+          (lead > 0 ? `{\\k${lead}}` : '') +
+          spans
+            .slice(line.from, line.to)
+            .map((span) => `{\\k${karaokeCentiseconds(span.start, span.end)}}${assText(span.text, s.allCaps)} `)
+            .join('')
+            .trimEnd();
+      } else {
+        body = assText(line.text, s.allCaps);
+      }
+
+      return (
+        `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Default,,0,0,0,,` +
+        `{\\pos(${posX},${posY + Math.round(line.dy)})}${body}`
+      );
+    });
   });
 
   return `${header}\n${events.join('\n')}\n`;

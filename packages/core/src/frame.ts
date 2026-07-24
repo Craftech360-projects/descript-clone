@@ -16,6 +16,8 @@
  * wants bars can pick a frame that matches their source.
  */
 
+import { normalizeMoves, type FrameMove } from './frame-track.ts';
+
 export type FramePreset = 'source' | 'reel' | 'youtube' | 'square' | 'custom';
 
 /** The document-level setting: a preset, an explicit size, and the crop. */
@@ -51,6 +53,21 @@ export interface FrameSettings {
    */
   x: number;
   y: number;
+  /**
+   * Push-ins over the finished frame: mark a portion of the picture and zoom
+   * into it for part of the video, optionally following it as it moves.
+   *
+   * Everything above is ONE value for the whole output. This is the first thing
+   * on the document that varies with time, and it deliberately sits here rather
+   * than beside it: a move is expressed against the frame this setting delivers,
+   * so the two are one decision about what the picture is. See frame-track.ts
+   * for the model and for why a move can only ever push IN.
+   *
+   * Empty is the default and the common case, and every layer treats it as
+   * "emit nothing" — so a project that never marks anything renders exactly as
+   * it did before this existed.
+   */
+  moves: FrameMove[];
 }
 
 /** A resolved frame: concrete pixels, no preset left to interpret. */
@@ -75,6 +92,7 @@ export const DEFAULT_FRAME: FrameSettings = {
   zoom: 1,
   x: 0,
   y: 0,
+  moves: [],
 };
 
 /**
@@ -135,7 +153,18 @@ export function normalizeFrame(input?: Partial<FrameSettings> | null): FrameSett
       : 0;
 
   const { x, y } = clampPan(num(f.x, 0), num(f.y, 0));
-  return { preset, width, height, zoom: clamp(num(f.zoom, 1), MIN_ZOOM, MAX_ZOOM), x, y };
+  return {
+    preset,
+    width,
+    height,
+    zoom: clamp(num(f.zoom, 1), MIN_ZOOM, MAX_ZOOM),
+    x,
+    y,
+    // Sorted, clamped and de-overlapped there rather than here — a move carries
+    // its own timeline and its own tracked path, and none of that is this
+    // function's business beyond calling the one that owns it.
+    moves: normalizeMoves(f.moves),
+  };
 }
 
 function num(v: unknown, fallback: number): number {

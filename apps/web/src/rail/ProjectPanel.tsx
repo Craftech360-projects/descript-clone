@@ -14,6 +14,7 @@ import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import {
   CAPTION_FONTS,
+  MIN_CAPTION_BOX,
   strokeRole,
   type Backdrop,
   type CaptionSettings,
@@ -30,6 +31,18 @@ import {
   type FramePreset,
   type FrameSettings,
 } from '../../../../packages/core/src/frame.ts';
+import { MAX_PUNCH_ZOOM } from '../../../../packages/core/src/frame-track.ts';
+import {
+  COLOR_PRESETS,
+  MAX_SATURATION,
+  MIN_SATURATION,
+  colorSummary,
+  presetSettings,
+  resolveColor,
+  type ColorPreset,
+  type ColorSettings,
+} from '../../../../packages/core/src/color.ts';
+import GradeFilter from '../ui/GradeFilter.tsx';
 import { api, type CustomFont, type MusicProvider, type MusicResult, type Project } from '../api.ts';
 
 export type FillerMode = 'off' | 'hesitations' | 'all';
@@ -58,6 +71,30 @@ interface Props {
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+
+  /**
+   * Push-ins: mark a portion of the picture and zoom into it for a stretch of
+   * the video, optionally following it. These live on `frame.moves` — the panel
+   * takes them apart only so it does not have to rebuild the whole settings
+   * object to change one move.
+   */
+  onMarkMove: (id: string) => void;
+  onRemoveMove: (id: string) => void;
+  onSetMove: (id: string, patch: { zoom?: number; ease?: number }) => void;
+  onFollowMove: (id: string) => void;
+  onClearFollow: (id: string) => void;
+  /** The move whose box is being dragged on the monitor right now. */
+  markingMoveId: string | null;
+  /** The move being tracked, and how far along, so the row can say so. */
+  following: { id: string; progress: number } | null;
+  /** Jump the playhead — used to preview a move from its own start. */
+  onSeek: (time: number) => void;
+
+  /** The colour grade — which look, and where its six knobs sit. */
+  color: ColorSettings;
+  setColor: (c: ColorSettings) => void;
+  onColorDragStart: () => void;
+  onColorDragEnd: (label: string) => void;
 
   /** Imported caption fonts, shared across every project. */
   customFonts: CustomFont[];
@@ -207,6 +244,8 @@ export default function ProjectPanel(p: Props) {
       {/* The delivery — its shape, its sound, and what it says on screen. */}
       <SectionGroup label="Output">
         <FrameField {...p} />
+        <MovesField {...p} />
+        <ColorField {...p} />
         <StudioSoundField {...p} />
         <MusicField {...p} />
         <CaptionsField {...p} />
@@ -555,6 +594,300 @@ function FrameField(p: Props) {
 }
 
 /**
+ * Push-ins: the marked object, and the shot that follows it.
+ *
+ * A section of its own rather than more controls inside Frame, and the division
+ * is the same one the panel already draws between Edit and Output: Frame is one
+ * decision about the whole video, and this is a list of decisions about MOMENTS
+ * in it. Folding a list into a settings row is what makes a settings row read as
+ * a dump.
+ *
+ * The header counts them, because that is the one number that decides whether
+ * the section is worth opening — the same rule Clean up follows.
+ *
+ * Nothing here places a move. Marking is a spatial judgement about a picture, so
+ * it happens ON the picture (the monitor's marquee), and choosing WHEN happens
+ * in the script, where the words are. This panel owns only what is left: how far
+ * in, how long the ease, and whether it follows.
+ */
+function MovesField(p: Props) {
+  const moves = p.frame.moves;
+  const hasVideo = Boolean(p.project.hasVideo);
+
+  return (
+    <Section
+      icon="target"
+      label="Push-ins"
+      value={moves.length === 0 ? 'None' : `${moves.length}`}
+    >
+      {!hasVideo ? (
+        <Hint>This project is audio only, so there is no picture to push in on.</Hint>
+      ) : moves.length === 0 ? (
+        <Hint>
+          Select the words you want to punch in on, then choose “Push in here”. You mark the object
+          on the picture and it holds — or follows — for as long as those words last.
+        </Hint>
+      ) : (
+        <ul className="moves">
+          {moves.map((m) => {
+            const tracked = m.path.length > 0;
+            const busy = p.following?.id === m.id;
+            return (
+              <li key={m.id} className={`move${p.markingMoveId === m.id ? ' marking' : ''}`}>
+                <button
+                  type="button"
+                  className="move-when"
+                  onClick={() => p.onSeek(m.start)}
+                  title="Jump to the start of this push-in"
+                >
+                  {timecode(m.start)} – {timecode(m.end)}
+                  <small>
+                    {m.zoom.toFixed(2)}× · {tracked ? `following (${m.path.length} points)` : 'held'}
+                  </small>
+                </button>
+
+                <Slider
+                  value={m.zoom}
+                  min={1}
+                  max={MAX_PUNCH_ZOOM}
+                  step={0.05}
+                  onChange={(zoom) => p.onSetMove(m.id, { zoom })}
+                  onPointerDown={p.onFrameDragStart}
+                  onPointerUp={() => p.onFrameDragEnd(`Set push-in to ${m.zoom.toFixed(2)}×`)}
+                  format={(v) => (v <= 1.001 ? 'No push-in' : `${v.toFixed(2)}× in`)}
+                />
+
+                <Slider
+                  value={Math.min(m.ease, (m.end - m.start) / 2)}
+                  min={0}
+                  max={Math.max(0.1, (m.end - m.start) / 2)}
+                  step={0.05}
+                  onChange={(ease) => p.onSetMove(m.id, { ease })}
+                  onPointerDown={p.onFrameDragStart}
+                  onPointerUp={() => p.onFrameDragEnd('Set push-in ease')}
+                  format={(v) => (v < 0.03 ? 'Hard cut in and out' : `${v.toFixed(2)}s ease`)}
+                />
+
+                <div className="move-actions">
+                  <button type="button" onClick={() => p.onMarkMove(m.id)} disabled={busy}>
+                    {p.markingMoveId === m.id ? 'Marking…' : tracked ? 'Re-mark' : 'Mark object'}
+                  </button>
+                  {/* Following needs something to follow, so it is offered only
+                    * once a box has been marked — at the default centre framing
+                    * a tracker would lock onto whatever happens to be in the
+                    * middle of the frame and follow that with total confidence. */}
+                  <button
+                    type="button"
+                    onClick={() => (tracked ? p.onClearFollow(m.id) : p.onFollowMove(m.id))}
+                    disabled={busy || m.zoom <= 1.001}
+                  >
+                    {busy
+                      ? `Following… ${Math.round((p.following?.progress ?? 0) * 100)}%`
+                      : tracked
+                        ? 'Stop following'
+                        : 'Follow this'}
+                  </button>
+                  <button
+                    type="button"
+                    className="link danger"
+                    onClick={() => p.onRemoveMove(m.id)}
+                    disabled={busy}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {hasVideo && moves.length > 0 && (
+        <Hint>
+          Following re-reads the video a few times a second, so it takes a moment. It holds the last
+          good position when it loses the subject rather than guessing — if a follow drifts, mark it
+          again on a frame where the subject is clearer.
+        </Hint>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * The colour grade: how the picture looks.
+ *
+ * ── the chips are the footage, not swatches ──────────────────────────────────
+ *
+ * Each look is previewed on THIS PROJECT'S poster frame, wearing the very SVG
+ * filter the monitor would wear — the same resolveColor, the same coefficients,
+ * the same code path. A row of abstract gradient tiles would be a legend for the
+ * looks; this is the looks. "Warm" means nothing until you have seen what it does
+ * to the face that is actually in the shot, and every one of these is a decision
+ * about a face.
+ *
+ * ── a preset is a starting point, not a mode ─────────────────────────────────
+ *
+ * The sliders below are the SAME six numbers the chips set, so touching one
+ * continues from where the look left off rather than dropping out of it. The
+ * preset field then reads 'custom', exactly as FrameField's does once a custom
+ * size is typed — it records where you started, and the header says so.
+ */
+function ColorField(p: Props) {
+  const { color } = p;
+  // useId's output is only guaranteed unique, not URL-safe — React 19 spells it
+  // «r0», and these ids are referenced as `url(#…)` fragments rather than looked
+  // up as selectors. Keeping the alphanumerics is enough to stay unique and
+  // removes the question.
+  const chipId = `grade${useId().replace(/[^a-zA-Z0-9]/g, '')}`;
+
+  // Grading is a picture operation, and the server drops it for an audio-only
+  // project. Say that rather than offering seven looks for a waveform.
+  if (!p.project.hasVideo) {
+    return (
+      <Section icon="contrast" label="Colour" value="Audio only">
+        <Hint>Grading changes the picture. This project has no video track.</Hint>
+      </Section>
+    );
+  }
+
+  const set = (next: Partial<ColorSettings>) => p.setColor({ ...color, ...next, preset: 'custom' });
+
+  // Every knob, in the order they are dialled in practice: get the exposure and
+  // the white balance right first, then decide how much of a look to put on top.
+  const knobs: Array<{
+    key: keyof Omit<ColorSettings, 'preset'>;
+    label: string;
+    min: number;
+    max: number;
+    format: (v: number) => string;
+  }> = [
+    { key: 'exposure', label: 'Exposure', min: -1, max: 1, format: (v) => stops(v) },
+    { key: 'temperature', label: 'Temperature', min: -1, max: 1, format: (v) => bipolar(v, 'Cooler', 'Warmer') },
+    { key: 'tint', label: 'Tint', min: -1, max: 1, format: (v) => bipolar(v, 'Greener', 'Magenta') },
+    {
+      key: 'saturation',
+      label: 'Saturation',
+      min: MIN_SATURATION,
+      max: MAX_SATURATION,
+      format: (v) => (v === 0 ? 'Black and white' : `${Math.round(v * 100)}%`),
+    },
+    { key: 'contrast', label: 'Contrast', min: -1, max: 1, format: (v) => bipolar(v, 'Flatter', 'Punchier') },
+    { key: 'shadows', label: 'Shadows', min: -1, max: 1, format: (v) => bipolar(v, 'Crushed', 'Lifted') },
+  ];
+
+  return (
+    <Section icon="contrast" label="Colour" value={colorSummary(color)}>
+      <div className="grade-chips">
+        {(['none', ...(Object.keys(COLOR_PRESETS) as Array<keyof typeof COLOR_PRESETS>)] as ColorPreset[]).map(
+          (preset) => (
+            <GradeChip
+              key={preset}
+              id={`${chipId}-${preset}`}
+              preset={preset}
+              posterUrl={p.project.posterUrl}
+              // Chosen when the look is this one AND nothing has been moved since.
+              // An edited Warm is no longer the Warm chip: highlighting it would
+              // misreport what is about to be exported.
+              chosen={isExactly(color, preset)}
+              onPick={() => p.setColor(presetSettings(preset))}
+            />
+          ),
+        )}
+      </div>
+
+      {knobs.map((k) => (
+        <Field key={k.key} label={k.label}>
+          <Slider
+            value={color[k.key]}
+            min={k.min}
+            max={k.max}
+            step={0.01}
+            onChange={(v) => set({ [k.key]: v })}
+            format={k.format}
+            onPointerDown={p.onColorDragStart}
+            onPointerUp={() => p.onColorDragEnd(`Adjust ${k.label.toLowerCase()}`)}
+          />
+        </Field>
+      ))}
+
+      <Hint>
+        The grade is applied to the picture only — a burned caption stays the colour you set it,
+        in the monitor and in the file.
+      </Hint>
+
+      {color.preset !== 'none' && (
+        <div className="frame-actions">
+          <button type="button" onClick={() => p.setColor(presetSettings('none'))}>
+            Remove grade
+          </button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * One look, shown on the project's own frame.
+ *
+ * Falls back to a colour ramp when there is no poster yet — the server builds
+ * those lazily from the dashboard listing, so a project opened straight after
+ * import genuinely may not have one. The ramp wears the same filter, so it still
+ * shows the grade rather than standing in for it.
+ */
+function GradeChip({
+  id,
+  preset,
+  posterUrl,
+  chosen,
+  onPick,
+}: {
+  id: string;
+  preset: ColorPreset;
+  posterUrl?: string;
+  chosen: boolean;
+  onPick: () => void;
+}) {
+  const settings = presetSettings(preset);
+  const grade = resolveColor(settings);
+  const label = preset === 'none' ? 'None' : COLOR_PRESETS[preset as keyof typeof COLOR_PRESETS].label;
+  const title = preset === 'none' ? 'No grade' : COLOR_PRESETS[preset as keyof typeof COLOR_PRESETS].hint;
+
+  return (
+    <button
+      type="button"
+      className={`grade-chip${chosen ? ' chosen' : ''}`}
+      aria-pressed={chosen}
+      title={title}
+      onClick={onPick}
+    >
+      <GradeFilter id={id} grade={grade} />
+      <span className="grade-chip-img" style={grade ? { filter: `url(#${id})` } : undefined}>
+        {posterUrl ? <img src={posterUrl} alt="" loading="lazy" /> : <span className="grade-chip-ramp" />}
+      </span>
+      <span className="grade-chip-name">{label}</span>
+    </button>
+  );
+}
+
+/** True when the grade is still exactly the look it was picked from. */
+function isExactly(color: ColorSettings, preset: ColorPreset): boolean {
+  const at = presetSettings(preset);
+  return (Object.keys(at) as Array<keyof ColorSettings>).every((k) => at[k] === color[k]);
+}
+
+/** "+0.35 stops", and the one value that is worth spelling out in words. */
+function stops(v: number): string {
+  if (Math.abs(v) < 0.005) return 'As shot';
+  return `${v > 0 ? '+' : '−'}${Math.abs(v).toFixed(2)} stops`;
+}
+
+/** A knob that means two opposite things either side of zero says which it is on. */
+function bipolar(v: number, below: string, above: string): string {
+  if (Math.abs(v) < 0.005) return 'Neutral';
+  return `${v < 0 ? below : above} ${Math.round(Math.abs(v) * 100)}%`;
+}
+
+/**
  * The background-music bed: import, volume, and how long it plays.
  *
  * The defining behaviour, said in the hint because it is the surprising part:
@@ -887,7 +1220,7 @@ function CaptionsField(p: Props) {
 
       {on && (
         <>
-          <Hint>Drag the caption on the monitor to place it.</Hint>
+          <Hint>Drag the caption on the monitor to place it, or its handles to size the box.</Hint>
 
           <FontPicker
             value={c.font}
@@ -984,21 +1317,49 @@ function CaptionsField(p: Props) {
             label="ALL CAPS"
           />
 
+          {/* The box, for anyone who would rather type a number than drag a
+            * corner. Same two values the monitor's handles write, so the panel
+            * and the frame are never showing different boxes. */}
+          <Slider
+            value={Math.round(c.boxWidth * 100)}
+            min={Math.ceil(MIN_CAPTION_BOX.width * 100)}
+            max={100}
+            step={1}
+            onPointerDown={p.onCaptionDragStart}
+            onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
+            onChange={(v) => set({ boxWidth: v / 100 })}
+            format={(v) => `${v}% wide`}
+          />
+          <Slider
+            value={Math.round(c.boxHeight * 100)}
+            min={Math.ceil(MIN_CAPTION_BOX.height * 100)}
+            max={100}
+            step={1}
+            onPointerDown={p.onCaptionDragStart}
+            onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
+            onChange={(v) => set({ boxHeight: v / 100 })}
+            format={(v) => `${v}% tall`}
+          />
+          <Hint>
+            Width folds a caption onto more lines without changing its words. Extra height is
+            shared out between those lines as spacing.
+          </Hint>
+
           <Slider
             value={c.maxChars}
             min={16}
             max={80}
             step={1}
             onPointerDown={p.onCaptionDragStart}
-            onPointerUp={() => p.onCaptionDragEnd(`Wrap captions at ${c.maxChars} characters`)}
+            onPointerUp={() => p.onCaptionDragEnd(`Split captions at ${c.maxChars} characters`)}
             onChange={(v) => set({ maxChars: v })}
-            format={(v) => `Wrap past ${v} characters`}
+            format={(v) => `Split past ${v} characters`}
           />
           {/* Three lines of hint was ~50px of a field that is already the
             * tallest thing in the panel. Same two facts, two lines. */}
           <Hint>
-            Applies to the downloaded subtitles too, not just the burn. 42 is the broadcast
-            convention.
+            How much text one caption holds — not how wide it is drawn. Applies to the downloaded
+            subtitles too; 42 is the broadcast convention.
           </Hint>
         </>
       )}

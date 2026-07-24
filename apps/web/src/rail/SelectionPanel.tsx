@@ -8,10 +8,27 @@ interface Props {
   onDelete: () => void;
   onRestore: () => void;
   onPlaySelection: () => void;
+  /**
+   * Push in on exactly these words. Absent on an audio-only project, which has
+   * no picture to push in on.
+   */
+  onPunchIn?: () => void;
+  /**
+   * Why the push-in cannot be made here — an existing one already covers part of
+   * this selection. Stated rather than left as a dead button.
+   */
+  punchBlocked?: string | null;
 }
 
 /** What the rail shows when words are selected: facts, and what you can do. */
-export default function SelectionPanel({ words, onDelete, onRestore, onPlaySelection }: Props) {
+export default function SelectionPanel({
+  words,
+  onDelete,
+  onRestore,
+  onPlaySelection,
+  onPunchIn,
+  punchBlocked,
+}: Props) {
   const first = words[0];
   const last = words[words.length - 1];
   const start = first.start;
@@ -44,6 +61,25 @@ export default function SelectionPanel({ words, onDelete, onRestore, onPlaySelec
         </button>
         <button onClick={onPlaySelection}>Play selection</button>
       </Field>
+
+      {/* The picture, for as long as these words last.
+        *
+        * It belongs here and not in the Frame panel because the decision it
+        * makes is WHEN, and when is a range of words — which is the one thing
+        * this panel already has and the Frame panel would have to invent a
+        * second timeline to express. The other half (WHAT to push in on) is a
+        * spatial judgement and happens on the monitor, which is why this button
+        * hands straight over to a marquee rather than opening more controls. */}
+      {onPunchIn && (
+        <Field label="Picture">
+          <button onClick={onPunchIn} disabled={Boolean(punchBlocked)}>
+            Push in here
+          </button>
+          {punchBlocked ? <Hint>{punchBlocked}</Hint> : (
+            <Hint>Then drag a box around what to follow.</Hint>
+          )}
+        </Field>
+      )}
 
       {cut > 0 && cut < words.length && (
         <Hint>{cut} of these {words.length} words are already cut.</Hint>

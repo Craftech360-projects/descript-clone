@@ -57,6 +57,13 @@ import {
   updateFrame,
   beginFrameDrag,
   endFrameDrag,
+  addPunchIn,
+  setMove,
+  setMovePath,
+  deletePunchIn,
+  updateColor,
+  beginColorDrag,
+  endColorDrag,
   beginCaptionDrag,
   endCaptionDrag,
   useEditor,
@@ -76,7 +83,15 @@ import {
   type AutoImport,
 } from './store/autoImport.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
-import { DEFAULT_FRAME } from '../../../packages/core/src/frame.ts';
+import { DEFAULT_FRAME, frameLayout } from '../../../packages/core/src/frame.ts';
+import {
+  MIN_MOVE_SEC,
+  boxToPunch,
+  punchToBox,
+  type FrameBox,
+} from '../../../packages/core/src/frame-track.ts';
+import { FollowAborted, followObject } from './track/follow.ts';
+import { DEFAULT_COLOR } from '../../../packages/core/src/color.ts';
 import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
 import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
@@ -201,6 +216,7 @@ export default function App() {
   const cut = doc?.cut ?? null;
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
   const frame = doc?.frame ?? DEFAULT_FRAME;
+  const color = doc?.color ?? DEFAULT_COLOR;
   const speed = doc?.speed ?? DEFAULT_SPEED;
   const history = historyState();
 
@@ -276,6 +292,7 @@ export default function App() {
           speed: d.speed,
           studioSound: d.studioSound,
           frame: d.frame,
+          color: d.color,
           // Infinity ("keep every pause") does not survive JSON — cutToWire maps
           // it to the 0 the server and disk speak.
           cut: cutToWire(d.cut),
@@ -413,6 +430,7 @@ export default function App() {
         p.speed,
         p.studioSound,
         p.frame,
+        p.color,
       );
     } else clearDoc();
   };
@@ -938,6 +956,8 @@ export default function App() {
         // Same reason as captions and speed above: an Export fired mid-debounce
         // must reframe to the crop on screen, not to the last one that saved.
         frame: doc?.frame ?? project?.frame,
+        // …and grade to the look on screen, for the same reason.
+        color: doc?.color ?? project?.color,
       });
       setJob({ id: jobId, progress: -1, stage: 'Starting', kind: 'render' });
 
@@ -1050,6 +1070,144 @@ export default function App() {
   const onTimeUpdate = () => {
     if (videoRef.current) setCurrentTime(getCurrentTime());
   };
+
+  // ── push-ins ───────────────────────────────────────────────────────────────
+  //
+  // Two pieces of view state, and neither belongs in the document: which move is
+  // being marked (a modal gesture, not an edit) and which is being followed (a
+  // job in flight). Everything a move IS lives on doc.frame.moves and undoes with
+  // the rest of the edit.
+
+  const [markingMoveId, setMarkingMoveId] = useState<string | null>(null);
+  const [following, setFollowing] = useState<{ id: string; progress: number } | null>(null);
+  const followAbort = useRef<AbortController | null>(null);
+
+  /**
+   * Why the selection cannot take a push-in, or null when it can.
+   *
+   * Computed rather than left to the button being dead, because "nothing
+   * happens" is the least useful thing an interface can say. Overlap is the only
+   * real refusal — normalizeMoves drops overlapping moves rather than blending
+   * them, so offering one here would silently discard it on the next save.
+   */
+  const punchBlocked = useMemo(() => {
+    if (!selectionRange) return 'Select the words this push-in should cover.';
+    if (selectionRange.end - selectionRange.start < MIN_MOVE_SEC) {
+      return 'Too short to push in on — select a little more.';
+    }
+    const clash = frame.moves.some(
+      (m) => selectionRange.start < m.end && m.start < selectionRange.end,
+    );
+    return clash ? 'A push-in already covers part of this selection.' : null;
+  }, [selectionRange, frame.moves]);
+
+  /**
+   * Mark a stretch, then hand straight over to the marquee.
+   *
+   * The playhead moves to the move's start first, and that is not a nicety: the
+   * template the tracker hunts for is taken from the frame that is on screen
+   * when the box is drawn, so marking against some unrelated moment produces a
+   * follow that looks for something which is not there.
+   */
+  const punchInOnSelection = useCallback(() => {
+    if (!selectionRange || punchBlocked) return;
+    const id = addPunchIn(selectionRange.start, selectionRange.end);
+    if (!id) return;
+    seek(selectionRange.start);
+    setMarkingMoveId(id);
+  }, [selectionRange, punchBlocked, seek]);
+
+  const markMove = useCallback(
+    (id: string) => {
+      const move = frame.moves.find((m) => m.id === id);
+      if (move) seek(move.start);
+      setMarkingMoveId(id);
+    },
+    [frame.moves, seek],
+  );
+
+  /**
+   * A box was dragged over the picture: that is the shot.
+   *
+   * boxToPunch turns it into the zoom and pan the frame will hold, and a mark
+   * always CLEARS any existing follow — the path was tracked from a template
+   * taken at the old box, so keeping it would leave the move following something
+   * the user just told it not to look at.
+   */
+  const applyMark = useCallback((id: string, box: FrameBox) => {
+    setMarkingMoveId(null);
+    const punch = boxToPunch(box);
+    // The mark is kept alongside the shot it resolved to: the tracker wants the
+    // rectangle that was actually drawn, not the wider window the frame's aspect
+    // turned it into. See FrameMove.mark.
+    setMove(id, { ...punch, mark: box, path: [] }, 'Mark push-in');
+  }, []);
+
+  const followMove = useCallback(
+    async (id: string) => {
+      const video = videoRef.current;
+      const move = frame.moves.find((m) => m.id === id);
+      const clip = activeClipRef.current;
+      if (!video || !move || !project) return;
+
+      // The follow reads one file. A move that spans a seam would need the app's
+      // clip-swap coordinator inside the sample loop, which is a real feature and
+      // not this one — say so rather than tracking the wrong footage.
+      if (clip && (move.start < clip.offset || move.end > clip.offset + clip.duration)) {
+        setNotice('That push-in crosses a clip boundary, which tracking cannot follow yet.');
+        return;
+      }
+
+      const source = {
+        width: clip?.width ?? project.width ?? 0,
+        height: clip?.height ?? project.height ?? 0,
+      };
+      // Against a UNIT box, so the follow depends on the crop and not on how big
+      // the monitor happened to be when it ran.
+      const layout = frameLayout(frame, source, { width: 1, height: 1 });
+
+      const abort = new AbortController();
+      followAbort.current = abort;
+      setFollowing({ id, progress: 0 });
+      try {
+        const result = await followObject({
+          video,
+          start: move.start,
+          end: move.end,
+          toLocal: (t) => (clip ? clipLocalTime(clip, t) : t),
+          // The rectangle that was drawn, when there is one. Falling back to the
+          // delivered window is the best available answer for a move framed with
+          // the sliders instead — see FrameMove.mark.
+          box: move.mark ?? punchToBox(move),
+          layout,
+          zoom: move.zoom,
+          signal: abort.signal,
+          onProgress: (progress) => setFollowing((f) => (f?.id === id ? { id, progress } : f)),
+        });
+        setMovePath(id, result.path);
+        // The quality of a follow is how often it had nothing to go on, and that
+        // is worth saying: a follow that held half its samples is pointing at
+        // whatever was last recognised, which the user can see but not diagnose.
+        setNotice(
+          result.lost === 0
+            ? `Following — ${result.samples} points.`
+            : `Following, but lost the subject on ${result.lost} of ${result.samples} points. Mark it again on a clearer frame if it drifts.`,
+        );
+      } catch (err) {
+        if (!(err instanceof FollowAborted)) {
+          setNotice(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        followAbort.current = null;
+        setFollowing(null);
+      }
+    },
+    [frame, project],
+  );
+
+  // A follow in flight owns the <video>'s playhead, so it must not outlive the
+  // project it was started on.
+  useEffect(() => () => followAbort.current?.abort(), [project?.id]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
@@ -1400,6 +1558,11 @@ export default function App() {
           onFrameChange={updateFrame}
           onFrameDragStart={beginFrameDrag}
           onFrameDragEnd={endFrameDrag}
+          color={color}
+          getCurrentTime={getCurrentTime}
+          markingMoveId={markingMoveId}
+          onMark={applyMark}
+          onMarkCancel={() => setMarkingMoveId(null)}
           overlay={
             project?.hasVideo ? (
               <CaptionOverlay
@@ -1413,6 +1576,9 @@ export default function App() {
                 getCurrentTime={getCurrentTime}
                 onDragStart={beginCaptionDrag}
                 onMove={(x, y) => updateCaptions({ ...captions, x, y })}
+                onResize={(boxWidth, boxHeight) =>
+                  updateCaptions({ ...captions, boxWidth, boxHeight })
+                }
                 onDragEnd={endCaptionDrag}
               />
             ) : null
@@ -1454,6 +1620,20 @@ export default function App() {
             setFrame={updateFrame}
             onFrameDragStart={beginFrameDrag}
             onFrameDragEnd={endFrameDrag}
+            onPunchIn={punchInOnSelection}
+            punchBlocked={punchBlocked}
+            onMarkMove={markMove}
+            onRemoveMove={deletePunchIn}
+            onSetMove={setMove}
+            onFollowMove={followMove}
+            onClearFollow={(id) => setMovePath(id, [])}
+            markingMoveId={markingMoveId}
+            following={following}
+            onSeek={seek}
+            color={color}
+            setColor={updateColor}
+            onColorDragStart={beginColorDrag}
+            onColorDragEnd={endColorDrag}
             customFonts={customFonts}
             onImportFont={importFont}
             onRemoveFont={removeFont}

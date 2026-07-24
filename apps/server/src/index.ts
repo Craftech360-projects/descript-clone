@@ -25,7 +25,13 @@ import {
   normalizeCaptions,
   type CaptionSettings,
 } from '../../../packages/core/src/caption-style.ts';
-import { compileEdl, compileSequenceEdl, outputDuration } from '../../../packages/core/src/edl.ts';
+import {
+  compileEdl,
+  compileSequenceEdl,
+  outputDuration,
+  sourceToOutput,
+} from '../../../packages/core/src/edl.ts';
+import { movesToOutput } from '../../../packages/core/src/frame-track.ts';
 import { detectFillers, removeFillers } from '../../../packages/core/src/fillers.ts';
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
 import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
@@ -36,6 +42,11 @@ import {
   resolveFrame,
   type FrameSettings,
 } from '../../../packages/core/src/frame.ts';
+import {
+  normalizeColor,
+  resolveColor,
+  type ColorSettings,
+} from '../../../packages/core/src/color.ts';
 import type { CompileOptions, Edl, Transcript, Word } from '../../../packages/core/src/types.ts';
 
 await store.init();
@@ -715,13 +726,14 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions, speed, cut, studioSound, frame } = await c.req.json<{
+  const { deletedIds, captions, speed, cut, studioSound, frame, color } = await c.req.json<{
     deletedIds: string[];
     captions?: CaptionSettings;
     speed?: number;
     cut?: Partial<CutSettings>;
     studioSound?: boolean;
     frame?: Partial<FrameSettings>;
+    color?: Partial<ColorSettings>;
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
@@ -737,6 +749,9 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   // normalizeFrame is the coercion, same contract as sanitizeCut above: a bad
   // width, a NaN zoom, or an unknown preset off the wire cannot reach the graph.
   if (frame !== undefined) project.frame = normalizeFrame(frame);
+  // Same rule again: a NaN exposure or an invented preset off the wire is coerced
+  // here rather than reaching the filtergraph on the next render.
+  if (color !== undefined) project.color = normalizeColor(color);
 
   await store.save(project);
   return c.json({ ok: true });
@@ -880,6 +895,48 @@ app.post('/api/projects/:id/render', async (c) => {
   // reframe, so it never gets one either.
   const frame = project.hasVideo ? (resolveFrame(frameSettings, sourceSize) ?? undefined) : undefined;
 
+  // The colour grade, layered request-over-record exactly as the frame is. null
+  // when the grade is neutral, so no colour filters are emitted at all and an
+  // ungraded export is the same file it was before grading existed. Audio-only
+  // has no picture to grade, so it never gets one.
+  const color = project.hasVideo
+    ? (resolveColor(normalizeColor({ ...project.color, ...(options.color ?? {}) })) ?? undefined)
+    : undefined;
+
+  // The push-ins, moved from the SOURCE clock they are marked on to the OUTPUT
+  // clock the filter runs on.
+  //
+  // This mapping is the whole reason moves are stored in source time: a move is
+  // attached to the words it was aimed at, so cutting a sentence ahead of it has
+  // to carry it earlier rather than leave it pointing at whatever now happens to
+  // occupy that second. sourceToOutput answers that exactly, and returns null for
+  // a moment the edit removed — hence the probe, which walks inwards to find the
+  // first instant of the move that survived, so trimming a push-in's ends
+  // shortens it instead of deleting it.
+  const punch =
+    project.hasVideo && frameSettings.moves.length > 0
+      ? {
+          moves: movesToOutput(
+            frameSettings.moves,
+            (t) => sourceToOutput(edl, t),
+            (from, to) => {
+              // 20 steps is plenty: the caller only needs SOME surviving instant
+              // near the end it lost, and the ease is rescaled to whatever is
+              // left anyway. A finer walk would be spending precision on a
+              // boundary the cut has already made approximate.
+              const step = (to - from) / 20;
+              for (let i = 1; i <= 20; i++) {
+                const at = sourceToOutput(edl, from + step * i);
+                if (at !== null) return at;
+              }
+              return null;
+            },
+          ),
+          width: outSize.width,
+          height: outSize.height,
+        }
+      : undefined;
+
   const subtitles =
     wantsCaptions && project.hasVideo
       ? toAss(
@@ -958,6 +1015,12 @@ app.post('/api/projects/:id/render', async (c) => {
         // The crop into the target resolution. Absent = the picture keeps the
         // source's shape, and the video graph is emitted as it was before.
         frame,
+        // The animated push-ins, on the output clock. renderEdl fills in the
+        // frame rate from the same probe the cut's renumber uses.
+        punch,
+        // The colour grade, applied after the crop and before the caption burn
+        // so it never tints a caption. Absent = the picture's values are untouched.
+        color,
         // fps deliberately omitted: renderEdl probes fresh so a project imported
         // before the avg_frame_rate fix does not export at its stale, wrong rate.
       },

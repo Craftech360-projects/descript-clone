@@ -4,6 +4,7 @@ import {
   CAPTION_FONTS,
   CAPTION_MARGIN,
   DEFAULT_CAPTIONS,
+  MIN_CAPTION_BOX,
   captionBoxFill,
   captionScale,
   clampAnchor,
@@ -243,9 +244,11 @@ test('normalizeCaptions handles no stored settings at all', () => {
   assert.notEqual(normalizeCaptions(undefined), DEFAULT_CAPTIONS);
 });
 
-test('libass is forbidden from wrapping, so only maxChars decides a line break', () => {
+test('libass is forbidden from wrapping, so only the caption box decides a break', () => {
   // WrapStyle 2 means "only an explicit \N breaks a line". This is what stops
-  // the burn re-deciding a layout the preview already decided.
+  // the burn re-deciding a layout the preview already decided — and since
+  // layoutCaption emits its lines as separate \pos'd events, not even a \N is
+  // left for libass to act on.
   //
   // Measured against the bundled ffmpeg at 1920 wide, 40 characters of Arial
   // bold: under WrapStyle 0 a 105px line broke into two (962x193 of ink) while
@@ -259,11 +262,36 @@ test('libass is forbidden from wrapping, so only maxChars decides a line break',
   for (const line of dialogue(ass)) assert.ok(!line.includes('\N'), 'no hard breaks emitted');
 });
 
-test('a cue never exceeds maxChars, since nothing downstream will wrap it', () => {
-  // With both engines forbidden to wrap, this is the ONLY thing keeping a
-  // caption inside the frame.
+test('a cue never exceeds maxChars, which is how much text one caption holds', () => {
+  // Not how WIDE it is drawn — the caption box answers that, and re-flows these
+  // same characters onto more lines without moving one of them into a different
+  // cue. The two limits are independent on purpose.
   const long = 'the quick brown fox jumps over the lazy dog and keeps on running';
   for (const cue of cuesOf(long, 24)) {
     assert.ok(cue.text.length <= 24, `cue ran to ${cue.text.length} chars: ${cue.text}`);
   }
+});
+
+test('a caption box off the wire cannot be zero, or every word gets its own line', () => {
+  // boxWidth is a divisor for the wrap and boxHeight for the line step. A hand
+  // -edited project file or a bad request body must not be able to hand either
+  // of them a zero.
+  assert.equal(normalizeCaptions({ boxWidth: 0 }).boxWidth, MIN_CAPTION_BOX.width);
+  assert.equal(normalizeCaptions({ boxHeight: -3 }).boxHeight, MIN_CAPTION_BOX.height);
+  assert.equal(normalizeCaptions({ boxWidth: 5 }).boxWidth, 1, 'and no wider than the frame');
+  assert.equal(
+    normalizeCaptions({ boxWidth: NaN }).boxWidth,
+    DEFAULT_CAPTIONS.boxWidth,
+    'a number that is not one falls back rather than propagating',
+  );
+});
+
+test('a project saved before the caption box gets the default box, not undefined', () => {
+  // The same trap highlightColor fell into: the object exists, so `stored ??
+  // DEFAULT` never fires and the new key stays missing. Here it would reach
+  // layoutCaption as undefined and NaN every offset in the burn.
+  const stored = { enabled: true, fontSize: 64 } as Partial<CaptionSettings>;
+  const merged = normalizeCaptions(stored);
+  assert.equal(merged.boxWidth, DEFAULT_CAPTIONS.boxWidth);
+  assert.equal(merged.boxHeight, DEFAULT_CAPTIONS.boxHeight);
 });

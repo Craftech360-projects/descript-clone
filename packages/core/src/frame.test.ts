@@ -47,6 +47,30 @@ test('custom dimensions are forced even', () => {
   assert.equal(f.height % 2, 0, `${f.height}`);
 });
 
+test('push-ins survive the round trip through the wire', () => {
+  // normalizeFrame IS the server's coercion for the whole Frame panel — the
+  // /transcript PATCH and the render route both funnel through it — so a move
+  // that does not survive here is a move that silently does not survive a save.
+  const f = normalizeFrame({
+    preset: 'reel',
+    moves: [
+      { id: 'b', start: 8, end: 12, zoom: 2, x: 0.4, y: -0.2, ease: 0.5, path: [{ t: 9, x: 0.1, y: 0 }] },
+      { id: 'a', start: 1, end: 4, zoom: 1.5, x: 0, y: 0, ease: 0.5, path: [] },
+    ],
+  } as never);
+  assert.deepEqual(f.moves.map((m) => m.id), ['a', 'b'], 'sorted into time order');
+  assert.equal(f.moves[1].path.length, 1);
+  assert.equal(f.moves[1].zoom, 2);
+});
+
+test('a project saved before push-ins existed gets an empty track, not undefined', () => {
+  // Per field, not per object — the same contract every other field here keeps.
+  // An undefined `moves` would throw on the first .length in the monitor.
+  assert.deepEqual(normalizeFrame({ preset: 'square' }).moves, []);
+  assert.deepEqual(normalizeFrame(null).moves, []);
+  assert.deepEqual(DEFAULT_FRAME.moves, []);
+});
+
 test('garbage off the wire cannot reach the graph', () => {
   const f = normalizeFrame({
     preset: 'nonsense' as never,

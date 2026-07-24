@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRenderPlan, buildSequenceRenderPlan } from './render.ts';
+import { presetSettings, resolveColor } from './color.ts';
 import { MAX_SPEED } from './doc.ts';
 import type { Edl } from './types.ts';
 
@@ -560,5 +561,180 @@ test('a sequence keeps crop before burn before speed', () => {
   const { filterScript } = seqPlan(seqEdl, { frame: REEL, speed: 1.5, subtitlePath: '/tmp/c.ass' });
   const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
   assert.ok(chain.indexOf('crop=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+});
+
+// ── the animated push-in ──────────────────────────────────────────────────────
+//
+// The arithmetic of a move is frame-track.test.ts's job, including asserting the
+// emitted expression against the sampler frame by frame. What is only checkable
+// HERE is where the filter lands in the chain — behind the crop that decides
+// what the frame is, ahead of the burn that must not be magnified with it, and
+// well ahead of the setpts that would otherwise rescale the clock its
+// expressions are written against.
+
+const PUNCH = {
+  moves: [{ id: 'm', start: 1, end: 4, ease: 0.5, zoom: 2, x: 0.5, y: 0, path: [] }],
+  width: 1080,
+  height: 1920,
+  fps: 25,
+};
+
+test('no moves leaves the graph byte-identical to before push-ins existed', () => {
+  assert.equal(
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2, punch: undefined }).filterScript,
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2 }).filterScript,
+  );
+  // An empty list is the common case — every project that never marks anything —
+  // and it must cost nothing rather than an identity zoompan on every frame.
+  assert.equal(
+    plan(edl([[0, 5]]), { punch: { ...PUNCH, moves: [] } }).filterScript,
+    plan(edl([[0, 5]]), {}).filterScript,
+  );
+});
+
+test('the push-in runs after the crop and before the burn', () => {
+  const { filterScript } = plan(edl([[0, 5]]), {
+    frame: REEL,
+    punch: PUNCH,
+    subtitlePath: '/tmp/c.ass',
+    speed: 1.5,
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('zoompan='), chain);
+  assert.ok(chain.indexOf('zoompan=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+});
+
+test('a push-in without any reframe still knows what size to hand back', () => {
+  // resolveFrame returns null whenever the static crop would change nothing, so
+  // a project that marked an object but never opened the Frame panel arrives
+  // here with no `frame` at all. zoompan still has to be told the output size.
+  const { filterScript } = plan(edl([[0, 5]]), { punch: PUNCH });
+  assert.ok(!filterScript.includes('crop='), filterScript);
+  assert.ok(filterScript.includes(':s=1080x1920:'), filterScript);
+});
+
+test('a push-in alone creates the video stage a plain 1x render does not have', () => {
+  assert.ok(/select=[^\n]*\[outv\]/.test(plan(edl([[0, 5]]), {}).filterScript));
+  const { filterScript } = plan(edl([[0, 5]]), { punch: PUNCH });
+  assert.ok(/select=[^\n]*\[vcut\]/.test(filterScript), filterScript);
+  assert.equal(filterScript.match(/\[outv\]/g)?.length, 1, 'exactly one producer of [outv]');
+});
+
+test('an audio-only project is never handed a push-in', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { hasVideo: false, punch: PUNCH });
+  assert.ok(!filterScript.includes('zoompan='), filterScript);
+});
+
+test('the push-in never touches the audio chain', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { punch: PUNCH });
+  const audio = filterScript.split('\n').find((l) => l.startsWith('[0:a]'))!;
+  assert.ok(!audio.includes('zoompan='), 'a push-in is a picture operation');
+});
+
+test('a sequence punches once on the joined stream, in the same order', () => {
+  const { filterScript } = seqPlan(seqEdl, {
+    frame: REEL,
+    punch: PUNCH,
+    subtitlePath: '/tmp/c.ass',
+    speed: 1.5,
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('zoompan='), chain);
+  assert.ok(chain.indexOf('zoompan=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+  // Once. Punching each clip before the join would restart every move at every
+  // seam, since each clip's own clock begins at zero.
+  assert.equal(filterScript.match(/zoompan=/g)?.length, 1, filterScript);
+});
+
+test('a sequence whose ONLY video change is a push-in still gets its relabel', () => {
+  // wantsVideoStage is computed from the RESOLVED stage rather than from the
+  // presence of the option, so a punch with nothing to animate must not claim a
+  // [vc] hop that then has no producer.
+  const withPunch = seqPlan(seqEdl, { punch: PUNCH }).filterScript;
+  assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(withPunch), withPunch);
+  assert.equal(withPunch.match(/\[outv\]/g)?.length, 1, withPunch);
+
+  const inert = seqPlan(seqEdl, { punch: { ...PUNCH, moves: [] } }).filterScript;
+  assert.equal(inert, seqPlan(seqEdl, {}).filterScript);
+});
+
+// ── colour grade: the picture's values ────────────────────────────────────────
+//
+// Same ordering risk as the crop, one filter later. The grade must land AFTER
+// the crop (it works on the pixels that ship) and BEFORE the burn (it must not
+// tint the captions — and the monitor puts its filter on the <video> with the
+// caption layer painted over the top, so any other order makes the preview a
+// lie). Speed stays last, as ever.
+
+const WARM = resolveColor(presetSettings('warm'))!;
+
+test('no grade leaves the graph byte-identical to before it existed', () => {
+  assert.equal(
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2, color: undefined }).filterScript,
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2 }).filterScript,
+  );
+  assert.ok(!plan(edl([[0, 5]]), {}).filterScript.includes('colorchannelmixer='));
+  assert.ok(!plan(edl([[0, 5]]), {}).filterScript.includes('format=gbrp'));
+});
+
+test('the grade colours the picture and never touches the audio', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { color: WARM });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.includes('format=gbrp'), chain);
+  assert.ok(chain.includes('colorchannelmixer='), chain);
+  const audio = filterScript.split('\n').find((l) => l.startsWith('[0:a]'))!;
+  assert.ok(!audio.includes('colorchannelmixer='), 'grading is a picture operation');
+});
+
+test('the grade runs after the crop and before the burn, with speed still last', () => {
+  const { filterScript } = plan(edl([[0, 5]]), {
+    frame: REEL,
+    color: WARM,
+    speed: 1.5,
+    subtitlePath: '/tmp/c.ass',
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('colorchannelmixer='), chain);
+  assert.ok(chain.indexOf('colorchannelmixer=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+});
+
+test('a grade alone creates the video stage a plain 1x render does not have', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { color: WARM });
+  assert.ok(/select=[^\n]*\[vcut\]/.test(filterScript), filterScript);
+  assert.equal(filterScript.match(/\[outv\]/g)?.length, 1, 'exactly one producer of [outv]');
+});
+
+test('an audio-only project is never handed a grade', () => {
+  // The caller drops it (there is no picture to grade), and the video branch it
+  // would live on is not emitted at all.
+  const { filterScript } = plan(edl([[0, 5]]), { hasVideo: false, color: WARM });
+  assert.ok(!filterScript.includes('colorchannelmixer='), filterScript);
+  assert.ok(!filterScript.includes('format=gbrp'), filterScript);
+});
+
+test('a sequence grades the joined picture once, not each clip', () => {
+  const { filterScript } = seqPlan(seqEdl, { color: WARM });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(chain.includes('colorchannelmixer='), chain);
+  assert.equal(filterScript.match(/colorchannelmixer=/g)?.length, 1, filterScript);
+  // The grade alone has to open the joined-stream stage, or a multi-clip project
+  // would silently export ungraded.
+  assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(filterScript), filterScript);
+});
+
+test('a sequence keeps crop before grade before burn before speed', () => {
+  const { filterScript } = seqPlan(seqEdl, {
+    frame: REEL,
+    color: WARM,
+    speed: 1.5,
+    subtitlePath: '/tmp/c.ass',
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('colorchannelmixer='), chain);
+  assert.ok(chain.indexOf('colorchannelmixer=') < chain.indexOf('subtitles='), chain);
   assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
 });

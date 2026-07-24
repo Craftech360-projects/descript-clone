@@ -1,5 +1,7 @@
 import type { Edl } from './types.ts';
+import { colorFilterStages, type Grade } from './color.ts';
 import { frameFilterStages, type FrameRender } from './frame.ts';
+import { punchFilterStage, type OutputMove } from './frame-track.ts';
 
 export interface RenderPlan {
   /**
@@ -74,6 +76,43 @@ export interface RenderOptions {
    * the Frame panel emits no scale/crop at all. See frameFilterStages.
    */
   frame?: FrameRender;
+  /**
+   * The colour grade — a 3x3 matrix and a per-channel affine, already resolved
+   * from the preset and the knobs by the caller. resolveColor returns null when
+   * the grade is neutral, and that null is why a project which never opens the
+   * Colour panel emits no colour filters at all. See colorFilterStages.
+   */
+  color?: Grade;
+  /**
+   * Animated push-ins over the finished frame — the marked-object follow. The
+   * caller has already moved these onto the OUTPUT clock, because the filter
+   * that applies them runs after the cut and there is no other clock there.
+   * Omit, or pass no moves, and no zoompan is emitted at all.
+   */
+  punch?: PunchRender;
+}
+
+/**
+ * The animated punch, ready to emit: moves on the output clock, plus the two
+ * facts about the stream that zoompan cannot work out for itself.
+ *
+ * The size is here rather than read off `frame` because the two are independent:
+ * a project can mark a push-in without ever touching the Frame panel, and then
+ * resolveFrame returns null (nothing to crop) while zoompan still has to be told
+ * what shape to hand back.
+ */
+export interface PunchRender {
+  /** Moves already mapped onto the output clock — see movesToOutput. */
+  moves: OutputMove[];
+  /** The delivered frame. zoompan is asked for exactly this size back. */
+  width: number;
+  height: number;
+  /**
+   * The output frame rate. zoompan GENERATES its timestamps from this rather
+   * than carrying the input's through, so a wrong value here is a video of the
+   * wrong LENGTH rather than one that merely looks wrong. Probed, never guessed.
+   */
+  fps: number;
 }
 
 /**
@@ -228,8 +267,12 @@ export function escapeSubtitlePath(path: string): string {
  * broadband click. A ~12ms fade is inaudible as a fade and removes the click.
  */
 export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
-  const { input, output, hasVideo, subtitlePath, speed = 1, fps, fontsDir, bgMusic, frame } = options;
+  const { input, output, hasVideo, subtitlePath, speed = 1, fps, fontsDir, bgMusic, frame, color } =
+    options;
   const burnIn = Boolean(hasVideo && subtitlePath);
+  // null unless there is a move worth animating — see punchFilterStage, which
+  // also refuses an unknown frame rate rather than guessing one.
+  const punchStage = hasVideo && options.punch ? punchFilterStage(options.punch.moves, options.punch, options.punch.fps) : null;
   // With a music bed the program audio is an intermediate that the mix consumes;
   // without one it writes straight to the final [outa] as it always did.
   const programLabel = bgMusic ? '[aprog]' : '[outa]';
@@ -327,6 +370,29 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
     // out of it, and one near the bottom is simply gone. Cropping first means
     // every glyph is placed and scaled against the frame that ships.
     if (frame) videoStages.push(...frameFilterStages(frame));
+    // The push-in rides immediately behind the reframe, and that pairing is the
+    // whole model: the static crop decides what the delivered frame IS, and this
+    // pushes into that finished frame. See frame-track.ts for why it can only
+    // ever push in — pad's offsets are configuration-time, so an animated
+    // letterbox does not exist to be emitted.
+    //
+    // Before the burn for the same reason the crop is: captions belong to the
+    // delivered frame and must stay put and legible while the picture moves
+    // under them. Burning first would magnify and then crop the text away.
+    if (punchStage) videoStages.push(punchStage);
+    // The grade sits between the crop and the burn, and both sides of that are
+    // deliberate.
+    //
+    // After the crop, because it then works on the pixels that ship rather than
+    // on a picture whose edges are about to be thrown away.
+    //
+    // Before the burn, and that one is not a preference. A grade must not tint
+    // the captions — warming a scene should not turn white text amber — and it
+    // is also the ONLY ordering the preview can match: in the monitor the filter
+    // is on the <video> and the caption layer is a sibling painted over it, so
+    // burning first here would show the user a caption that comes out a
+    // different colour in the file.
+    if (color) videoStages.push(...colorFilterStages(color));
     if (burnIn) {
       // fontsdir is a second value in the same single-quoted filter-arg context
       // as filename, so it takes the identical escaping. Appended only when set,
@@ -438,6 +504,19 @@ export interface SequenceRenderOptions {
    * the Frame panel emits no scale/crop at all. See frameFilterStages.
    */
   frame?: FrameRender;
+  /**
+   * The colour grade, applied ONCE to the joined stream rather than per clip.
+   * One project is one look; a per-clip grade would be a different feature with
+   * its own per-clip document state. Absent = the picture's values are untouched.
+   */
+  color?: Grade;
+  /**
+   * Animated push-ins, applied ONCE to the joined stream — the moves are marked
+   * against the project's global timeline, which is exactly what concat produces.
+   * Its `fps` must be the canonical output rate the clips were resampled to, not
+   * any one clip's.
+   */
+  punch?: PunchRender;
 }
 
 /**
@@ -534,7 +613,15 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
 
   // If nothing follows the join, concat writes straight to the output labels, so
   // a plain 1x render with no burn carries no relabel hops.
-  const wantsVideoStage = hasVideo && (burnIn || retime || Boolean(options.frame));
+  // Resolved before the label decision, not inside the block below: a project
+  // whose ONLY video change is a push-in still needs the [vc] relabel, and
+  // testing `Boolean(options.punch)` instead would claim one for a punch that
+  // turned out to have nothing to animate.
+  const punchStage = hasVideo && options.punch
+    ? punchFilterStage(options.punch.moves, options.punch, options.punch.fps)
+    : null;
+  const wantsVideoStage =
+    hasVideo && (burnIn || retime || Boolean(options.frame) || Boolean(options.color) || Boolean(punchStage));
   const vJoin = hasVideo ? (wantsVideoStage ? '[vc]' : '[outv]') : '';
   const wantsAudioStage = retime || options.studioSound;
   const aJoin = wantsAudioStage ? '[ac]' : programLabel;
@@ -551,6 +638,14 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     // known rectangle by the time it is cropped — the clips never have to agree
     // with the target frame, only with each other.
     if (options.frame) stages.push(...frameFilterStages(options.frame));
+    // The push-in, on the joined stream — the moves are marked against the
+    // project's global timeline, and after concat that is the only timeline
+    // there is. Same position in the chain as on the single-input path.
+    if (punchStage) stages.push(punchStage);
+    // Crop, then grade, then burn — identical ordering and reasoning to
+    // buildRenderPlan. Once, here, on the joined stream: grading each clip
+    // separately would cost the conversion N times and still produce one look.
+    if (options.color) stages.push(...colorFilterStages(options.color));
     if (burnIn) {
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
       stages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);

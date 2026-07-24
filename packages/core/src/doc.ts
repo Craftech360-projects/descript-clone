@@ -1,4 +1,5 @@
 import { DEFAULT_CAPTIONS, type CaptionSettings } from './caption-style.ts';
+import { DEFAULT_COLOR, type ColorSettings } from './color.ts';
 import { DEFAULT_FRAME, type FrameSettings } from './frame.ts';
 import type { CompileOptions, Transcript, Word } from './types.ts';
 
@@ -56,6 +57,15 @@ export interface Doc {
    * underneath is identical whether this is a reel or a 16:9. See frame.ts.
    */
   frame: FrameSettings;
+  /**
+   * The colour grade: how the picture looks, as opposed to what shape it is.
+   *
+   * The third member of the same family as speed, studioSound and frame — a
+   * transform on the OUTPUT, never an input to compileEdl. It moves pixel VALUES
+   * and not even pixel positions, so the EDL underneath is identical whether this
+   * is Noir or neutral. See color.ts.
+   */
+  color: ColorSettings;
   /** Bumped on every committed change. The saver uses it to detect staleness. */
   rev: number;
 }
@@ -144,6 +154,7 @@ export type DocPatch =
   | { kind: 'speed'; prev: number; next: number }
   | { kind: 'studioSound'; prev: boolean; next: boolean }
   | { kind: 'frame'; prev: FrameSettings; next: FrameSettings }
+  | { kind: 'color'; prev: ColorSettings; next: ColorSettings }
   /** Escape hatch for a wholesale transcript swap (re-transcribe). */
   | { kind: 'replace'; prev: Word[]; next: Word[] }
   /**
@@ -167,8 +178,9 @@ export function docFromTranscript(
   speed: number = DEFAULT_SPEED,
   studioSound: boolean = false,
   frame: FrameSettings = DEFAULT_FRAME,
+  color: ColorSettings = DEFAULT_COLOR,
 ): Doc {
-  return { words: transcript.words, cut, captions, speed, studioSound, frame, rev: 0 };
+  return { words: transcript.words, cut, captions, speed, studioSound, frame, color, rev: 0 };
 }
 
 /** The word ids a patch touches. Free — the patch already lists them. */
@@ -202,6 +214,7 @@ export function affectedIds(patch: DocPatch): string[] {
     // result straight to the caller as `affected`, where .length throws.
     case 'studioSound':
     case 'frame':
+    case 'color':
       return [];
   }
 }
@@ -226,6 +239,8 @@ export function invertPatch(patch: DocPatch): DocPatch {
       return { kind: 'studioSound', prev: patch.next, next: patch.prev };
     case 'frame':
       return { kind: 'frame', prev: patch.next, next: patch.prev };
+    case 'color':
+      return { kind: 'color', prev: patch.next, next: patch.prev };
     case 'replace':
       return { kind: 'replace', prev: patch.next, next: patch.prev };
     case 'batch':
@@ -265,6 +280,8 @@ export function applyPatch(doc: Doc, patch: DocPatch): Doc {
       return { ...doc, studioSound: patch.next, rev: doc.rev + 1 };
     case 'frame':
       return { ...doc, frame: { ...patch.next }, rev: doc.rev + 1 };
+    case 'color':
+      return { ...doc, color: { ...patch.next }, rev: doc.rev + 1 };
     case 'replace':
       return { ...doc, words: patch.next, rev: doc.rev + 1 };
     case 'batch': {
@@ -352,7 +369,19 @@ export function isEmptyPatch(patch: DocPatch): boolean {
     case 'studioSound':
       return patch.prev === patch.next;
     case 'frame':
-      return (Object.keys(patch.next) as Array<keyof FrameSettings>).every(
+      // `moves` is the one field on this document that is not a scalar, so it is
+      // the one field === cannot answer for. Every edit to a move rebuilds the
+      // array, which would make a === test say "changed" for a drag that ended
+      // exactly where it started — an undo step that undoes nothing. Compared by
+      // value, and cheaply: a project has a handful of moves, and a tracked path
+      // is a few dozen numbers.
+      return (Object.keys(patch.next) as Array<keyof FrameSettings>).every((k) =>
+        k === 'moves'
+          ? JSON.stringify(patch.prev.moves) === JSON.stringify(patch.next.moves)
+          : patch.prev[k] === patch.next[k],
+      );
+    case 'color':
+      return (Object.keys(patch.next) as Array<keyof ColorSettings>).every(
         (k) => patch.prev[k] === patch.next[k],
       );
     case 'replace':
@@ -373,8 +402,18 @@ export function patchBytes(patch: DocPatch): number {
     // Must be listed for the same reason as in affectedIds: an undefined here
     // makes prune()'s running total NaN, and the byte budget stops evicting.
     case 'studioSound':
-    case 'frame':
+    case 'color':
       return 100;
+    case 'frame': {
+      // Not a flat 100 like its neighbours: a frame patch carries its moves, and
+      // a TRACKED move carries a sample per step of the follow. A minute of
+      // tracking is a few thousand numbers, so charging 100 bytes for it would
+      // let the history stack quietly outgrow its budget by an order of
+      // magnitude — the one thing this function exists to prevent.
+      const points = (f: FrameSettings) =>
+        f.moves.reduce((sum, m) => sum + m.path.length, 0);
+      return 100 + (points(patch.prev) + points(patch.next)) * 24;
+    }
     case 'replace':
       return (patch.prev.length + patch.next.length) * 130;
     case 'batch':

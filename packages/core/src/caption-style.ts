@@ -52,8 +52,23 @@ export interface CaptionSettings {
   backdrop: Backdrop;
   /** Force uppercase — the social-captions look. Render-time only. */
   allCaps: boolean;
-  /** Wrap a cue past this many characters. */
+  /** Split a cue past this many characters. */
   maxChars: number;
+  /**
+   * The caption BOX, as a 0..1 fraction of the frame, centred on (x, y).
+   *
+   * Width is where the lines break: a cue too wide for the box folds onto
+   * another line, and widening the box past the cue's own length brings it back
+   * onto one. It does NOT change which words share a caption — that is maxChars,
+   * and keeping the two separate is the point. Narrowing the box re-flows the
+   * same characters; it never re-chunks the transcript.
+   *
+   * Height is the vertical room those lines get. Anything beyond the natural
+   * leading is shared out between them as extra air. See layoutCaption, which is
+   * the one place either number is turned into a layout.
+   */
+  boxWidth: number;
+  boxHeight: number;
   /** Anchor of the text block, as a 0..1 fraction of the frame. */
   x: number;
   y: number;
@@ -87,6 +102,16 @@ export const DEFAULT_CAPTIONS: CaptionSettings = {
   backdrop: 'box',
   allCaps: false,
   maxChars: 42,
+  // Wide enough that a default 42-character cue at 48px still lands on ONE line
+  // — measured through layoutCaption at 1920x1080, a full-length cue comes out
+  // around 0.62 of the frame — so turning captions on gives the same single-line
+  // result it always did, and the box is something you reach for rather than
+  // something that reshapes your captions the moment it exists.
+  boxWidth: 0.8,
+  // Two lines of 48px type at the natural 1.2 leading, near enough. So a cue
+  // that does wrap wraps at the leading the monitor has always drawn, and the
+  // handle adds air from there rather than starting out already spread.
+  boxHeight: 0.11,
   x: 0.5,
   // Not 0.5: captions sit low by convention, and low enough to clear a face but
   // high enough to clear a player's scrubber.
@@ -175,6 +200,13 @@ export function normalizeCaptions(stored: Partial<CaptionSettings> | undefined):
   if (merged.highlightColor.toUpperCase() === LEGACY_HIGHLIGHT) {
     merged.highlightColor = DEFAULT_CAPTIONS.highlightColor;
   }
+  // The box is a divisor away from being a disaster: a width of 0 off the wire
+  // wraps every single word onto its own line, and a negative one wraps forever.
+  // Clamped here rather than in layoutCaption so the number the UI shows and the
+  // number the burn uses are the same one.
+  const box = clampBox(merged.boxWidth, merged.boxHeight);
+  merged.boxWidth = box.width;
+  merged.boxHeight = box.height;
   return merged;
 }
 
@@ -244,6 +276,29 @@ export function captionBoxFill(settings: CaptionSettings): string | null {
 /** Clamp a caption anchor into the frame, so it can never be dragged off-screen. */
 export function clampAnchor(x: number, y: number): { x: number; y: number } {
   return { x: clamp01(x), y: clamp01(y) };
+}
+
+/**
+ * The narrowest and shortest the caption box may be dragged.
+ *
+ * A floor rather than a free drag because both numbers are divisors — width
+ * decides how many words fit a line and height is divided by the line count —
+ * and a box dragged to nothing is a caption nobody can find again to drag back.
+ * A tenth of the frame still holds a word or two at any sane size.
+ */
+export const MIN_CAPTION_BOX = { width: 0.1, height: 0.04 };
+
+/** Clamp a dragged caption box to something that can still hold text. */
+export function clampBox(width: number, height: number): { width: number; height: number } {
+  return {
+    width: clampRange(width, MIN_CAPTION_BOX.width, DEFAULT_CAPTIONS.boxWidth),
+    height: clampRange(height, MIN_CAPTION_BOX.height, DEFAULT_CAPTIONS.boxHeight),
+  };
+}
+
+function clampRange(n: number, min: number, fallback: number): number {
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(1, n));
 }
 
 function clamp01(n: number): number {

@@ -648,36 +648,82 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * letterboxed content box, so these rules must not add any offset of their own.
  * The layer ignores the pointer so scrubbing and clicks reach the video; only
  * the caption itself is grabbable. */
-/* Clipped to the picture, because the frame clips too. Nothing wraps any more
- * (see WrapStyle 2 in toAss), so a caption too long for its frame runs off the
- * edge — and it has to run off the edge HERE in the same place, or the preview
- * is lying about the one case it most needs to warn you about. */
+/* Clipped to the picture, because the frame clips too. The browser never wraps
+ * anything here (see WrapStyle 2 in toAss and layoutCaption), so a single word
+ * too wide for its box runs off the edge — and it has to run off the edge HERE
+ * in the same place, or the preview is lying about the one case it most needs to
+ * warn you about. */
 .cap-layer { position: absolute; pointer-events: none; overflow: hidden; }
+/* The caption BOX: the rectangle the text is wrapped into, sized in JS from
+ * boxWidth/boxHeight. It is a coordinate space and nothing else — no pointer, no
+ * paint — because a rectangle this large swallowing clicks would take the frame
+ * pan with it. Only the lines and the handles inside it are grabbable. */
+.cap-box {
+  position: absolute;
+  /* The anchor is the CENTRE of the box — same as ASS Alignment 5 — so the point
+   * you drop is the point it centres on, and resizing grows both edges outward
+   * from it rather than dragging the caption away from where you put it. */
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
 .cap-text {
   position: absolute;
-  /* The anchor is the CENTRE of the block — same as ASS Alignment 5 — so the
-   * point you drop is the point it centres on. */
+  /* Centred on the offset layoutCaption computed for this line, which is the
+   * same offset the burn's \pos repeats. `left` is the box's centre; `top` comes
+   * from JS. */
+  left: 50%;
   transform: translate(-50%, -50%);
   pointer-events: auto;
   cursor: grab;
   margin: 0;
   text-align: center;
+  /* Only ever one line's worth — the breaks are already made — but it still has
+   * to match the ratio layoutCaption stacks lines at, or a tall glyph would sit
+   * a pixel off its own box. */
   line-height: 1.2;
   font-weight: 700;
   border-radius: 3px;
   user-select: none;
   -webkit-user-select: none;
   touch-action: none;
-  outline: 1px dashed transparent;
-  outline-offset: 6px;
-  transition: outline-color 120ms ease;
 }
-.cap-text:hover { outline-color: rgba(255, 255, 255, 0.5); }
-.cap-text:active { cursor: grabbing; outline-color: var(--accent); }
+.cap-text:active { cursor: grabbing; }
 /* Nothing is being said at this moment — this is the placement guide, not a
  * claim about what the burn will contain at this frame. It only ever shows
  * while paused; see CaptionOverlay. */
 .cap-text.ph { opacity: 0.45; }
+
+/* ---- sizing the caption box ----
+ * The dashed rectangle and its eight handles. Paused only: none of this is in
+ * the burn, so none of it may be on screen while the video is representing what
+ * the burn will look like. */
+.cap-guide {
+  position: absolute; inset: 0;
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.cap-box:hover .cap-guide { border-color: var(--accent); }
+.cap-handle {
+  position: absolute;
+  width: 10px; height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 2px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  pointer-events: auto;
+  touch-action: none;
+}
+/* Percentages of the box, so the handles ride its edges at any size. The
+ * negative margin above centres each one ON the edge rather than inside it. */
+.cap-handle.h-n  { left: 50%;  top: 0;    cursor: ns-resize; }
+.cap-handle.h-s  { left: 50%;  top: 100%; cursor: ns-resize; }
+.cap-handle.h-w  { left: 0;    top: 50%;  cursor: ew-resize; }
+.cap-handle.h-e  { left: 100%; top: 50%;  cursor: ew-resize; }
+.cap-handle.h-nw { left: 0;    top: 0;    cursor: nwse-resize; }
+.cap-handle.h-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.cap-handle.h-ne { left: 100%; top: 0;    cursor: nesw-resize; }
+.cap-handle.h-sw { left: 0;    top: 100%; cursor: nesw-resize; }
 .stage-empty {
   width: 100%; height: 100%;
   display: grid; place-items: center;
@@ -1077,6 +1123,108 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* Fit and Fill sit side by side: they are the two ends of one decision. */
 .frame-actions { display: flex; gap: var(--s-1); }
 .frame-actions button { flex: 1; }
+
+/* ---- push-ins ----
+ *
+ * A list of moments rather than a set of controls, so it is a list. Each row
+ * leads with WHEN — that is what tells one push-in from another, and it is also
+ * the button that takes you there, because the only way to judge a push-in is to
+ * watch it. */
+.moves { list-style: none; display: flex; flex-direction: column; gap: var(--s-2); }
+.move {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+}
+/* The row being marked is the one the monitor is waiting on, so it says so
+ * rather than leaving the marquee as the only clue about which move it belongs
+ * to. */
+.move.marking { border-color: var(--accent); }
+.move-when {
+  display: flex; flex-direction: column; gap: 2px;
+  align-items: flex-start; text-align: left;
+  padding: 0; border: 0; background: none;
+  font-variant-numeric: tabular-nums;
+}
+.move-when small { color: var(--filler); font-size: var(--t-small); }
+.move-when:hover { color: var(--accent); }
+.move-actions { display: flex; gap: var(--s-1); align-items: center; }
+.move-actions button { flex: 1; }
+.move-actions button.link { flex: 0 0 auto; }
+
+/* ---- marking a push-in on the picture ----
+ *
+ * A modal layer over the frame. It sits OUTSIDE the graded, punched picture on
+ * purpose: this is chrome drawn on the monitor, not something the render will
+ * ever see. */
+.frame.marking { cursor: crosshair; }
+.mark-layer { position: absolute; inset: 0; }
+/* What was dragged. */
+.mark-box {
+  position: absolute;
+  border: 2px solid var(--accent);
+  /* A wash rather than a fill: the whole point is to see what is inside it. */
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  pointer-events: none;
+}
+/* What will actually ship — the marked box CONTAINED in the frame's own aspect,
+ * which is wider or taller than what was drawn. Dashed, because it is the
+ * consequence of the gesture rather than the gesture. */
+.mark-shot {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--accent) 70%, white);
+  pointer-events: none;
+}
+.mark-hint {
+  position: absolute; inset: auto 0 var(--s-3) 0;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  color: white; text-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
+  pointer-events: none;
+}
+.mark-hint small { opacity: 0.75; font-size: var(--t-small); }
+
+/* ---- colour grade chips ----
+ *
+ * Each look shown on the project's OWN poster frame, wearing the same SVG filter
+ * the monitor wears. Four across: any fewer and the eight looks scroll, any more
+ * and the picture is too small to read a grade off — which is the entire job of
+ * the control.
+ *
+ * The name sits UNDER the picture rather than over it. A label on top would be
+ * over graded pixels, so its contrast would change with the look it labels — the
+ * Noir chip's caption would be the hardest one in the row to read. */
+.grade-chips {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-1);
+}
+.grade-chip {
+  display: flex; flex-direction: column; gap: 2px; align-items: stretch;
+  padding: 2px; width: 100%;
+  background: none; border: 1px solid transparent; border-radius: var(--r-2);
+}
+.grade-chip:hover { border-color: var(--line-strong); }
+.grade-chip.chosen { border-color: var(--accent); }
+/* The filter goes on this wrapper, never on the button: it would take the border
+ * and the focus ring with it, so the "chosen" gold would be graded too — and on
+ * the Mono chip it would come out grey, which is the one thing it must not do. */
+.grade-chip-img {
+  display: block; overflow: hidden; border-radius: 3px;
+  aspect-ratio: 16 / 9; background: var(--void);
+}
+.grade-chip-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* Stand-in for a project whose poster the server has not built yet. A ramp
+ * rather than a flat colour, so a contrast or a lift is still visible on it. */
+.grade-chip-ramp {
+  display: block; width: 100%; height: 100%;
+  background: linear-gradient(135deg, #101010, #8a6a45 55%, #f0e6d8);
+}
+.grade-chip-name {
+  font-size: var(--t-small); color: var(--dim); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.grade-chip.chosen .grade-chip-name { color: var(--text); }
 
 .chips { display: flex; flex-wrap: wrap; gap: var(--s-1); list-style: none; padding: 0; margin: 0; }
 .chip {

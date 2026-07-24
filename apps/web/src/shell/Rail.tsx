@@ -5,6 +5,7 @@ import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
 import type { FrameSettings } from '../../../../packages/core/src/frame.ts';
+import type { ColorSettings } from '../../../../packages/core/src/color.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
 import type { CustomFont, MusicProvider, MusicResult, Project } from '../api.ts';
 
@@ -33,6 +34,23 @@ interface Props {
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+
+  /** Push-ins. See ProjectPanel's MovesField and SelectionPanel's "Push in here". */
+  onPunchIn: () => void;
+  punchBlocked: string | null;
+  onMarkMove: (id: string) => void;
+  onRemoveMove: (id: string) => void;
+  onSetMove: (id: string, patch: { zoom?: number; ease?: number }) => void;
+  onFollowMove: (id: string) => void;
+  onClearFollow: (id: string) => void;
+  markingMoveId: string | null;
+  following: { id: string; progress: number } | null;
+  onSeek: (time: number) => void;
+
+  color: ColorSettings;
+  setColor: (c: ColorSettings) => void;
+  onColorDragStart: () => void;
+  onColorDragEnd: (label: string) => void;
 
   customFonts: CustomFont[];
   onImportFont: (file: File) => void;
@@ -120,6 +138,10 @@ export default function Rail(p: Props) {
           onDelete={p.onDeleteSelection}
           onRestore={p.onRestoreSelection}
           onPlaySelection={p.onPlaySelection}
+          // Audio has no picture to push in on, so the affordance is absent
+          // rather than present and permanently disabled.
+          onPunchIn={p.project.hasVideo ? p.onPunchIn : undefined}
+          punchBlocked={p.punchBlocked}
         />
       </div>
     );
@@ -147,6 +169,18 @@ export default function Rail(p: Props) {
         setFrame={p.setFrame}
         onFrameDragStart={p.onFrameDragStart}
         onFrameDragEnd={p.onFrameDragEnd}
+        onMarkMove={p.onMarkMove}
+        onRemoveMove={p.onRemoveMove}
+        onSetMove={p.onSetMove}
+        onFollowMove={p.onFollowMove}
+        onClearFollow={p.onClearFollow}
+        markingMoveId={p.markingMoveId}
+        following={p.following}
+        onSeek={p.onSeek}
+        color={p.color}
+        setColor={p.setColor}
+        onColorDragStart={p.onColorDragStart}
+        onColorDragEnd={p.onColorDragEnd}
         customFonts={p.customFonts}
         onImportFont={p.onImportFont}
         onRemoveFont={p.onRemoveFont}

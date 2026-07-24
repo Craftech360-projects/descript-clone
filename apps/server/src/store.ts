@@ -8,6 +8,7 @@ import type { AsrOptions } from './asr.ts';
 import type { Thumbs } from './thumbs.ts';
 import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
 import type { CutSettings } from '../../../packages/core/src/doc.ts';
+import type { ColorSettings } from '../../../packages/core/src/color.ts';
 import type { FrameSettings } from '../../../packages/core/src/frame.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
@@ -174,6 +175,12 @@ export interface Project {
    * falls back to DEFAULT_FRAME via normalizeFrame.
    */
   frame?: FrameSettings;
+  /**
+   * The colour grade — which look, and where its six knobs sit. Absent on
+   * projects saved before grading existed and on every project still ungraded;
+   * the client falls back to DEFAULT_COLOR via normalizeColor.
+   */
+  color?: ColorSettings;
   /**
    * The background-music bed, if one has been imported. Absent on projects with
    * no music (all of them, until asked for). Mixed under the render — see BgMusic.

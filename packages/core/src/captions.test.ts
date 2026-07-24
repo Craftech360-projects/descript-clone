@@ -18,6 +18,19 @@ function fromText(text: string, deletedIdx: number[] = []): Transcript {
 
 const NO_PAD = { padMs: 0, mergeWithinMs: 0 };
 
+/**
+ * The words a Dialogue line actually draws — its Text field, with the override
+ * blocks stripped.
+ *
+ * By field count off the Format line's shape (nine fields before Text) rather
+ * than by a regex over the whole line: Text is the only field that may itself
+ * contain commas, so anything that splits and takes a fixed slice from the RIGHT
+ * silently truncates a caption with a comma in it.
+ */
+function dialogueText(line: string): string {
+  return line.split(',').slice(9).join(',').replace(/\{[^}]*\}/g, '').trim();
+}
+
 test('an explicitly undefined option falls back to the default, not past it', () => {
   // The server destructures these out of a JSON body, so an omitted field
   // arrives as undefined. A plain spread let that override maxChars, and the
@@ -325,6 +338,75 @@ test('the highlight colour reaches the burn as SecondaryColour', () => {
   assert.equal(primary, '&H00FFFFFF', 'a spoken word lands on `color`');
   // ASS is little-endian BGR: pure red is 0000FF, not FF0000.
   assert.equal(secondary, '&H000000FF', 'an unspoken word waits in `highlightColor`');
+});
+
+test('a caption too wide for its box burns as one \\pos\'d event per line', () => {
+  // The box's height can only mean something if WE place the lines. Handing
+  // libass a \N would let it stack them at its own metrics, which the monitor
+  // cannot know and therefore cannot draw.
+  const t = fromText('one two three four five six seven eight');
+  const cues = toCues(t, compileEdl(t, NO_PAD), { maxChars: 999, maxDurationMs: 100000 });
+  const events = toAss(cues, { boxWidth: 0.2 }).split('\n').filter((l) => l.startsWith('Dialogue:'));
+
+  assert.ok(events.length > 1, 'a narrow box breaks the cue into lines');
+  assert.ok(!events.some((e) => e.includes('\\N')), 'never libass\' own line breaks');
+
+  const ys = events.map((e) => Number(/\\pos\(\d+,(-?\d+)\)/.exec(e)![1]));
+  assert.equal(new Set(ys).size, events.length, 'each line sits at its own height');
+  // Same start and end on every line, so they arrive and leave together exactly
+  // as one wrapped event would.
+  const times = new Set(events.map((e) => e.split(',').slice(1, 3).join(',')));
+  assert.equal(times.size, 1);
+
+  // Every word still reaches the burn, once.
+  const words = events.flatMap((e) => dialogueText(e).split(/\s+/));
+  assert.deepEqual(words, ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight']);
+});
+
+test('karaoke keeps its timing across a line break', () => {
+  // \k counts durations from the EVENT's start, and every line of a cue starts
+  // at the cue's start — so a second line must spend the time its predecessors
+  // took before its own first word may light up. Without the lead-in tag, line
+  // two would highlight in lockstep with line one.
+  const t = fromText('one two three four five six seven eight');
+  const cues = toCues(t, compileEdl(t, NO_PAD), { maxChars: 999, maxDurationMs: 100000 });
+  const spans = karaokeSpans(cues[0]);
+  const events = toAss(cues, { boxWidth: 0.2 }).split('\n').filter((l) => l.startsWith('Dialogue:'));
+
+  let word = 0;
+  for (const [line, event] of events.entries()) {
+    const tags = [...event.matchAll(/\{\\k(\d+)\}/g)].map((m) => Number(m[1]));
+    const lead = line === 0 ? 0 : tags.shift()!;
+    const before = spans
+      .slice(0, word)
+      .reduce((cs, s) => cs + Math.round((s.end - s.start) * 100), 0);
+    assert.equal(lead, before, `line ${line} waits for the words above it`);
+
+    for (const tag of tags) {
+      assert.equal(tag, Math.round((spans[word].end - spans[word].start) * 100));
+      word++;
+    }
+  }
+  assert.equal(word, spans.length, 'every word got exactly one \\k');
+});
+
+test('the caption box re-flows a cue without re-cutting it', () => {
+  // The rule the feature rests on: maxChars decides which words share a caption,
+  // the box decides how they are drawn. Narrowing the box must not move a single
+  // word into a different cue.
+  const t = fromText('one two three four five six seven eight');
+  const edl = compileEdl(t, NO_PAD);
+  const cues = toCues(t, edl, { maxChars: 999, maxDurationMs: 100000 });
+  assert.equal(cues.length, 1, 'one cue, at any box width');
+
+  const at = (boxWidth: number) =>
+    toAss(cues, { boxWidth })
+      .split('\n')
+      .filter((l) => l.startsWith('Dialogue:'))
+      .map(dialogueText);
+
+  assert.equal(at(1).join(' '), at(0.2).join(' '), 'the same words, in the same order');
+  assert.equal(at(1).length, 1, 'a wide box comes back onto one line');
 });
 
 test('turning karaoke off writes a flat line with no \\k at all', () => {

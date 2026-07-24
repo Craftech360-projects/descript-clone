@@ -5,9 +5,11 @@ import {
   CAPTION_REFERENCE_HEIGHT,
   captionBoxFill,
   clampAnchor,
+  clampBox,
   fontStack,
   type CaptionSettings,
 } from '../../../../packages/core/src/caption-style.ts';
+import { layoutCaption } from '../../../../packages/core/src/caption-layout.ts';
 import type { Edl, Word } from '../../../../packages/core/src/types.ts';
 
 interface Props {
@@ -33,6 +35,7 @@ interface Props {
   getCurrentTime: () => number;
   onDragStart: () => void;
   onMove: (x: number, y: number) => void;
+  onResize: (boxWidth: number, boxHeight: number) => void;
   onDragEnd: (label: string) => void;
 }
 
@@ -44,25 +47,34 @@ interface Box {
   height: number;
 }
 
+/** Which edges a handle drags. Corners drag one of each. */
+type Handle = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
+
+const HANDLES: Handle[] = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+
 /**
- * The draggable caption, drawn over the monitor.
+ * The draggable, resizable caption, drawn over the monitor.
  *
  * This is a preview of a burn that libass will do later, so the two have to
  * agree. They agree because both read the same CaptionSettings and both scale
- * from the same 1080p reference — position is a fraction of the picture, so it
- * survives the monitor being 480px wide and the render being 4K.
+ * from the same 1080p reference — position and box are fractions of the picture,
+ * so they survive the monitor being 480px wide and the render being 4K.
  *
- * Line breaks are not approximated, they are shared: toCues breaks at maxChars
- * before either engine sees the text, libass is told not to wrap (WrapStyle 2)
- * and this is `white-space: pre`. Neither side gets a vote. That is what fixed
- * the long-standing complaint that the preview "auto-layouts" — it was the
- * browser and libass each choosing their own break points and agreeing only by
- * luck.
+ * Line breaks are not approximated, they are shared: layoutCaption folds the
+ * cue's words into the caption box before either engine sees the text, libass is
+ * told not to wrap (WrapStyle 2) and gets one \pos'd event per line, and this is
+ * `white-space: pre` with the same per-line offsets. Neither side gets a vote.
+ * That is what fixed the long-standing complaint that the preview
+ * "auto-layouts" — it was the browser and libass each choosing their own break
+ * points and agreeing only by luck.
  *
  * What remains approximate, and deliberately: the browser and libass are
  * different text engines, so glyph rasterisation and outline joins differ by a
- * pixel here and there. Placement, size, colour, break points, outline
- * thickness and shadow offset are exact; the antialiasing is not.
+ * pixel here and there, and the width the box wraps against is measured from
+ * published font metrics rather than from either rasteriser (see
+ * caption-layout). Placement, size, colour, break points, line spacing, outline
+ * thickness and shadow offset are exact; the antialiasing, and whether a line
+ * fills its guide rectangle to the last pixel, are not.
  */
 export default function CaptionOverlay(p: Props) {
   const [box, setBox] = useState<Box | null>(null);
@@ -76,6 +88,10 @@ export default function CaptionOverlay(p: Props) {
   // jumping to some unrelated one.
   const [guideIndex, setGuideIndex] = useState(0);
   const dragging = useRef(false);
+  // Which handle is being dragged, or null for a move. Held in a ref rather than
+  // state because it is read inside pointermove and must never be a render
+  // behind the pointer.
+  const resizing = useRef<Handle | null>(null);
 
   const cues = useMemo(
     () =>
@@ -187,9 +203,9 @@ export default function CaptionOverlay(p: Props) {
   // Paused, the dimmed guide comes back — an empty overlay is impossible to
   // grab, and placing it is the one job that needs it.
   const active = cueIndex >= 0 ? cues[cueIndex] : null;
+  const shown = active ?? cues[guideIndex] ?? cues[0] ?? null;
   const placeholder = active === null;
   const hidden = placeholder && p.playing;
-  const text = active?.text ?? cues[guideIndex]?.text ?? cues[0]?.text ?? 'Captions';
 
   // Word-by-word only over a cue that is really on screen. The placement guide
   // is a still: animating a line nobody is speaking would misrepresent the
@@ -205,12 +221,24 @@ export default function CaptionOverlay(p: Props) {
   // outline. Drawing one here would show an outline the render will not have.
   const outline = boxFill === null ? strokeSize : 0;
 
-  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+  // The same call the ASS writer makes, against the monitor's own pixels rather
+  // than the render's. Both are "the frame", and every number in CaptionSettings
+  // is a fraction of it, so the two agree without either knowing the other's
+  // size. With no cue anywhere yet — a project that has not been transcribed —
+  // there is still a box to place, so it gets a word to hold.
+  const words = shown ? shown.words.map((w) => w.text) : ['Captions'];
+  const lines = layoutCaption(words, p.captions, { width: box.width, height: box.height });
+
+  const boxW = p.captions.boxWidth * box.width;
+  const boxH = p.captions.boxHeight * box.height;
+
+  const onPointerDown = (handle: Handle | null) => (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     // The frame behind this pans on drag. Without stopping here, grabbing the
     // caption would move the caption AND the picture under it.
     e.stopPropagation();
     dragging.current = true;
+    resizing.current = handle;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     p.onDragStart();
   };
@@ -220,19 +248,45 @@ export default function CaptionOverlay(p: Props) {
     const el = p.frameRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    // Screen -> frame -> 0..1. Clamped, so it can never be lost off-frame.
-    const { x, y } = clampAnchor(
-      (e.clientX - rect.left) / rect.width,
-      (e.clientY - rect.top) / rect.height,
-    );
-    p.onMove(x, y);
+
+    const handle = resizing.current;
+    if (handle === null) {
+      // Screen -> frame -> 0..1. Clamped, so it can never be lost off-frame.
+      const { x, y } = clampAnchor(
+        (e.clientX - rect.left) / rect.width,
+        (e.clientY - rect.top) / rect.height,
+      );
+      p.onMove(x, y);
+      return;
+    }
+
+    // Resizing is SYMMETRIC about the anchor, which is why an east handle and a
+    // west one do the same thing. The anchor is the block's centre — that is
+    // what ASS Alignment 5 means and what \pos points at — so growing one edge
+    // alone would have to move the centre to keep the other edge still, and the
+    // caption would crawl away from the spot you placed it every time you
+    // widened it. Pulling both edges outward at once keeps the drop point fixed,
+    // which is the property that actually matters here.
+    const centerX = rect.left + p.captions.x * rect.width;
+    const centerY = rect.top + p.captions.y * rect.height;
+    const width = handle.includes('e') || handle.includes('w')
+      ? (Math.abs(e.clientX - centerX) * 2) / rect.width
+      : p.captions.boxWidth;
+    const height = handle.includes('n') || handle.includes('s')
+      ? (Math.abs(e.clientY - centerY) * 2) / rect.height
+      : p.captions.boxHeight;
+
+    const next = clampBox(width, height);
+    p.onResize(next.width, next.height);
   };
 
   const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!dragging.current) return;
+    const handle = resizing.current;
     dragging.current = false;
+    resizing.current = null;
     (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    p.onDragEnd('Move captions');
+    p.onDragEnd(handle === null ? 'Move captions' : 'Resize captions');
   };
 
   return (
@@ -241,64 +295,111 @@ export default function CaptionOverlay(p: Props) {
       style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
     >
       <div
-        className={`cap-text${placeholder ? ' ph' : ''}`}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
+        className="cap-box"
         style={{
           // Hidden rather than unmounted: pointer capture bypasses hit testing,
           // so a drag that outlives its cue keeps receiving events.
           visibility: hidden ? 'hidden' : undefined,
           left: `${p.captions.x * 100}%`,
           top: `${p.captions.y * 100}%`,
-          fontFamily: fontStack(p.captions.font, p.customFamilies),
-          fontSize: `${fontSize}px`,
-          color: p.captions.color,
-          textTransform: p.captions.allCaps ? 'uppercase' : 'none',
-          // DOUBLED, and that is not a fudge factor.
-          //
-          // libass Outline:N grows the glyph N pixels OUTWARD — measured, ink
-          // bbox grows by exactly 2N in both axes. CSS centres its stroke on the
-          // glyph path, so half falls inside the letterform and paint-order
-          // hides it under the fill. A CSS stroke of N therefore shows N/2
-          // outside, and the preview drew every outline at half strength.
-          WebkitTextStrokeWidth: outline > 0 ? `${outline * 2}px` : undefined,
-          WebkitTextStrokeColor: outline > 0 ? p.captions.strokeColor : undefined,
-          paintOrder: 'stroke fill',
-          // Opaque, and the stroke colour — that is what libass fills a
-          // BorderStyle 3 box with. See captionBoxFill.
-          background: boxFill ?? 'transparent',
-          // ASS reuses the outline width as the box's padding.
-          padding: boxFill !== null ? `${strokeSize}px ${strokeSize * 2}px` : 0,
-          // A HARD shadow, offset only. ASS Shadow:N is a copy of the glyph
-          // displaced N px down-right with no blur at all — measured, ink grows
-          // by exactly +N in width and +N in height, never more. The 2px blur
-          // this used to draw had no counterpart in the burn. Alpha is 0.5
-          // because toAss sets BackColour alpha to 0x80.
-          textShadow:
-            p.captions.backdrop === 'shadow'
-              ? `${3 * scale}px ${3 * scale}px 0 rgba(0,0,0,0.5)`
-              : undefined,
-          // No max-width and no wrapping. toCues already broke this text at
-          // maxChars; letting the browser break it again is the whole bug. See
-          // the WrapStyle 2 note in toAss.
-          whiteSpace: 'pre',
+          width: `${boxW}px`,
+          height: `${boxH}px`,
         }}
       >
-        {karaoke
-          ? karaoke.map((span, i) => (
-              <span
-                key={i}
-                // Before its syllable begins a word waits in highlightColor;
-                // from that instant on it holds `color`. That is \k, exactly.
-                style={{ color: i < spoken ? p.captions.color : p.captions.highlightColor }}
-              >
-                {i > 0 ? ' ' : ''}
-                {span.text}
-              </span>
-            ))
-          : text}
+        {lines.map((line, li) => (
+          <div
+            key={li}
+            className={`cap-text${placeholder ? ' ph' : ''}`}
+            onPointerDown={onPointerDown(null)}
+            onPointerMove={onPointerMove}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            style={{
+              // Each line is placed at the offset layoutCaption computed and the
+              // burn's \pos repeats — NOT stacked by the browser. That is the
+              // whole reason the box's height means anything: leading is a
+              // number both sides were handed, not one each engine decided.
+              top: `${boxH / 2 + line.dy}px`,
+              fontFamily: fontStack(p.captions.font, p.customFamilies),
+              fontSize: `${fontSize}px`,
+              color: p.captions.color,
+              textTransform: p.captions.allCaps ? 'uppercase' : 'none',
+              // DOUBLED, and that is not a fudge factor.
+              //
+              // libass Outline:N grows the glyph N pixels OUTWARD — measured, ink
+              // bbox grows by exactly 2N in both axes. CSS centres its stroke on the
+              // glyph path, so half falls inside the letterform and paint-order
+              // hides it under the fill. A CSS stroke of N therefore shows N/2
+              // outside, and the preview drew every outline at half strength.
+              WebkitTextStrokeWidth: outline > 0 ? `${outline * 2}px` : undefined,
+              WebkitTextStrokeColor: outline > 0 ? p.captions.strokeColor : undefined,
+              paintOrder: 'stroke fill',
+              // Opaque, and the stroke colour — that is what libass fills a
+              // BorderStyle 3 box with. See captionBoxFill. One box per LINE,
+              // because that is what libass draws for a line of its own.
+              background: boxFill ?? 'transparent',
+              // ASS reuses the outline width as the box's padding.
+              padding: boxFill !== null ? `${strokeSize}px ${strokeSize * 2}px` : 0,
+              // A HARD shadow, offset only. ASS Shadow:N is a copy of the glyph
+              // displaced N px down-right with no blur at all — measured, ink grows
+              // by exactly +N in width and +N in height, never more. The 2px blur
+              // this used to draw had no counterpart in the burn. Alpha is 0.5
+              // because toAss sets BackColour alpha to 0x80.
+              textShadow:
+                p.captions.backdrop === 'shadow'
+                  ? `${3 * scale}px ${3 * scale}px 0 rgba(0,0,0,0.5)`
+                  : undefined,
+              // No browser wrapping. layoutCaption already broke this text
+              // against the box; letting the browser break it again is the whole
+              // bug. See the WrapStyle 2 note in toAss.
+              whiteSpace: 'pre',
+            }}
+          >
+            {karaoke
+              ? karaoke.slice(line.from, line.to).map((span, i) => {
+                  // `spoken` counts words across the whole CUE, so the test has
+                  // to be against the word's index in the cue and not its index
+                  // on this line — otherwise every line would start highlighting
+                  // again from its own first word.
+                  const w = line.from + i;
+                  return (
+                    <span
+                      key={w}
+                      // Before its syllable begins a word waits in highlightColor;
+                      // from that instant on it holds `color`. That is \k, exactly.
+                      style={{ color: w < spoken ? p.captions.color : p.captions.highlightColor }}
+                    >
+                      {i > 0 ? ' ' : ''}
+                      {span.text}
+                    </span>
+                  );
+                })
+              : line.text}
+          </div>
+        ))}
+
+        {/* The box itself, and the handles that size it — drawn AFTER the lines
+          * so a caption wider than its box cannot bury its own handles.
+          *
+          * Only while paused: the burn has no dashed rectangle in it, and
+          * leaving one over the picture during playback would be the preview
+          * lying about the frame. Placing a caption is something you do stopped
+          * anyway. */}
+        {!p.playing && (
+          <>
+            <div className="cap-guide" />
+            {HANDLES.map((h) => (
+              <div
+                key={h}
+                className={`cap-handle h-${h}`}
+                onPointerDown={onPointerDown(h)}
+                onPointerMove={onPointerMove}
+                onPointerUp={endDrag}
+                onPointerCancel={endDrag}
+              />
+            ))}
+          </>
+        )}
       </div>
     </div>
   );

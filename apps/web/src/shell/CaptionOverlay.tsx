@@ -12,6 +12,16 @@ import type { Edl, Word } from '../../../../packages/core/src/types.ts';
 
 interface Props {
   videoRef: RefObject<HTMLVideoElement | null>;
+  /**
+   * The output frame — the rectangle the render will actually produce.
+   *
+   * Captions are placed as a fraction of the OUTPUT, and the render burns them
+   * after the reframe crop, so this is the rectangle to measure. Measuring the
+   * <video> instead would place them against the source: on a 16:9 recording
+   * cropped to a 9:16 reel, a caption at x=0.5 would sit in the middle of a
+   * picture whose middle is not the middle of the frame that ships.
+   */
+  frameRef: RefObject<HTMLDivElement | null>;
   words: Word[];
   edl: Edl | null;
   captions: CaptionSettings;
@@ -82,42 +92,30 @@ export default function CaptionOverlay(p: Props) {
   // would be the one genuinely wasteful thing in this loop.
   const spans = useMemo(() => cues.map(karaokeSpans), [cues]);
 
-  // ── keep the overlay glued to the picture, not the element ──────────────────
+  // ── keep the overlay glued to the output frame ──────────────────────────────
   //
-  // object-fit: contain letterboxes, so the element's box and the picture's box
-  // are different rectangles. Positioning against the element would drift the
-  // caption by the size of the bars — and the bars change with every resize.
+  // The frame element IS the output rectangle — the monitor sizes it to the
+  // target aspect and clips the picture to it — so the box is simply its own
+  // size, and the overlay is a child of it. This used to derive the picture's
+  // contain-box from videoWidth/videoHeight, which was the right answer back when
+  // the monitor showed the source letterboxed and the wrong one now: the picture
+  // is deliberately larger than the frame whenever it is zoomed or cropped, and
+  // captions belong to the frame.
   useEffect(() => {
-    const video = p.videoRef.current;
-    if (!video) return;
+    const el = p.frameRef.current;
+    if (!el) return;
 
     const measure = () => {
-      const rect = video.getBoundingClientRect();
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      if (!vw || !vh || !rect.width || !rect.height) return setBox(null);
-
-      const scale = Math.min(rect.width / vw, rect.height / vh);
-      const width = vw * scale;
-      const height = vh * scale;
-      setBox({
-        left: (rect.width - width) / 2,
-        top: (rect.height - height) / 2,
-        width,
-        height,
-      });
+      const rect = el.getBoundingClientRect();
+      if (!rect.width || !rect.height) return setBox(null);
+      setBox({ left: 0, top: 0, width: rect.width, height: rect.height });
     };
 
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(video);
-    // videoWidth is 0 until metadata lands, so the first measure can come up empty.
-    video.addEventListener('loadedmetadata', measure);
-    return () => {
-      ro.disconnect();
-      video.removeEventListener('loadedmetadata', measure);
-    };
-  }, [p.videoRef, p.captions.enabled]);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [p.frameRef, p.captions.enabled]);
 
   // ── which cue is on screen ──────────────────────────────────────────────────
   //
@@ -209,6 +207,9 @@ export default function CaptionOverlay(p: Props) {
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
+    // The frame behind this pans on drag. Without stopping here, grabbing the
+    // caption would move the caption AND the picture under it.
+    e.stopPropagation();
     dragging.current = true;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     p.onDragStart();
@@ -216,13 +217,13 @@ export default function CaptionOverlay(p: Props) {
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!dragging.current) return;
-    const video = p.videoRef.current;
-    if (!video) return;
-    const rect = video.getBoundingClientRect();
-    // Screen -> picture -> 0..1. Clamped, so it can never be lost off-frame.
+    const el = p.frameRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // Screen -> frame -> 0..1. Clamped, so it can never be lost off-frame.
     const { x, y } = clampAnchor(
-      (e.clientX - rect.left - box.left) / box.width,
-      (e.clientY - rect.top - box.top) / box.height,
+      (e.clientX - rect.left) / rect.width,
+      (e.clientY - rect.top) / rect.height,
     );
     p.onMove(x, y);
   };

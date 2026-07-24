@@ -1,9 +1,98 @@
-import { useId, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import Icon, { type IconName } from './Icon.tsx';
 
 /**
  * The small widget kit. These were written inside Inspector.tsx; they outlived
  * it, so they live here now.
  */
+
+/**
+ * A rail section: a row that STATES ITS VALUE, and opens to reveal the controls
+ * behind it.
+ *
+ * This replaces `Field collapsible` in the Project panel, and the difference is
+ * the whole point. A <details> whose summary reads only "Frame" is a table of
+ * contents with no contents: to learn that you are exporting 1080×1920 with a
+ * bed at 40% and captions on, you had to open five disclosures in turn. The
+ * value on the right means the closed panel is a full status report — the
+ * project's whole configuration, readable without a single click.
+ *
+ * `toggle` puts the on/off switch IN the header, outside the disclosure button.
+ * Turning captions on is the most frequent thing anyone does here and it cost a
+ * click to open, a click to switch, and a click to close. Now it costs one, and
+ * you never have to look at the dozen controls behind it.
+ *
+ * Not a native <details>, which is what the rest of the app uses. A <summary>
+ * swallows clicks on anything inside it, so a switch in the header would toggle
+ * the section as well as the setting — and moving the switch out of the summary
+ * means the row is no longer one element. So: an explicit button/aria-expanded
+ * disclosure, which is the same contract <details> implements, spelled out.
+ */
+export function Section({ icon, label, value, toggle, children, defaultOpen }: {
+  icon: IconName;
+  label: string;
+  /** The live state, shown closed AND open — while open it is a readout that
+    * tracks the controls below it, which is why it is not hidden on expand. */
+  value?: ReactNode;
+  toggle?: {
+    checked: boolean;
+    onChange: (v: boolean) => void;
+    disabled?: boolean;
+    /** Names the switch for assistive tech; drawn only by the section header. */
+    label: string;
+  };
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(Boolean(defaultOpen));
+  const bodyId = useId();
+
+  return (
+    <section className={`sect${open ? ' open' : ''}`}>
+      <div className="sect-head">
+        <button
+          type="button"
+          className="sect-disc"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="sect-caret" aria-hidden="true" />
+          <Icon name={icon} size={15} className="sect-icon" />
+          <span className="sect-name">{label}</span>
+          {value !== undefined && value !== null && value !== '' && (
+            <span className="sect-value">{value}</span>
+          )}
+        </button>
+        {toggle && (
+          <Check
+            checked={toggle.checked}
+            onChange={toggle.onChange}
+            disabled={toggle.disabled}
+            label={toggle.label}
+            hideLabel
+          />
+        )}
+      </div>
+      {/* Hidden rather than unmounted, so a search you ran in the music browser
+        * — or a half-typed filler word — survives collapsing the section to
+        * glance at something else. [hidden] is honoured explicitly in app.css:
+        * .sect-body sets display:flex, which would otherwise beat the UA rule
+        * and leave a "closed" section fully visible and fully tabbable. */}
+      <div className="sect-body" id={bodyId} hidden={!open}>{children}</div>
+    </section>
+  );
+}
+
+/** The small caption over a group of sections. */
+export function SectionGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="pgroup">
+      <h3 className="pgroup-head">{label}</h3>
+      {children}
+    </div>
+  );
+}
 
 /**
  * A titled group of controls.
@@ -45,8 +134,13 @@ export function Hint({ children }: { children: ReactNode }) {
  * Where the app admits what it does not know. This voice is the best thing in
  * the codebase — keep it.
  */
-export function Warn({ children }: { children: ReactNode }) {
-  return <p className="warn-box">{children}</p>;
+export function Warn({ children, alert }: { children: ReactNode; alert?: boolean }) {
+  /* `alert` for a message that APPEARED in response to something you just did —
+   * a failed search, say. Without role="alert" a screen reader never learns the
+   * box arrived, because nothing moved focus and nothing else announced it. Not
+   * the default: the standing warnings here are part of the page, and a live
+   * region that fires on every render would interrupt constantly. */
+  return <p className="warn-box" role={alert ? 'alert' : undefined}>{children}</p>;
 }
 
 export function Empty({ children }: { children: ReactNode }) {
@@ -100,14 +194,18 @@ export function Segmented({ name, value, onChange, options }: {
  * row is the hit target, and the state survives with CSS off. The track and thumb
  * are the paint; the checkbox is the behaviour. See `.switch` in app.css.
  */
-export function Check({ checked, onChange, label, disabled }: {
+export function Check({ checked, onChange, label, disabled, hideLabel }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label: string;
   disabled?: boolean;
+  /** Draw the switch alone. The label text stays in the DOM, unpainted, so the
+    * control keeps its accessible name — used in a Section header, where the
+    * section's own heading is already the visible label. */
+  hideLabel?: boolean;
 }) {
   return (
-    <label className={`switch${disabled ? ' disabled' : ''}`}>
+    <label className={`switch${disabled ? ' disabled' : ''}${hideLabel ? ' bare' : ''}`}>
       <input
         type="checkbox"
         role="switch"
@@ -118,7 +216,7 @@ export function Check({ checked, onChange, label, disabled }: {
       <span className="switch-track" aria-hidden="true">
         <span className="switch-thumb" />
       </span>
-      <span className="switch-label">{label}</span>
+      <span className={hideLabel ? 'sr-only' : 'switch-label'}>{label}</span>
     </label>
   );
 }
@@ -157,6 +255,21 @@ export function Color({ value, onChange, onCommit, label }: {
   );
 }
 
+/**
+ * A number you set by dragging a bar — or, when the bar is fighting you, by
+ * clicking − and + to step it.
+ *
+ * The bar alone was the whole control and it asked for a pixel-accurate grab on
+ * a thumb the browser drew at whatever size it felt like. The buttons are the
+ * escape hatch: one click is exactly one `step`, so the fiddly last 20px of a
+ * drag becomes a click, and the value can be reached without any dragging at
+ * all. The bar stays for the coarse move — it is still the fastest way to cross
+ * a range — but it is no longer the only way across.
+ *
+ * The track and thumb are painted by us now rather than by the platform, so the
+ * thumb is a 16px target on a 22px-tall hit strip instead of the ~10px sliver
+ * Windows hands out. See `.slider` in app.css.
+ */
 export function Slider({ value, min, max, step, onChange, format, onPointerDown, onPointerUp }: {
   value: number;
   min: number;
@@ -168,21 +281,66 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
   onPointerDown?: () => void;
   onPointerUp?: () => void;
 }) {
+  /* A nudge is a whole gesture in one click, so it has to open AND close the
+   * history bracket. Closing it inline would seal the entry with the label the
+   * parent built from the OLD value — the label closes over the props of the
+   * render we were clicked in. Deferring to an effect (deliberately dep-less, so
+   * it runs after every render) means the commit fires on the next render, where
+   * `onPointerUp` is the freshly-built closure that knows the new value. This is
+   * the same trick the keyboard path gets for free from onBlur. */
+  const pendingCommit = useRef(false);
+  useEffect(() => {
+    if (!pendingCommit.current) return;
+    pendingCommit.current = false;
+    onPointerUp?.();
+  });
+
+  const nudge = (dir: 1 | -1) => {
+    // Snap from `min`, not from 0 — a range starting at 2 with step 1 is on a
+    // different grid than the integers.
+    const stepped = min + Math.round((value - min) / step + dir) * step;
+    const next = Math.min(max, Math.max(min, stepped));
+    if (next === value) return;
+    onPointerDown?.();
+    pendingCommit.current = true;
+    onChange(next);
+  };
+
   return (
     <div className="slider">
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        // A keyboard nudge has no pointerup to seal the group, so treat blur as
-        // the end of the gesture.
-        onBlur={onPointerUp}
-        onChange={(e) => onChange(Number(e.target.value))}
-      />
+      <div className="slider-row">
+        <button
+          type="button"
+          className="nudge"
+          aria-label="Less"
+          disabled={value <= min}
+          onClick={() => nudge(-1)}
+        >
+          −
+        </button>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onPointerDown={onPointerDown}
+          onPointerUp={onPointerUp}
+          // A keyboard nudge has no pointerup to seal the group, so treat blur as
+          // the end of the gesture.
+          onBlur={onPointerUp}
+          onChange={(e) => onChange(Number(e.target.value))}
+        />
+        <button
+          type="button"
+          className="nudge"
+          aria-label="More"
+          disabled={value >= max}
+          onClick={() => nudge(1)}
+        >
+          +
+        </button>
+      </div>
       <span>{format(value)}</span>
     </div>
   );

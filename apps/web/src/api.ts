@@ -1,4 +1,5 @@
 import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
+import type { FrameSettings } from '../../../packages/core/src/frame.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
 /** Filmstrip sheets. Mirrors the server's `Thumbs` — see apps/server/src/thumbs.ts. */
@@ -37,6 +38,12 @@ export interface Project {
   clips?: StoredClip[];
   /** Absent on audio, and on video whose filmstrip has not been built yet. */
   thumbs?: Thumbs;
+  /**
+   * The cover frame for the project's dashboard card. Absent on audio, and on
+   * video whose cover the server has not built yet — the card falls back to a
+   * mark. Built lazily by the listing endpoint; see the server's poster.ts.
+   */
+  posterUrl?: string;
   /** Caption look and placement. Absent on projects saved before captions existed. */
   captions?: CaptionSettings;
   /** Output speed multiplier. Absent on projects saved before speed existed. */
@@ -44,6 +51,11 @@ export interface Project {
   /** Cut settings, wire shape (maxGapMs 0 = keep every pause). Absent on projects
    *  saved before cut settings were persisted; the client falls back to defaults. */
   cut?: CutSettings;
+  /** Studio sound voice enhancer */
+  studioSound?: boolean;
+  /** Output frame: target resolution plus the zoom/pan that fills it. Absent on
+   *  projects that have never left the source's own resolution. */
+  frame?: FrameSettings;
   /** The background-music bed, if one has been imported. Absent otherwise. */
   music?: ProjectMusic;
   createdAt: string;
@@ -67,6 +79,41 @@ export interface ProjectMusic {
   durationSec?: number;
   /** Loop the track to fill its length — how a short song covers a long video. */
   loop?: boolean;
+
+  /**
+   * Provenance, present only on a bed found through the picker. Absent for an
+   * imported file, which owes nobody a credit. The catalogue behind the picker
+   * is almost entirely CC BY / BY-SA, so when `attribution` IS set the panel has
+   * to show it — publishing the video without it breaks the licence.
+   */
+  attribution?: string;
+  license?: string;
+  sourceLink?: string;
+}
+
+/** Which catalogue the music picker is searching. See server music-search.ts. */
+export type MusicProvider = 'openverse' | 'jamendo';
+
+/**
+ * One track from the picker, normalised across providers by the server.
+ *
+ * `previewUrl` is streamed straight from the provider's CDN into an <audio> —
+ * auditioning a track costs our server nothing, and only the one actually
+ * chosen is ever downloaded.
+ */
+export interface MusicResult {
+  id: string;
+  title: string;
+  artist: string;
+  durationSec: number;
+  previewUrl: string;
+  downloadUrl: string;
+  /** 'by', 'by-sa', 'cc0'… drives the badge. */
+  license: string;
+  /** The credit line this track requires. Empty when none is due. */
+  attribution: string;
+  link: string;
+  provider: MusicProvider;
 }
 
 /**
@@ -197,6 +244,8 @@ export interface Capabilities {
   asrModels: Array<{ id: string; label: string; hint: string; verbatim: boolean; verified: boolean }>;
   asrDefaults: AsrOptions;
   editDefaults: CutSettings;
+  /** Catalogues the music picker can search. Never empty — Openverse needs no key. */
+  musicProviders: MusicProvider[];
 }
 
 /** Everything the Export panel lets the user decide. */
@@ -208,6 +257,11 @@ export interface RenderSettings extends CutSettings {
   captions?: CaptionSettings;
   /** Output speed. Sent for the same reason as `captions` above. */
   speed?: number;
+  /** Studio sound voice enhancer */
+  studioSound?: boolean;
+  /** Live frame settings, sent for the same reason as `captions` above — an Export
+   *  fired mid-debounce should reframe to what is on screen, not to the last save. */
+  frame?: FrameSettings;
   /**
    * Live background-music settings, sent so a render reflects the panel even if
    * the debounced save has not yet landed. Omit to use the stored bed as-is;
@@ -276,6 +330,23 @@ export const api = {
   },
 
   /**
+   * Rename a project. A label only — nothing on disk is keyed by the name, so
+   * this moves no bytes and does not touch the edit.
+   */
+  rename: (id: string, name: string) =>
+    fetch(`/api/projects/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }).then(json<{ project: Project }>),
+
+  /**
+   * Delete a project and its media. Not undoable — confirm before calling.
+   */
+  remove: (id: string) =>
+    fetch(`/api/projects/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
+
+  /**
    * Append a clip to an existing project. Returns the updated project, and — when
    * the project was already transcribed — a `jobId` for transcribing the new clip
    * (poll it with `waitForJob`, then re-fetch the project for the added words).
@@ -319,11 +390,19 @@ export const api = {
 
   /**
    * Persist the edit state. Was `setDeleted`, which stopped being true once the
-   * caption style rode along with it and is now four things.
+   * caption style rode along with it and is now everything on the document that
+   * is not a word.
    */
   saveDoc: (
     id: string,
-    doc: { deletedIds: string[]; captions?: CaptionSettings; speed?: number; cut?: CutSettings },
+    doc: {
+      deletedIds: string[];
+      captions?: CaptionSettings;
+      speed?: number;
+      cut?: CutSettings;
+      studioSound?: boolean;
+      frame?: FrameSettings;
+    },
   ) =>
     fetch(`/api/projects/${id}/transcript`, {
       method: 'PATCH',
@@ -386,6 +465,36 @@ export const api = {
       }).then(json<Project>),
     remove: (id: string) =>
       fetch(`/api/projects/${id}/music`, { method: 'DELETE' }).then(json<Project>),
+
+    /**
+     * Search the web for a bed. Proxied through our server, so no provider key
+     * ever reaches the browser and the rate limit is the app's, not the user's.
+     */
+    search: (q: string, opts: { instrumental?: boolean; provider?: MusicProvider } = {}) => {
+      const params = new URLSearchParams({ q });
+      if (opts.instrumental) params.set('instrumental', '1');
+      if (opts.provider) params.set('provider', opts.provider);
+      return fetch(`/api/music/search?${params}`).then(
+        json<{ results: MusicResult[]; provider: MusicProvider }>,
+      );
+    },
+
+    /**
+     * Attach a searched track. The server fetches it — the browser never holds
+     * the bytes — and the credit fields ride along so they outlive the picker.
+     */
+    fromUrl: (id: string, track: MusicResult) =>
+      fetch(`/api/projects/${id}/music/url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: track.downloadUrl,
+          name: `${track.title} — ${track.artist}`,
+          attribution: track.attribution,
+          license: track.license,
+          link: track.link,
+        }),
+      }).then(json<Project>),
   },
 };
 

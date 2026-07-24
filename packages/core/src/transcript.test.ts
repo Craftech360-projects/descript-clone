@@ -19,13 +19,45 @@ function fromText(text: string): Transcript {
 const kept = (t: Transcript) => t.words.filter((w) => !w.deleted).map((w) => w.text).join(' ');
 
 test('detectFillers tags hesitations and leaves real words alone', () => {
-  const t = fromText('so um I think uh this works');
+  const t = fromText('well um I think uh this works');
   const found = detectFillers(t);
   assert.equal(found, 2);
   assert.deepEqual(
     t.words.filter((w) => w.isFiller).map((w) => w.text),
     ['um', 'uh'],
   );
+});
+
+test('a "so" that opens the utterance is a filler', () => {
+  const t = fromText('So we shipped it.');
+  detectFillers(t);
+  assert.deepEqual(t.words.filter((w) => w.isFiller).map((w) => w.text), ['So']);
+});
+
+test('a "so" mid-sentence is a real word and survives', () => {
+  // Every one of these breaks if the word is cut: degree modifier, then
+  // complementizer, then the "and so on" idiom.
+  const t = fromText('it was so big so that we so on and so forth kept it');
+  assert.equal(detectFillers(t), 0);
+});
+
+test('a leading "so" starting a new sentence is a filler, but a degree "so" is not', () => {
+  const t = fromText('That worked. So we moved on. So many people asked.');
+  detectFillers(t);
+  assert.deepEqual(
+    t.words.filter((w) => w.isFiller).map((w) => w.text),
+    ['So'],
+    'the second "So" is "so many" — load-bearing',
+  );
+});
+
+test('a "so" after a long pause opens an utterance even without punctuation', () => {
+  const t = fromText('right so we tried it');
+  // No sentence-ending mark, so only the beat before it can mark the restart.
+  t.words[1].start = t.words[0].end + 0.8;
+  t.words[1].end = t.words[1].start + 0.5;
+  detectFillers(t);
+  assert.deepEqual(t.words.filter((w) => w.isFiller).map((w) => w.text), ['so']);
 });
 
 test('detectFillers does not treat "like" as a filler', () => {

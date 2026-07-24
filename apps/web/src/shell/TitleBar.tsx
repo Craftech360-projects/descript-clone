@@ -16,6 +16,8 @@ interface Props {
   saveStatus: SaveStatus;
   onRetrySave: () => void;
   onToggleLibrary: () => void;
+  /** Back to the project grid — the screen the app starts on. */
+  onHome: () => void;
   canUndo: boolean;
   canRedo: boolean;
   undoLabel: string | null;
@@ -42,6 +44,7 @@ export default function TitleBar({
   saveStatus,
   onRetrySave,
   onToggleLibrary,
+  onHome,
   canUndo,
   canRedo,
   undoLabel,
@@ -66,6 +69,17 @@ export default function TitleBar({
           aria-label="Open library"
         >
           <Icon name="menu" size={18} />
+        </button>
+        {/* Beside the ☰, not on the wordmark: a logo that navigates is a web
+          * convention, and this is a window. The grid it goes back to is a real
+          * screen, so it gets a real control. */}
+        <button
+          className="icon tb-home"
+          onClick={onHome}
+          title="All projects"
+          aria-label="All projects"
+        >
+          <Icon name="grid" size={17} />
         </button>
         <img className="tb-logo" src="/jumpcut.png" alt="JumpCut" draggable={false} />
         {name && <span className="tb-sep" aria-hidden="true" />}

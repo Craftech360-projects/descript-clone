@@ -67,6 +67,22 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* :focus-visible so a mouse click does not leave the ring behind. */
 .switch input:focus-visible + .switch-track { box-shadow: var(--ring); }
 .switch.disabled { opacity: .5; cursor: not-allowed; }
+/* The switch alone, for a Section header where the row's own heading is already
+ * the visible label. The vertical padding is hit area, not looks: the track is
+ * 20px tall and a 20px target on the far edge of a row is a poke, so it grows
+ * to match the 38px row it sits in. */
+.switch.bare { flex: none; gap: 0; padding: 9px 0; }
+
+/* Present to assistive tech, painted nowhere. clip-path rather than
+ * display:none or visibility:hidden — both of those remove the element from the
+ * accessibility tree as well, which would defeat the entire point. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden; white-space: nowrap;
+}
 
 /* ---- segmented control ----
  * One question, three answers, 28px. This was `.radios` — a column of three
@@ -302,6 +318,16 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .lib-count { font-size: var(--t-micro); color: var(--faint); font-variant-numeric: tabular-nums; }
 
+/* The on-import chain, borrowing the rail's collapsible Field so it reads as one
+ * more drawer heading — ON IMPORT, CLIPS, SPEAKERS — until you open it. The
+ * padding matches .lib-head so the chevron sits where the other headings' text
+ * starts, and the switch rows below line up with the clip rows. */
+.lib-auto .field-c > summary { padding-left: var(--s-1); }
+.lib-auto .field-body { gap: var(--s-3); padding: 0 var(--s-1); }
+/* A hint that follows a switch is about THAT switch: pull it under its label and
+ * hold it there, so five settings do not read as five unrelated paragraphs. */
+.lib-auto .switch + .hint { margin-top: calc(var(--s-3) * -1 + var(--s-1)); }
+
 .import {
   width: 22px; height: 22px; display: grid; place-items: center;
   border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
@@ -312,29 +338,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .import:hover { border-color: var(--accent); color: var(--accent); }
 .import input { display: none; }
 
-.items { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
-.item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px var(--s-2); border-radius: var(--r-2); cursor: pointer; font-size: var(--t-ui);
-  border: 1px solid transparent;
-  transition: background var(--dur-1) var(--ease);
-}
-.item:hover { background: var(--hover); }
-.item.on {
-  /* Solid logo gold, warm-black label: the highlight IS the brand colour, not a
-   * dark wash of it. The label inherits --accent-fg; the icon flips to match. */
-  background: var(--accent); border-color: var(--accent);
-  color: var(--accent-fg);
-}
-.item .kind { color: var(--faint); flex-shrink: 0; display: flex; }
-.item.on .kind { color: var(--accent-fg); }
-.item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.item .st {
-  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em;
-  color: var(--faint); border: 1px solid var(--line); border-radius: 3px; padding: 1px var(--s-1);
-  flex-shrink: 0; font-weight: 600;
-}
-.item .st.done { color: var(--ok); border-color: var(--ok-line); }
+/* .items / .item* lived here: the drawer's media list. The list is gone — the
+ * Dashboard is where projects are chosen — and the rules went with it. .kind is
+ * kept below, on .clip-main, which is the only thing still drawing one. */
 
 /* ---- clips (the open project's source files, in play order) ---- */
 .clip-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
@@ -574,33 +580,67 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   padding: var(--s-5) var(--s-5) var(--s-3);
   min-height: 0; min-width: 0;
 }
+/**
+ * Grey, not black — and this is the one place in the app where a surface earns a
+ * non-neutral job.
+ *
+ * The output frame letterboxes its own picture in BLACK, and those bars are real:
+ * they are in the exported file. On a black stage they merged with the surround,
+ * so there was no way to see where the deliverable ended — a 1:1 square and a
+ * zoomed-out reel looked like the same amount of nothing. Grey makes the frame's
+ * edge legible without lying: everything black is in the file, everything grey is
+ * not.
+ */
 .stage {
   flex: 1; min-height: 0; width: 100%;
-  border-radius: var(--r-3); background: #000; overflow: hidden;
+  border-radius: var(--r-3); background: var(--mat); overflow: hidden;
   display: grid; place-items: center;
   box-shadow: var(--shadow-stage);
   /* The containing block for the caption layer. */
   position: relative;
 }
-/**
- * Absolute, not a grid item — and that is load-bearing.
+/* ---- the output frame ----
  *
- * `place-items: center` above stops the item stretching, which leaves the
- * implicit grid row sized `auto`, i.e. from the video's own aspect. `height:
- * 100%` then resolves against THAT row rather than against the stage, so at a
- * wide monitor the element came out taller than its own container (measured:
- * 483x361 inside a 483x348 stage) and `overflow: hidden` sliced the bottom off
- * the picture. object-fit was innocent the whole time: it was letterboxing
- * correctly, inside an element that had outgrown the box.
+ * The rectangle the render will produce. Its SIZE IS SET IN JS, in pixels, by
+ * containBox — deliberately, and this is the second time this stage has taught
+ * the same lesson: a percentage size here does not mean what it looks like.
  *
- * inset: 0 against the position:relative stage makes the element EXACTLY the
- * stage box at every rail width, so contain letterboxes against the real
- * bounds — whole frame, black on the rest.
+ * The CSS spelling would be `aspect-ratio` with `max-width: 100%; max-height:
+ * 100%`, and it silently does not work. With a definite width, the height is
+ * derived from the ratio and then clamped by max-height — but the width is never
+ * re-derived from the clamped height. Every ratio came out the full size of the
+ * stage, so a reel, a square and a 16:9 all previewed as the same rectangle.
+ * (The earlier trap was the same family: `place-items: center` leaves the grid
+ * row sized `auto`, so a percentage height resolves against the ROW rather than
+ * the stage, and the child outgrew its container — measured 483x361 inside a
+ * 483x348 stage.) Pixels from a measured stage are the only spelling that holds.
+ *
+ * overflow: hidden is the crop itself. It is the only thing standing between a
+ * zoomed picture and the rest of the app.
+ */
+.frame {
+  position: relative;
+  overflow: hidden;
+  /* Black, and it must stay black: this is what the render's `pad` fills the
+   * letterbox with, so the preview's bars and the file's bars are one colour.
+   * The stage around it is --mat precisely so the two are distinguishable. */
+  background: var(--void);
+  touch-action: none; /* the pan gesture owns the pointer */
+}
+.frame.pannable { cursor: grab; }
+.frame.pannable:active { cursor: grabbing; }
+
+/*
+ * No object-fit, and that is the point: `contain` preserves the SOURCE's aspect,
+ * which is exactly what reframing overrides. Size and offset come from JS
+ * (frameLayout) and are the same cover/zoom/pan the render's scale+crop does. At
+ * the default frame that resolves to the source's own aspect with no overflow,
+ * so this looks identical to the letterbox it replaced.
  */
 .stage video {
-  position: absolute; inset: 0;
+  position: absolute; left: 0; top: 0;
   width: 100%; height: 100%;
-  display: block; object-fit: contain;
+  display: block;
 }
 
 /* ---- caption overlay ----
@@ -692,7 +732,8 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   display: flex; flex-direction: column; gap: var(--s-5);
 }
 .panel .field > button,
-.panel .field-body > button { width: 100%; }
+.panel .field-body > button,
+.panel .sect-body > button { width: 100%; }
 
 /* ---- the Project panel's arrangement ----
  * The rail is WIDE and SHORT: 380-860px across, but capped at 46% of the column
@@ -702,26 +743,36 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * it overflowed by 3x down one axis while ~300px of the other went unused. That
  * mismatch was the whole problem; it is not fixed by making things smaller.
  *
- * So: two columns. Words on the left, picture on the right. Captions is the
- * only field that can treble in height, and it holds the right column alone —
- * which means the arrangement balances (394 vs 412) in exactly the state that
- * hurts, and the panel barely changes height when you switch captions on.
+ * So: two columns, and now they carry MEANING rather than volume — Edit on the
+ * left (what survives the cut), Output on the right (how it is delivered).
+ * The old split was Words | Render, which is nearly the same line, but Pauses
+ * had to be filed on the render side as ballast to stop that column collapsing
+ * whenever captions were off. Sections that are one row tall until you open
+ * them need no ballast, so the meaning gets its place back and the two columns
+ * are 3 rows and 4 rows — even in every state, because a closed row is a fixed
+ * height no matter what is behind it.
  *
- * It still scrolls, and it should: the honest total is ~530px and the script is
- * worth more than the 46% cap. The goal was a short scroll, not no scroll.
+ * The panel now measures ~150px closed instead of ~640. It does not scroll at
+ * the default rail size until you open something, which is the point: the
+ * closed panel is a status report you read, not a menu you navigate.
  */
 .panel-project {
   display: grid;
   grid-template-columns: 1fr;
-  /* Rows pack to the top when the panel is shorter than its box. Items are
-   * left to STRETCH on purpose: a .pcol taller than its content costs nothing
-   * (it stacks its fields from the top regardless), and it is what lets the
+  /* Rows pack to the top when the panel is shorter than its box. Groups are
+   * left to STRETCH on purpose: a .pgroup taller than its content costs nothing
+   * (it stacks its sections from the top regardless), and it is what lets the
    * divider below run the full height of the pair instead of stopping dead
    * wherever the shorter column happens to end. */
   align-content: start;
   gap: var(--s-5) var(--s-4);
 }
-.pcol { display: flex; flex-direction: column; gap: var(--s-5); min-width: 0; }
+.pgroup { display: flex; flex-direction: column; min-width: 0; }
+.pgroup-head {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
+  color: var(--faint); font-weight: 700;
+  padding-bottom: var(--s-2);
+}
 
 /* 540, not a viewport breakpoint: below this each column falls under ~250px and
  * "Remove 3 false starts" stops fitting on its button. The default rail is 560,
@@ -729,13 +780,96 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * this degrades to the single stack, in the same order. */
 @container rail (min-width: 540px) {
   .panel-project { grid-template-columns: 1fr 1fr; }
-  .panel-project > .advanced { grid-column: 1 / -1; }
   /* A hairline, because on black that is what a boundary is — a 16px gap
    * between two columns of controls is not a boundary, it is a coincidence.
    * --line, not --line-soft: soft is for dividers inside one group, and at
    * #171717 on #0b0b0b this one simply did not render. */
-  .pcol + .pcol { border-left: 1px solid var(--line); padding-left: var(--s-4); }
+  .pgroup + .pgroup { border-left: 1px solid var(--line); padding-left: var(--s-4); }
 }
+
+/* ---- a rail section ----
+ * A row that states its value, and opens to reveal the controls behind it. See
+ * the note on Section in ui/Field.tsx for why the value is there at all; this
+ * is only how it is painted.
+ *
+ * Rows are separated by hairlines rather than by gaps. Seven groups floating in
+ * 24px of space read as seven unrelated widgets; ruled, they read as one list
+ * with seven entries, which is what a status report is. The rule is --line-soft
+ * because it divides items INSIDE a group — the --line between the columns is
+ * the boundary that actually separates two things.
+ */
+.sect { border-top: 1px solid var(--line-soft); min-width: 0; }
+.pgroup > .sect:last-child { border-bottom: 1px solid var(--line-soft); }
+
+.sect-head {
+  display: flex; align-items: center; gap: var(--s-2);
+  /* Pulled out to the column edge and padded back in, so the hover fill reads
+   * as a ROW of a list rather than as a pill floating inside one. */
+  margin-inline: calc(var(--s-2) * -1);
+  padding-inline: var(--s-2);
+  border-radius: var(--r-2);
+  transition: background var(--dur-1) var(--ease);
+}
+.sect-head:hover { background: var(--hover); }
+
+/* The disclosure is the whole row minus the switch: a 38px target spanning the
+ * column, not a 14px caret you have to hit. It has to unset most of the base
+ * button chrome — it is a button for its semantics and its keyboard behaviour,
+ * not for its looks. */
+.sect-disc {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 10px 0;
+  background: none; border: 1px solid transparent; border-radius: var(--r-2);
+  color: inherit; font-weight: inherit; text-align: left;
+}
+.sect-disc:hover:not(:disabled),
+.sect-disc:active:not(:disabled) { background: none; border-color: transparent; }
+.sect-disc:focus-visible { box-shadow: var(--ring); }
+
+/* Drawn, not the ▸ glyph — same reason as ui/Icon.tsx: borders give exact
+ * geometry at any size and depend on no font at all. */
+.sect-caret {
+  flex: none; width: 0; height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  color: var(--faint);
+  transition: transform var(--dur-2) var(--ease);
+}
+.sect.open .sect-caret { transform: rotate(90deg); }
+
+/* Gold only while the section is OPEN. It is the one place a rail row earns the
+ * accent: among seven identical rows, the lit mark is the one whose controls
+ * are on screen — an element state, which is exactly what tokens.css reserves
+ * the gold for. Closed, the marks are --faint and read as a texture you scan. */
+.sect-icon { flex: none; color: var(--faint); transition: color var(--dur-1) var(--ease); }
+.sect-head:hover .sect-icon { color: var(--dim); }
+.sect.open .sect-icon { color: var(--accent); }
+
+.sect-name { flex: none; font-size: var(--t-ui); color: var(--text); font-weight: 500; }
+
+/* The value: right-aligned, quiet, and the FIRST thing to give up room. The
+ * name is a fixed label and must never truncate; the value is a readout and a
+ * clipped filename still tells you a bed is loaded. */
+.sect-value {
+  margin-left: auto; min-width: 0; padding-left: var(--s-2);
+  font-size: var(--t-small); color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sect-body {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding: var(--s-1) 0 var(--s-4);
+}
+/* Load-bearing. [hidden] is a UA `display: none`, and the rule above sets
+ * `display: flex` at equal specificity but later in the cascade — without this
+ * every closed section would render in full AND stay in the tab order. */
+.sect-body[hidden] { display: none; }
+/* Two plain Fields stacked inside Advanced need a beat between them; controls
+ * within one Field do not. */
+.sect-body > .field + .field { margin-top: var(--s-3); }
 
 /* The one big number: what you are actually making. */
 .hero {
@@ -863,8 +997,66 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   padding: var(--s-2) 10px; border-radius: var(--r-2);
 }
 
+/* ---- the number-setting control ----
+ *
+ * A bar flanked by − and +. The bar is for crossing the range; the buttons are
+ * for landing on a value, which is the part a drag is bad at. Everything here
+ * is sized for the pointer rather than for the paint: the input is 22px tall so
+ * the whole strip is grabbable even though the track reads as 8px, and the
+ * buttons are 26px squares — small enough not to shout, big enough to hit.
+ *
+ * The track/thumb are hand-painted because the platform's are not negotiable:
+ * `accent-color` recolours the native widget but leaves Windows' ~10px thumb,
+ * which is the thing that was hard to grab. Both vendor prefixes are required
+ * and CANNOT be merged into one rule — an unknown pseudo-element invalidates
+ * the entire selector list, so a shared rule would apply in neither engine. */
 .slider { display: flex; flex-direction: column; gap: var(--s-1); }
-.slider span { font-size: var(--t-small); color: var(--dim); font-variant-numeric: tabular-nums; }
+.slider-row { display: flex; align-items: center; gap: var(--s-2); }
+.slider span {
+  font-size: var(--t-small); color: var(--dim);
+  font-variant-numeric: tabular-nums; text-align: center;
+}
+
+.slider .nudge {
+  flex: 0 0 auto;
+  width: 26px; height: 26px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; line-height: 1; color: var(--dim);
+}
+.slider .nudge:hover:not(:disabled) { color: var(--accent); }
+.slider .nudge:disabled { opacity: .3; }
+
+.slider input[type='range'] {
+  flex: 1 1 auto; min-width: 0; width: auto;
+  -webkit-appearance: none; appearance: none;
+  height: 22px; background: transparent; cursor: pointer;
+}
+.slider input[type='range']::-webkit-slider-runnable-track {
+  height: 8px; box-sizing: border-box; border-radius: 999px;
+  background: var(--sunk); border: 1px solid var(--line);
+}
+.slider input[type='range']::-moz-range-track {
+  height: 8px; box-sizing: border-box; border-radius: 999px;
+  background: var(--sunk); border: 1px solid var(--line);
+}
+/* -4px centres a 16px thumb on the 8px track. Firefox centres its own. */
+.slider input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; margin-top: -4px;
+  border: none; border-radius: 50%; background: var(--accent);
+  transition: transform var(--dur-1) var(--ease);
+}
+.slider input[type='range']::-moz-range-thumb {
+  width: 16px; height: 16px;
+  border: none; border-radius: 50%; background: var(--accent);
+  transition: transform var(--dur-1) var(--ease);
+}
+.slider input[type='range']:hover::-webkit-slider-thumb,
+.slider input[type='range']:active::-webkit-slider-thumb { transform: scale(1.15); }
+.slider input[type='range']:hover::-moz-range-thumb,
+.slider input[type='range']:active::-moz-range-thumb { transform: scale(1.15); }
+.slider input[type='range']:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring); }
+.slider input[type='range']:focus-visible::-moz-range-thumb { box-shadow: var(--ring); }
 
 /* Custom filler words: a chip editor. The field text input is full-width by
  * default, so it flexes here and the Add button sits beside it rather than
@@ -874,6 +1066,17 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .chip-input { display: flex; gap: var(--s-1); }
 .chip-input input[type='text'] { flex: 1; min-width: 0; }
 .chip-input button { flex-shrink: 0; }
+
+/* Custom frame size. Baseline-aligned on the × so the two fields read as one
+ * dimension rather than as two unrelated numbers. */
+.dim-input { display: flex; align-items: flex-end; gap: var(--s-1); }
+.dim-input label { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dim-input label span { font-size: var(--t-small); color: var(--filler); }
+.dim-input input { width: 100%; min-width: 0; }
+.dim-x { padding-bottom: 6px; color: var(--filler); }
+/* Fit and Fill sit side by side: they are the two ends of one decision. */
+.frame-actions { display: flex; gap: var(--s-1); }
+.frame-actions button { flex: 1; }
 
 .chips { display: flex; flex-wrap: wrap; gap: var(--s-1); list-style: none; padding: 0; margin: 0; }
 .chip {
@@ -914,6 +1117,78 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .music-file .font-actions { flex: none; }
 .music-file .link.danger { margin-left: 0; }
 
+/* The two ways to get a bed. Browsing leads as the full-width button because it
+ * is the one that needs no preparation; importing a file you already have reads
+ * as the quiet link beside it. */
+.music-sources { display: flex; align-items: baseline; gap: var(--s-2); }
+.music-sources > button:first-child { flex: 1; }
+.music-sources .link {
+  flex: none; padding: 0; border: none; background: none; border-radius: 0;
+  font-size: var(--t-small); color: var(--accent); cursor: pointer;
+}
+.music-sources .link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.music-sources .link:disabled { opacity: var(--disabled-opacity); cursor: default; }
+
+/* The search-the-web picker. Inset and rule-topped so it reads as a drawer that
+ * opened inside the field, rather than more settings that were always there. */
+.music-browser {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  margin-top: var(--s-2); padding-top: var(--s-2);
+  border-top: 1px solid var(--line);
+}
+.music-search { display: flex; gap: var(--s-2); }
+.music-search input { flex: 1; min-width: 0; }
+.music-search button { flex: none; }
+
+/* Capped and scrolled: twenty hits would otherwise push the volume and length
+ * controls — the things you reach for straight after choosing — off the rail. */
+.music-results {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 15rem; overflow-y: auto;
+}
+.music-hit {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) var(--s-1);
+  border-radius: var(--r-1);
+}
+.music-hit:hover { background: var(--hover); }
+.music-hit.on { background: var(--hover); }
+
+.music-play {
+  flex: none; width: 1.75rem; height: 1.75rem; padding: 0;
+  display: grid; place-items: center;
+  font-size: 0.7rem; line-height: 1; cursor: pointer;
+}
+.music-hit.on .music-play { color: var(--accent); }
+
+.music-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.music-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--t-small);
+}
+.music-sub {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--t-micro); color: var(--faint);
+}
+/* The licence rides in the same line as the artist rather than as a badge of its
+ * own: it matters at the moment of choosing, but not more than who made it. */
+.music-lic { font-style: normal; margin-left: var(--s-1); opacity: 0.75; }
+
+.music-empty {
+  margin: 0; padding: 0 var(--s-1);
+  font-size: var(--t-small); color: var(--faint); line-height: 1.6;
+}
+
+/* The credit line, inside the warn box. Monospace and selectable because its
+ * whole job is to be copied verbatim into a video description. */
+.music-credit {
+  display: block; margin: var(--s-1) 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-micro); line-height: 1.5;
+  user-select: all; word-break: break-word;
+}
+
 /* A swatch, a name, and the hex — the hex because "which black is that" is a
  * real question once a stroke and a backdrop are both in play. */
 .color-row {
@@ -931,38 +1206,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 
 /* Engine internals live here. Native <details>: full keyboard + SR support, no JS. */
-.advanced { border-top: 1px solid var(--line); padding-top: var(--s-3); }
-.advanced summary {
-  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .1em;
-  color: var(--faint); font-weight: 700; cursor: pointer; list-style: none;
-  display: flex; align-items: center; gap: var(--s-1);
-}
-.advanced summary::-webkit-details-marker { display: none; }
-/* A drawn triangle, not the ▸ glyph — same reason as ui/Icon.tsx. Borders give
- * exact geometry at any size and depend on no font at all. */
-.advanced summary::before {
-  content: ''; width: 0; height: 0;
-  border-left: 4px solid currentColor;
-  border-top: 3.5px solid transparent;
-  border-bottom: 3.5px solid transparent;
-  transition: transform var(--dur-1) var(--ease);
-}
-.advanced[open] summary::before { transform: rotate(90deg); }
-.advanced summary:hover { color: var(--dim); }
-/* Advanced spans the full panel, so its two fields sit side by side there
- * rather than adding another ~260px to the scroll. Single column when the rail
- * is narrow — see the container query above. */
-.adv-grid {
-  display: grid; grid-template-columns: 1fr;
-  gap: var(--s-4);
-  margin-top: var(--s-3);
-}
-/* Must live HERE, after the base rule, not up with the other rail queries: a
- * container query carries no extra specificity, so from further up the file the
- * single-column default below it simply won out and this never applied. */
-@container rail (min-width: 540px) {
-  .adv-grid { grid-template-columns: 1fr 1fr; align-items: start; }
-}
+/* `.advanced` and `.adv-grid` lived here. Advanced is an ordinary Section now —
+ * see `.sect` above — so its bespoke disclosure and the full-width two-up grid
+ * it needed to stay off the scroll both went with it. */
 
 .readout {
   display: flex; justify-content: space-between;
@@ -1039,6 +1285,19 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * whose value ends up in the rendered file. So it lights up the way .toggle.on
  * does, rather than sitting quiet and letting you forget you set it. */
 .tp-speed select.fast { border-color: var(--accent); color: var(--text); }
+
+/* The hand-typed speed, sized to sit exactly where the menu was so the bar does
+ * not jump as you swap between them. The spinners go: this is a two-keystroke
+ * field, and 16px of arrows would take a quarter of it. */
+.tp-speed-input {
+  width: 68px; padding: 5px 8px;
+  font-size: var(--t-small); font-variant-numeric: tabular-nums;
+  color: var(--text);
+  border-color: var(--accent);
+  -moz-appearance: textfield;
+}
+.tp-speed-input::-webkit-outer-spin-button,
+.tp-speed-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
 .tp-toggles { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
 /* A switch, not a lit button. The button stays flat in both states — the knob
@@ -1212,3 +1471,267 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   background: var(--accent); border-radius: 1px; opacity: .8;
 }
 .tl-music-handle:hover::after { opacity: 1; }
+
+/* ===================== dashboard ·  the start screen =====================
+ *
+ * What the app opens on. The rules of the theme hold here exactly as they do in
+ * the workspace: neutral black surfaces, structure carried by hairlines and
+ * space, gold spent only on elements — the + disc, a lit border, the pill that
+ * says a project has a script. No gradients, no shadows on black.
+ *
+ * The one thing this screen does that no other does is give the content room:
+ * the workspace is a five-column grid fighting for every pixel, and a start
+ * screen that behaves the same way reads as a tool that never rests.
+ */
+.dash {
+  height: 100%; overflow-y: auto;
+  background: var(--bg);
+  position: relative;
+}
+.dash-file { display: none; }
+
+/* The wordmark and the grid share one measure. Two left edges a hundred pixels
+ * apart is the single most visible way a centred page can look unconsidered. */
+.dash-top,
+.dash-body { max-width: 1180px; margin: 0 auto; padding-left: var(--s-6); padding-right: var(--s-6); }
+
+.dash-top {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding-top: var(--s-5); padding-bottom: var(--s-5);
+}
+.dash-logo { height: 22px; width: auto; display: block; user-select: none; }
+.dash-tag {
+  color: var(--faint); font-size: var(--t-ui);
+  padding-left: var(--s-3); border-left: 1px solid var(--line);
+}
+
+.dash-body { padding-top: var(--s-5); padding-bottom: var(--s-7); }
+
+.dash-head {
+  display: flex; align-items: baseline; gap: var(--s-3);
+  margin-bottom: var(--s-5);
+}
+.dash-head h1 { font-size: var(--t-hero); font-weight: 600; letter-spacing: -.03em; }
+.dash-count {
+  font-size: var(--t-ui); color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* auto-fill, not auto-fit: with two projects the cards keep their size and the
+ * row ends, rather than stretching to fill a 1180px window and making two
+ * projects look like a design for two projects. */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  gap: var(--s-4);
+}
+.dash-grid.busy { pointer-events: none; opacity: .6; }
+
+.dash-empty {
+  margin-top: var(--s-5); max-width: 46ch;
+  color: var(--faint); font-size: var(--t-ui); line-height: 1.6;
+}
+
+/* ---- a project card ----
+ * A button, not a div with a click handler: this is the primary navigation of
+ * the whole app and it has to be reachable by keyboard, focusable, and
+ * announced as an action. Positioned, so the status pill can sit over the
+ * poster without taking part in the stack below it. */
+.dcard {
+  position: relative;
+  display: flex; flex-direction: column; align-items: stretch; gap: 0;
+  width: 100%;
+  padding: 0; text-align: left;
+  background: var(--chrome);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.dcard:hover:not(:disabled) { background: var(--hover); border-color: var(--line-strong); }
+.dcard:focus-visible { box-shadow: var(--ring); }
+/* Mid-rename the card is a form, not a target: it does not light up, and the
+ * pointer stays a pointer rather than promising a click that would open it. */
+.dcard.renaming { cursor: default; border-color: var(--accent); background: var(--chrome); }
+.dcard.renaming:hover .dc-poster img { transform: none; }
+
+/* True black behind the frame — a poster is a piece of picture, and the theme
+ * does not tint picture. 16:9 regardless of the source so the grid stays a grid
+ * when a vertical video lands in it; the frame letterboxes inside. */
+.dc-poster {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--void);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+.dc-poster img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+  /* Nudged, not zoomed: a hair of scale on hover reads as the card lifting
+   * without the frame ever losing its edges. */
+  transition: transform var(--dur-3) var(--ease-out);
+}
+.dcard:hover .dc-poster img { transform: scale(1.04); }
+.dc-poster-blank {
+  display: grid; place-items: center;
+  color: var(--faint);
+  background: var(--sunk);
+}
+
+.dc-body { display: flex; flex-direction: column; gap: 5px; padding: 11px var(--s-3) var(--s-3); }
+.dc-name {
+  font-size: var(--t-base); font-weight: 550; color: var(--text);
+  letter-spacing: -.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dc-meta {
+  display: flex; align-items: center; gap: 7px;
+  font-size: var(--t-small); color: var(--faint);
+  white-space: nowrap; overflow: hidden;
+}
+.dc-dur { color: var(--dim); font-variant-numeric: tabular-nums; }
+.dc-dot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; flex-shrink: 0; opacity: .7; }
+
+/* Over the poster, on a plate: the status belongs to the picture, and putting it
+ * in the body would push the name down a line for a two-word tag. The plate is
+ * opaque because a frame of video is any colour it likes.
+ *
+ * Top-LEFT, because the top-right corner is where a remove control goes and a
+ * card cannot have two things fighting for it. The pill is a label you read; the
+ * × is a control you aim at, and aim beats reading order here. */
+.dc-pill {
+  position: absolute; top: var(--s-2); left: var(--s-2);
+  padding: 2px 7px; border-radius: var(--r-full);
+  font-size: var(--t-micro); font-weight: 600; letter-spacing: .02em;
+  color: var(--dim); background: var(--sunk); border: 1px solid var(--line);
+}
+
+/* ---- renaming and removing a project ----
+ *
+ * The slot exists because .dcard is a <button>, and a button can hold neither
+ * another button nor a text field. It is the grid cell; the card, its two
+ * actions and the confirmation are siblings inside it, so nothing has to
+ * swallow anything else's clicks. */
+.dcard-slot { position: relative; display: flex; }
+.dcard-slot > .dcard { flex: 1; min-width: 0; }
+
+/* Hidden until the card is under the pointer or something in it has focus —
+ * a grid of covers should read as the work, not as a row of delete buttons.
+ * Keyboard users get it via :focus-within, which is why this is not :hover
+ * alone. Top-right; the status pill has the other corner. */
+.dc-acts {
+  position: absolute; top: var(--s-2); right: var(--s-2);
+  display: flex; gap: var(--s-1);
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease);
+}
+.dcard-slot:hover .dc-acts,
+.dcard-slot:focus-within .dc-acts { opacity: 1; }
+
+.dc-act {
+  display: grid; place-items: center;
+  width: 24px; height: 24px; padding: 0;
+  border-radius: var(--r-full);
+  color: var(--dim); background: var(--sunk); border: 1px solid var(--line);
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.dc-act:hover { color: var(--text); border-color: var(--line-strong); background: var(--sunk); }
+/* The one destructive control on this screen, and the only place the card
+ * spends the cut tone. It stays quiet at rest — hovering is what admits it. */
+.dc-x:hover { color: var(--danger); border-color: var(--danger); background: var(--sunk); }
+
+/* The name, in place. Sized and weighted exactly like the .dc-name it replaces,
+ * so committing the rename does not make the card jump. */
+.dc-rename {
+  width: 100%; padding: 0 6px; margin: -1px -7px;
+  font-size: var(--t-base); font-weight: 550; letter-spacing: -.01em;
+  color: var(--text); background: var(--sunk);
+  border: 1px solid var(--accent); border-radius: var(--r-1);
+  line-height: 1.45;
+}
+
+/* The confirmation is the card. A modal would ask "are you sure?" about a
+ * project it cannot show you; this covers the very poster you are deciding
+ * about, and only that one card goes inert while you decide. */
+.dc-confirm {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s-3); padding: var(--s-3);
+  text-align: center;
+  border-radius: var(--r-3);
+  background: color-mix(in srgb, var(--void) 92%, transparent);
+  border: 1px solid var(--danger);
+}
+.dc-confirm p { font-size: var(--t-small); line-height: 1.5; color: var(--text); }
+.dc-confirm-row { display: flex; gap: var(--s-2); }
+.dc-confirm .danger {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+}
+.dc-confirm .danger:hover:not(:disabled) {
+  color: var(--danger); border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* ---- the new-project tile ----
+ * The one dashed border in the app, and it earns it: dashed means "this is a
+ * slot waiting to be filled", which is exactly the promise. Everything else on
+ * the screen is a solid hairline. */
+.dcard-new {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s-2); min-height: 190px; padding: var(--s-5) var(--s-3);
+  text-align: center;
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+}
+.dcard-new:hover:not(:disabled) { background: var(--hover); border-color: var(--accent); }
+.dcn-disc {
+  display: grid; place-items: center;
+  width: 52px; height: 52px; border-radius: 50%;
+  color: var(--accent);
+  background: var(--sunk); border: 1px solid var(--line);
+  transition: background var(--dur-2) var(--ease), color var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease);
+}
+.dcard-new:hover:not(:disabled) .dcn-disc {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+}
+.dcn-label { font-size: var(--t-base); font-weight: 550; color: var(--text); margin-top: var(--s-1); }
+.dcn-sub { font-size: var(--t-small); color: var(--faint); }
+
+/* The import in flight, holding the slot its card will take. Not a spinner in a
+ * corner: the file becomes a project, so it occupies a project's shape from the
+ * moment you drop it. */
+.dcard-busy { cursor: default; }
+.dcb-bar {
+  width: 100%; height: 3px; border-radius: var(--r-full);
+  background: var(--sunk); overflow: hidden;
+}
+.dcb-bar i {
+  display: block; height: 100%;
+  background: var(--accent);
+  transition: width var(--dur-3) var(--ease);
+}
+
+/* ---- drop target ----
+ * Inert until a file is over the window, and then only an outline: a scrim that
+ * dims the grid would hide the thing you are adding to. */
+.dash-drop {
+  position: fixed; inset: var(--s-3);
+  border: 1px dashed var(--accent); border-radius: var(--r-4);
+  display: grid; place-items: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease);
+  z-index: var(--z-hud);
+}
+.dash.dropping .dash-drop { opacity: 1; }
+.dash-drop span {
+  padding: 7px 14px; border-radius: var(--r-full);
+  background: var(--accent); color: var(--accent-fg);
+  font-size: var(--t-ui); font-weight: 600;
+}
+
+/* Back to the grid, from the title bar. Sits with the ☰ because it is the same
+ * kind of thing: where you are, rather than what you are doing. */
+.tb-home { margin-left: -2px; }

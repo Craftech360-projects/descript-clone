@@ -10,6 +10,7 @@ import {
   type DocPatch,
 } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
+import { frameLabel, normalizeFrame, type FrameSettings } from '../../../../packages/core/src/frame.ts';
 import {
   breakCoalescing,
   canRedo,
@@ -117,10 +118,19 @@ export function loadDoc(
   cut: CutSettings,
   captions?: CaptionSettings,
   speed?: number,
+  studioSound?: boolean,
+  frame?: Partial<FrameSettings> | null,
 ): void {
   savedRev = 0;
   set({
-    doc: docFromTranscript(transcript, cut, captions, clampSpeed(speed)),
+    doc: docFromTranscript(
+      transcript,
+      cut,
+      captions,
+      clampSpeed(speed),
+      Boolean(studioSound),
+      normalizeFrame(frame),
+    ),
     history: emptyHistory(),
     selection: null,
     flash: [],
@@ -250,6 +260,12 @@ function commitCut(cut: CutSettings): void {
   apply({ kind: 'cut', prev: doc.cut, next: cut }, { label: 'Change edit settings' });
 }
 
+export function updateStudioSound(studioSound: boolean): void {
+  const { doc } = state;
+  if (!doc || doc.studioSound === studioSound) return;
+  apply({ kind: 'studioSound', prev: doc.studioSound, next: studioSound }, { label: studioSound ? 'Enable studio sound' : 'Disable studio sound' });
+}
+
 // ── speed ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -310,6 +326,40 @@ export function endCaptionDrag(label: string): void {
   // Rewind, then commit once, so the single entry's inverse is the pre-drag value.
   set({ doc: { ...doc, captions: prev } });
   apply({ kind: 'captions', prev, next }, { label });
+}
+
+// ── output frame (transient-aware) ────────────────────────────────────────────
+//
+// Panning the picture around the monitor and dragging the zoom slider are both
+// continuous gestures, so they take the same treatment as the caption drag above:
+// live updates during the gesture, one history entry when it ends.
+
+let transientFrame: FrameSettings | null = null;
+
+export function beginFrameDrag(): void {
+  if (state.doc) transientFrame = state.doc.frame;
+}
+
+export function updateFrame(frame: FrameSettings): void {
+  const { doc } = state;
+  if (!doc) return;
+  if (transientFrame) {
+    set({ doc: { ...doc, frame, rev: doc.rev + 1 } });
+    return;
+  }
+  apply({ kind: 'frame', prev: doc.frame, next: frame }, { label: frameLabel(frame) });
+}
+
+export function endFrameDrag(label: string): void {
+  const { doc } = state;
+  const prev = transientFrame;
+  transientFrame = null;
+  if (!doc || !prev) return;
+  const next = doc.frame;
+  if (isEmptyPatch({ kind: 'frame', prev, next })) return;
+
+  set({ doc: { ...doc, frame: prev } });
+  apply({ kind: 'frame', prev, next }, { label });
 }
 
 // ── bulk actions, client-side ─────────────────────────────────────────────────
@@ -422,6 +472,124 @@ export function restoreAll(): number {
     nextSelection: null,
   });
   return ids.size;
+}
+
+// ── the on-import chain ───────────────────────────────────────────────────────
+
+/**
+ * The document half of "process this the moment it lands".
+ *
+ * Transcription is not here: it is a server job, it has to finish before there
+ * is a document to touch at all, and it is the caller's to run. Everything after
+ * it — cut the hesitations, cap the pauses, set the speed, turn on the enhancer,
+ * turn on the captions — is a pure edit to the doc, so it belongs in the store
+ * where it is undoable and cannot race a save.
+ *
+ * They land as ONE batch patch, and that is the point. The user made one
+ * decision ("process my imports"), so backing it out has to be one Cmd+Z. Five
+ * separate commits would make undo a guessing game about how many presses
+ * returns you to the raw transcript.
+ *
+ * Every field is nullable and null means LEAVE IT ALONE — not "set it false".
+ * A step the user switched off must not quietly turn its setting off for them.
+ */
+export interface ImportChain {
+  /** Sweep filler words. null leaves them, and any existing flags, untouched. */
+  fillers: { includeDiscourseMarkers: boolean; customWords: string[] } | null;
+  /**
+   * Confine the filler sweep to one clip's words. Null sweeps the document.
+   *
+   * For appending a clip to a project you have already been editing: without it
+   * the sweep would run over the older material too and re-cut every filler you
+   * had restored by hand, which is a silent, destructive surprise for a gesture
+   * that was only meant to add footage.
+   */
+  fillersInClipId?: string | null;
+  /** Cap every silence at this many ms. Infinity is "keep every pause". */
+  maxGapMs: number | null;
+  /** Output speed multiplier. Clamped here, since it comes from stored settings. */
+  speed: number | null;
+  studioSound: boolean | null;
+  captions: boolean | null;
+}
+
+export interface ImportChainResult {
+  /** Filler words cut. 0 when the step was off or found nothing. */
+  fillers: number;
+  /** What actually changed, in order, for the notice. Empty = nothing to do. */
+  applied: string[];
+}
+
+export function runImportChain(chain: ImportChain): ImportChainResult {
+  const { doc } = state;
+  const result: ImportChainResult = { fillers: 0, applied: [] };
+  if (!doc) return result;
+
+  // Every sub-patch is built against the SAME base doc, which is safe only
+  // because they touch disjoint parts of it — words, cut, speed, studioSound,
+  // captions. Two patches over one field would need the intermediate doc.
+  const patches: DocPatch[] = [];
+
+  if (chain.fillers) {
+    const flagged = findFillerIds(
+      doc.words,
+      chain.fillers.includeDiscourseMarkers,
+      chain.fillers.customWords,
+    );
+    const only = chain.fillersInClipId ?? null;
+    const ids = new Set(
+      doc.words
+        .filter((w) => flagged.has(w.id) && !w.deleted && (only === null || w.clipId === only))
+        .map((w) => w.id),
+    );
+    if (ids.size > 0) {
+      // Tag AND delete, exactly as removeFillers does, so the script paints them
+      // as the class of word they are rather than as an anonymous cut.
+      patches.push(buildWordPatch(doc.words, ids, { deleted: true, isFiller: true }));
+      result.fillers = ids.size;
+      result.applied.push(`cut ${ids.size} filler word${ids.size === 1 ? '' : 's'}`);
+    }
+  }
+
+  if (chain.maxGapMs !== null && doc.cut.maxGapMs !== chain.maxGapMs) {
+    patches.push({ kind: 'cut', prev: doc.cut, next: { ...doc.cut, maxGapMs: chain.maxGapMs } });
+    result.applied.push(
+      chain.maxGapMs === Infinity ? 'kept every pause' : `capped pauses at ${chain.maxGapMs}ms`,
+    );
+  }
+
+  if (chain.speed !== null) {
+    // Through clampSpeed, not straight in: this arrives from localStorage, where
+    // a hand-edited 0 would reach the render as setpts=PTS/0 and atempo=0.
+    const speed = clampSpeed(chain.speed);
+    if (doc.speed !== speed) {
+      patches.push({ kind: 'speed', prev: doc.speed, next: speed });
+      result.applied.push(`set the speed to ${formatSpeed(speed)}`);
+    }
+  }
+
+  if (chain.studioSound !== null && doc.studioSound !== chain.studioSound) {
+    patches.push({ kind: 'studioSound', prev: doc.studioSound, next: chain.studioSound });
+    result.applied.push(chain.studioSound ? 'turned on Studio Sound' : 'turned off Studio Sound');
+  }
+
+  if (chain.captions !== null && doc.captions.enabled !== chain.captions) {
+    patches.push({
+      kind: 'captions',
+      prev: doc.captions,
+      next: { ...doc.captions, enabled: chain.captions },
+    });
+    result.applied.push(chain.captions ? 'turned on captions' : 'turned off captions');
+  }
+
+  if (patches.length === 0) return result;
+
+  apply({ kind: 'batch', patches }, {
+    // The label is what Cmd+Z announces, so it says what the whole batch was.
+    label: 'Auto clean-up',
+    nextSelection: null,
+  });
+  return result;
 }
 
 // ── undo / redo ───────────────────────────────────────────────────────────────
@@ -544,9 +712,15 @@ async function pump(): Promise<void> {
   }
 }
 
-/** Save now — before a render, on Ctrl+S, on unload. */
-export function flushSave(): void {
-  void pump();
+/**
+ * Save now — before a render, on Ctrl+S, on unload, on leaving the editor.
+ *
+ * Returns the write so a caller about to DROP the document (clearDoc) can await
+ * it; pump reports failure through saveStatus and never rejects, so neither does
+ * this, and the fire-and-forget callers need no handler.
+ */
+export function flushSave(): Promise<void> {
+  return pump();
 }
 
 export function retrySave(): void {

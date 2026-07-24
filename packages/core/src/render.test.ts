@@ -316,7 +316,7 @@ test('music adds its own input and mixes under the program without cutting it', 
   assert.ok(!cut.includes('volume='), 'music gain is not on the source cut chain');
   // amix ties length to the program (duration=first) and keeps the voice at unity
   // (normalize=0) — the two options that make this a bed rather than a 50/50 mix.
-  assert.ok(/\[bgprog\]\[bgm\]amix=inputs=2:duration=first:normalize=0\[outa\]/.test(filterScript), filterScript);
+  assert.ok(/\[bgprog\]\[bgm\]amix=inputs=2:duration=first:normalize=0,/.test(filterScript), filterScript);
 });
 
 test('the program audio feeds the mix, not the output, once music is present', () => {
@@ -363,7 +363,7 @@ test('music mixes onto an audio-only project too', () => {
     bgMusic: { input: 'song.mp3', volume: 0.3, durationSec: 5 },
   });
   assert.ok(!filterScript.includes('[0:v]'), 'still no video');
-  assert.ok(/amix=inputs=2:duration=first:normalize=0\[outa\]/.test(filterScript), filterScript);
+  assert.ok(/amix=inputs=2:duration=first:normalize=0,/.test(filterScript), filterScript);
   assert.deepEqual(args.filter((a, i) => args[i - 1] === '-map'), ['[outa]']);
 });
 
@@ -394,5 +394,171 @@ test('a sequence mixes music under the joined program, at the clip-count input i
   // The joined+retimed program lands in [aprog]; the mix on input 2 owns [outa].
   assert.ok(/\[ac\]atempo=1\.5000\[aprog\]/.test(filterScript), filterScript);
   assert.ok(filterScript.includes('[2:a]volume=0.600'), filterScript);
-  assert.ok(/amix=inputs=2:duration=first:normalize=0\[outa\]/.test(filterScript), filterScript);
+  assert.ok(/amix=inputs=2:duration=first:normalize=0,/.test(filterScript), filterScript);
+});
+
+test('the mix is limited, so a loud bed cannot push the sum past full scale', () => {
+  const { filterScript } = plan(edl([[0, 5]]), {
+    bgMusic: { input: 'song.mp3', volume: 2, durationSec: 5 },
+  });
+  // amix sums; nothing in it prevents clipping. The ceiling is the last thing
+  // before [outa].
+  assert.ok(/amix=[^\n]*,alimiter=limit=-1\.0dB[^\n]*\[outa\]/.test(filterScript), filterScript);
+});
+
+// ── studio sound: the voice chain, on the program only ────────────────────────
+//
+// The enhancer runs on the PROGRAM audio — after the cut, before the bed — so it
+// never denoises or compresses the music, and never moves a timestamp. These
+// assert placement (which side of atempo and amix it lands on), that the
+// loudnorm resample is present, and that leaving it off changes nothing.
+
+test('studio sound leaves the graph byte-identical when off', () => {
+  assert.equal(
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2, studioSound: false }).filterScript,
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2 }).filterScript,
+  );
+});
+
+test('the voice chain runs on the program, never on the source cut chain', () => {
+  const { filterScript } = plan(edl([[0, 5], [10, 20]]), { studioSound: true });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[acut]'))!;
+  assert.ok(chain.includes('highpass=f=85'), chain);
+  assert.ok(chain.includes('afftdn='), chain);
+  assert.ok(chain.includes('acompressor='), chain);
+  assert.ok(chain.includes('loudnorm=I=-16:TP=-1.5:LRA=11'), chain);
+  const cut = filterScript.split('\n').find((l) => l.startsWith('[0:a]'))!;
+  assert.ok(!cut.includes('loudnorm'), 'the enhancer is not on the aselect cut chain');
+});
+
+test('the highpass runs before the denoiser, not after it', () => {
+  // Rumble carries real energy; removing it first means afftdn is not spending
+  // its budget on something a 2-pole filter deletes for free.
+  const { filterScript } = plan(edl([[0, 5]]), { studioSound: true });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[acut]'))!;
+  assert.ok(chain.indexOf('highpass=') < chain.indexOf('afftdn='), chain);
+});
+
+test('loudnorm is followed by a resample, or the encoder inherits 192kHz', () => {
+  // loudnorm runs its internals at 192k and emits at that rate. Left alone it
+  // propagates to the encoder and AAC silently lands on 96k.
+  const { filterScript } = plan(edl([[0, 5]]), { studioSound: true });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[acut]'))!;
+  assert.ok(/loudnorm=[^,]*,aresample=48000/.test(chain), chain);
+});
+
+test('the enhancer runs before atempo, and both before the bed', () => {
+  const { filterScript } = plan(edl([[0, 5]]), {
+    speed: 1.5,
+    studioSound: true,
+    bgMusic: { input: 'song.mp3', volume: 0.5, durationSec: 10 },
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[acut]'))!;
+  assert.ok(chain.indexOf('loudnorm=') < chain.indexOf('atempo='), chain);
+  assert.ok(chain.endsWith('[aprog];'), 'the enhanced program feeds the mix');
+  // The bed is a separate input and carries none of the voice chain.
+  const music = filterScript.split('\n').find((l) => l.startsWith('[1:a]'))!;
+  assert.ok(!music.includes('loudnorm'), 'the bed is never normalised with the voice');
+  assert.ok(!music.includes('acompressor'), 'the bed is never compressed with the voice');
+});
+
+test('studio sound alone creates the audio stage a plain 1x render does not have', () => {
+  // Without it, a 1x no-burn render writes the cut straight to [outa].
+  assert.ok(/aselect=[^\n]*\[outa\]/.test(plan(edl([[0, 5]]), {}).filterScript));
+  const { filterScript } = plan(edl([[0, 5]]), { studioSound: true });
+  assert.ok(/aselect=[^\n]*\[acut\]/.test(filterScript), filterScript);
+  assert.equal(filterScript.match(/\[outa\]/g)?.length, 1, 'exactly one producer of [outa]');
+});
+
+test('a sequence runs the voice chain on the joined program', () => {
+  const { filterScript } = seqPlan(seqEdl, { studioSound: true });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[ac]'))!;
+  assert.ok(chain.includes('loudnorm=I=-16:TP=-1.5:LRA=11'), chain);
+  assert.ok(chain.endsWith('[outa]'), chain); // last line, so the ; is stripped
+  // concat must hand off to [ac] rather than claiming [outa] itself. The video
+  // still writes straight to [outv]: the enhancer adds no video stage.
+  assert.ok(/concat=n=2:v=1:a=1\[outv\]\[ac\]/.test(filterScript), filterScript);
+});
+
+test('a sequence with studio sound AND speed keeps the enhancer first', () => {
+  const { filterScript } = seqPlan(seqEdl, { speed: 1.5, studioSound: true });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[ac]'))!;
+  assert.ok(chain.indexOf('loudnorm=') < chain.indexOf('atempo=1.5000'), chain);
+});
+
+// ── output frame: the crop into a target resolution ───────────────────────────
+//
+// The ordering is the whole risk here. Captions are placed as a fraction of the
+// OUTPUT frame, so the crop must happen before the burn or every caption lands
+// against the source's shape and the edges are cut off. Speed must stay last for
+// the reason it always was — glyphs ride the frames setpts rescales.
+
+const REEL = { width: 1080, height: 1920, zoom: 1, x: 0, y: 0 };
+
+test('no frame leaves the graph byte-identical to before it existed', () => {
+  assert.equal(
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2, frame: undefined }).filterScript,
+    plan(edl([[0, 5], [10, 20]]), { speed: 1.2 }).filterScript,
+  );
+});
+
+test('the frame crops the picture and never touches the audio', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { frame: REEL });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.includes('scale=1080:1920:force_original_aspect_ratio=increase'), chain);
+  assert.ok(chain.includes('crop=1080:1920:'), chain);
+  const audio = filterScript.split('\n').find((l) => l.startsWith('[0:a]'))!;
+  assert.ok(!audio.includes('crop='), 'reframing is a picture operation');
+});
+
+test('the crop runs BEFORE the caption burn, so captions land on the new frame', () => {
+  const { filterScript } = plan(edl([[0, 5]]), {
+    frame: REEL,
+    subtitlePath: '/tmp/c.ass',
+  });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('subtitles='), chain);
+});
+
+test('the crop runs before the speed change too, leaving setpts last', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { frame: REEL, speed: 1.5, subtitlePath: '/tmp/c.ass' });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+});
+
+test('a frame alone creates the video stage a plain 1x render does not have', () => {
+  // Without it, a 1x no-burn render writes the select straight to [outv].
+  assert.ok(/select=[^\n]*\[outv\]/.test(plan(edl([[0, 5]]), {}).filterScript));
+  const { filterScript } = plan(edl([[0, 5]]), { frame: REEL });
+  assert.ok(/select=[^\n]*\[vcut\]/.test(filterScript), filterScript);
+  assert.equal(filterScript.match(/\[outv\]/g)?.length, 1, 'exactly one producer of [outv]');
+});
+
+test('an audio-only project is never handed a crop', () => {
+  const { filterScript } = plan(edl([[0, 5]]), { hasVideo: false, frame: REEL });
+  assert.ok(!filterScript.includes('crop='), filterScript);
+  assert.ok(!filterScript.includes('scale='), filterScript);
+});
+
+test('a sequence crops the joined picture, after the per-clip normalise', () => {
+  const { filterScript } = seqPlan(seqEdl, { frame: REEL });
+  // Each clip is still normalised to the canonical stitched size first — that is
+  // a CONTAIN fit (decrease+pad), because clips have to agree with each other
+  // before anything can crop them as one picture.
+  assert.ok(/\[0:v\][^\n]*scale=1280:720:force_original_aspect_ratio=decrease/.test(filterScript), filterScript);
+  // ...and the crop happens once, on the joined stream, as a COVER fit.
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(chain.includes('crop=1080:1920:'), chain);
+  assert.ok(chain.endsWith('[outv]'), chain); // last line, so the ; is stripped
+  assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(filterScript), filterScript);
+  // Exactly one crop: the clips are not each cropped to the reel individually.
+  assert.equal(filterScript.match(/crop=1080:1920/g)?.length, 1, filterScript);
+});
+
+test('a sequence keeps crop before burn before speed', () => {
+  const { filterScript } = seqPlan(seqEdl, { frame: REEL, speed: 1.5, subtitlePath: '/tmp/c.ass' });
+  const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('subtitles='), chain);
+  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
 });

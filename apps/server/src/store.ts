@@ -1,11 +1,14 @@
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { CONFIG } from './config.ts';
 import { probe } from './ffmpeg.ts';
+import * as poster from './poster.ts';
+import * as thumbs from './thumbs.ts';
 import type { AsrOptions } from './asr.ts';
 import type { Thumbs } from './thumbs.ts';
 import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
 import type { CutSettings } from '../../../packages/core/src/doc.ts';
+import type { FrameSettings } from '../../../packages/core/src/frame.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
 /**
@@ -76,6 +79,22 @@ export interface BgMusic {
    * long video. See BgMusicRender.loop.
    */
   loop?: boolean;
+
+  /**
+   * Where the bed came from, when it was found on the web rather than imported.
+   *
+   * All three are absent for a file the user supplied — they own that, and owe
+   * nobody a credit. For a searched track they are not decoration: the catalogue
+   * behind the picker is overwhelmingly CC BY / BY-SA (a sample of Openverse's
+   * music category turned up zero CC0), so publishing a video with one of these
+   * beds REQUIRES the credit line. Storing it with the project is what makes it
+   * still available at export time, long after the picker was closed.
+   */
+  attribution?: string;
+  /** Short licence code — 'by', 'by-sa'. Drives the badge beside the bed. */
+  license?: string;
+  /** The track's page on the provider, so the credit can link back. */
+  sourceLink?: string;
 }
 
 export interface Project {
@@ -138,6 +157,24 @@ export interface Project {
    */
   cut?: CutSettings;
   /**
+   * Studio sound voice enhancer
+   */
+  studioSound?: boolean;
+  /**
+   * The cover frame shown on the dashboard card, as a /media URL. Absent on
+   * audio, and on video whose cover has not been built yet — `list` builds any
+   * that are missing, since the dashboard is the only thing that reads it. See
+   * poster.ts.
+   */
+  posterUrl?: string;
+  /**
+   * The output frame — target resolution plus the zoom/pan that decides which part
+   * of the source fills it. Absent on projects saved before reframing existed, and
+   * on every project that has never left the source's own resolution; the client
+   * falls back to DEFAULT_FRAME via normalizeFrame.
+   */
+  frame?: FrameSettings;
+  /**
    * The background-music bed, if one has been imported. Absent on projects with
    * no music (all of them, until asked for). Mixed under the render — see BgMusic.
    */
@@ -178,6 +215,62 @@ export async function get(id: string): Promise<Project | null> {
 }
 
 /**
+ * Delete a project and everything on disk that exists only for it.
+ *
+ * The record, its uploads, its cover, and its filmstrip sheets. Renders are left
+ * alone: an exported file is a thing you made and may have been keeping here, not
+ * an artefact of the project — deleting the project should not reach into it.
+ *
+ * Every unlink is best-effort. A source that was already moved or deleted by hand
+ * must not stop the project record from going away, or the library would be stuck
+ * showing a row that cannot be removed. Returns false only when there was no such
+ * project to begin with.
+ *
+ * Unlike removeClip — which leaves media on disk because the project it belonged
+ * to is still there to reference it — nothing survives this to point at the files.
+ */
+export async function remove(id: string): Promise<boolean> {
+  const project = await get(id);
+  if (!project) return false;
+
+  // Two clips split from one file share a sourcePath, so unlink the set, not the
+  // list. Music rides along; renders deliberately do not.
+  const files = new Set<string>(clipsOf(project).map((c) => c.sourcePath));
+  files.add(project.sourcePath);
+  if (project.music) files.add(project.music.sourcePath);
+  for (const file of files) await unlinkInMedia(file);
+
+  await unlinkInMedia(join(poster.posterDir(), `${id}.jpg`));
+
+  // The sheets are `<id>-000.jpg`, `<id>-001.jpg`… — named, not listed anywhere,
+  // so the directory is the index. Same prefix scan the builder uses to clear a
+  // stale set before a rebuild.
+  const dir = thumbs.thumbsDir();
+  const sheets = await readdir(dir).catch(() => [] as string[]);
+  for (const name of sheets) {
+    if (name.startsWith(`${id}-`) && name.endsWith('.jpg')) await unlinkInMedia(join(dir, name));
+  }
+
+  cache.delete(id);
+  await unlink(join(projectsDir, `${id}.json`)).catch(() => {});
+  return true;
+}
+
+/**
+ * Unlink, but only inside the media directory.
+ *
+ * Paths here come from our own JSON, so this should never fire — which is the
+ * point. This is the one operation in the server that destroys user files, and a
+ * project file that has been hand-edited (or written by a build with a different
+ * mediaDir) should not be able to aim it somewhere else.
+ */
+async function unlinkInMedia(path: string): Promise<void> {
+  const rel = relative(CONFIG.mediaDir, resolve(path));
+  if (rel.startsWith('..') || isAbsolute(rel)) return;
+  await unlink(path).catch(() => {});
+}
+
+/**
  * Bring a project written by an older build up to date, lazily, on first open.
  *
  * Lazy rather than a migration pass: there is no schema version to key off, the
@@ -208,11 +301,31 @@ export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'
   const projects = await Promise.all(
     files.filter((f) => f.endsWith('.json')).map((f) => get(f.replace('.json', ''))),
   );
+  const live = projects.filter((p): p is Project => p !== null);
 
-  return projects
-    .filter((p): p is Project => p !== null)
+  // Build any missing dashboard covers here rather than in `migrate`, because a
+  // project saved this session is already in the cache and `get` returns before
+  // migrate ever runs. This is also the only endpoint that needs them, so one
+  // pass over the listing covers every case exactly once — after the first call
+  // the files exist and `ensure` is a stat.
+  await Promise.all(live.map(ensurePoster));
+
+  return live
     .map(({ peaks, transcript, ...rest }) => rest)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Give a project its cover frame if it has none, and remember it. */
+async function ensurePoster(project: Project): Promise<void> {
+  if (project.posterUrl) return;
+  const url = await poster
+    .ensure(project.sourcePath, project.id, project.duration, project.hasVideo)
+    .catch(() => null);
+  // Nothing on failure: a project with no cover shows its mark instead, and the
+  // next listing tries again. Persisting a null would make that permanent.
+  if (!url) return;
+  project.posterUrl = url;
+  await save(project);
 }
 
 /**

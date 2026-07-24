@@ -390,3 +390,120 @@ test('cutFromWire falls back field by field for an older or broken record', () =
   assert.equal(cutFromWire({ padMs: NaN as unknown as number }, fallback).padMs, 40);
   assert.equal(cutFromWire({ fadeMs: 'x' as unknown as number }, fallback).fadeMs, 12);
 });
+
+// ── batch patches ─────────────────────────────────────────────────────────────
+//
+// The on-import chain (transcribe → cut hesitations → cap pauses → Studio Sound
+// → captions) is ONE decision the user made, so it has to be one Cmd+Z. These
+// pin the properties that makes true.
+
+/** The four sub-patches the on-import chain produces, over a fresh doc. */
+function chain(d: Doc): DocPatch {
+  return {
+    kind: 'batch',
+    patches: [
+      buildWordPatch(d.words, ['w2', 'w6'], { deleted: true, isFiller: true }),
+      { kind: 'cut', prev: d.cut, next: { ...d.cut, maxGapMs: 50 } },
+      { kind: 'speed', prev: d.speed, next: 1.2 },
+      { kind: 'studioSound', prev: d.studioSound, next: true },
+      { kind: 'captions', prev: d.captions, next: { ...d.captions, enabled: true } },
+    ],
+  };
+}
+
+test('a batch commits as ONE history entry and one undo takes all of it back', () => {
+  const before = doc();
+  let d = before;
+  let h = emptyHistory();
+
+  ({ doc: d, history: h } = commit(d, h, chain(d), { label: 'Auto clean-up' }));
+
+  assert.equal(h.past.length, 1, 'four changes, one undo step');
+  assert.deepEqual(deletedIds(d), ['w2', 'w6']);
+  assert.equal(d.cut.maxGapMs, 50);
+  assert.equal(d.speed, 1.2);
+  assert.equal(d.studioSound, true);
+  assert.equal(d.captions.enabled, true);
+
+  const step = undo(d, h);
+  assert.ok(step);
+  assert.equal(step.label, 'Auto clean-up');
+  assert.deepEqual(deletedIds(step.doc), [], 'the fillers come back');
+  assert.equal(step.doc.cut.maxGapMs, before.cut.maxGapMs, 'the pause cap is restored');
+  assert.equal(step.doc.speed, before.speed, 'the speed is restored');
+  assert.equal(step.doc.studioSound, before.studioSound);
+  assert.equal(step.doc.captions.enabled, before.captions.enabled);
+  assert.deepEqual(step.affected, ['w2', 'w6'], 'undo shows the words it moved');
+
+  // …and redo puts the whole chain back.
+  const again = redo(step.doc, step.history);
+  assert.ok(again);
+  assert.deepEqual(deletedIds(again.doc), ['w2', 'w6']);
+  assert.equal(again.doc.cut.maxGapMs, 50);
+  assert.equal(again.doc.speed, 1.2);
+  assert.equal(again.doc.studioSound, true);
+  assert.equal(again.doc.captions.enabled, true);
+});
+
+test('a batch inverts in reverse, so two patches on the same field still undo', () => {
+  // Forward: 1 → 2 → 3. Inverting in FORWARD order would restore 2 and lose 1.
+  const d = doc();
+  const patch: DocPatch = {
+    kind: 'batch',
+    patches: [
+      { kind: 'speed', prev: 1, next: 2 },
+      { kind: 'speed', prev: 2, next: 3 },
+    ],
+  };
+  assert.equal(applyPatch(d, patch).speed, 3);
+  assert.equal(applyPatch(applyPatch(d, patch), invertPatch(patch)).speed, 1);
+});
+
+test('an all-no-op batch is empty, so it never takes a history slot', () => {
+  const d = doc();
+  const noop: DocPatch = {
+    kind: 'batch',
+    patches: [
+      buildWordPatch(d.words, ['w2'], { deleted: false }), // already not deleted
+      { kind: 'cut', prev: d.cut, next: d.cut },
+      { kind: 'studioSound', prev: false, next: false },
+    ],
+  };
+  assert.equal(isEmptyPatch(noop), true);
+
+  const { doc: after, history: h } = commit(d, emptyHistory(), noop, { label: 'Auto clean-up' });
+  assert.equal(h.past.length, 0, 'nothing changed, so Cmd+Z must not consume a step');
+  assert.equal(after, d, 'and the document comes out referentially identical');
+});
+
+test('every patch kind reports affectedIds and bytes — undefined breaks undo', () => {
+  // studioSound was missing from both switches: affectedIds returned undefined,
+  // and undo() hands that straight to the caller, where .length throws.
+  const d = doc();
+  const kinds: DocPatch[] = [
+    buildWordPatch(d.words, ['w2'], { deleted: true }),
+    { kind: 'cut', prev: d.cut, next: { ...d.cut, maxGapMs: 50 } },
+    { kind: 'captions', prev: d.captions, next: { ...d.captions, enabled: true } },
+    { kind: 'speed', prev: 1, next: 1.5 },
+    { kind: 'studioSound', prev: false, next: true },
+    { kind: 'replace', prev: d.words, next: d.words },
+    chain(d),
+  ];
+  for (const patch of kinds) {
+    assert.ok(Array.isArray(affectedIds(patch)), `${patch.kind} must report affected ids`);
+    assert.equal(typeof isEmptyPatch(patch), 'boolean', `${patch.kind} must report emptiness`);
+  }
+});
+
+test('undoing a Studio Sound toggle does not throw', () => {
+  let d = doc();
+  let h = emptyHistory();
+  ({ doc: d, history: h } = commit(d, h, { kind: 'studioSound', prev: false, next: true }, {
+    label: 'Enable studio sound',
+  }));
+  assert.equal(d.studioSound, true);
+  const step = undo(d, h);
+  assert.ok(step);
+  assert.equal(step.doc.studioSound, false);
+  assert.deepEqual(step.affected, []);
+});

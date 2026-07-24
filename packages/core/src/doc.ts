@@ -1,4 +1,5 @@
 import { DEFAULT_CAPTIONS, type CaptionSettings } from './caption-style.ts';
+import { DEFAULT_FRAME, type FrameSettings } from './frame.ts';
 import type { CompileOptions, Transcript, Word } from './types.ts';
 
 /**
@@ -38,6 +39,23 @@ export interface Doc {
    * media it describes.
    */
   speed: number;
+  /**
+   * Studio Sound: the voice enhancer (denoise, EQ, compression, loudness).
+   *
+   * Like `speed`, a transform on the OUTPUT rather than an input to compileEdl —
+   * it never moves a timestamp, so it lives beside speed rather than in the cut
+   * settings. Part of the document so it undoes and survives a reload.
+   */
+  studioSound: boolean;
+  /**
+   * The output frame: what shape the finished video is, and which part of the
+   * source survives the crop.
+   *
+   * Beside speed and studioSound for the same reason — a transform on the OUTPUT,
+   * never an input to compileEdl. It moves pixels, not timestamps, so the EDL
+   * underneath is identical whether this is a reel or a 16:9. See frame.ts.
+   */
+  frame: FrameSettings;
   /** Bumped on every committed change. The saver uses it to detect staleness. */
   rev: number;
 }
@@ -124,16 +142,33 @@ export type DocPatch =
   | { kind: 'cut'; prev: CutSettings; next: CutSettings }
   | { kind: 'captions'; prev: CaptionSettings; next: CaptionSettings }
   | { kind: 'speed'; prev: number; next: number }
+  | { kind: 'studioSound'; prev: boolean; next: boolean }
+  | { kind: 'frame'; prev: FrameSettings; next: FrameSettings }
   /** Escape hatch for a wholesale transcript swap (re-transcribe). */
-  | { kind: 'replace'; prev: Word[]; next: Word[] };
+  | { kind: 'replace'; prev: Word[]; next: Word[] }
+  /**
+   * Several patches that commit, undo and redo as ONE step.
+   *
+   * For a change the user made as a single decision but which lands in more than
+   * one part of the document — the on-import chain cuts fillers, caps pauses,
+   * turns on the enhancer and turns on captions, and it is one thing that
+   * happened, so it must be one Cmd+Z. Committing four entries instead would
+   * make backing it out four presses of an unlabelled sequence.
+   *
+   * The sub-patches are applied in order and inverted in REVERSE order, which is
+   * what keeps this correct when two of them touch the same field.
+   */
+  | { kind: 'batch'; patches: DocPatch[] };
 
 export function docFromTranscript(
   transcript: Transcript,
   cut: CutSettings,
   captions: CaptionSettings = DEFAULT_CAPTIONS,
   speed: number = DEFAULT_SPEED,
+  studioSound: boolean = false,
+  frame: FrameSettings = DEFAULT_FRAME,
 ): Doc {
-  return { words: transcript.words, cut, captions, speed, rev: 0 };
+  return { words: transcript.words, cut, captions, speed, studioSound, frame, rev: 0 };
 }
 
 /** The word ids a patch touches. Free — the patch already lists them. */
@@ -151,9 +186,22 @@ export function affectedIds(patch: DocPatch): string[] {
         })
         .map((w) => w.id);
     }
+    case 'batch': {
+      // De-duplicated, first-seen order: two sub-patches may touch the same word,
+      // and the caller uses this list to select or flash a run — a repeated id
+      // would widen that run to cover words the batch never changed.
+      const seen = new Set<string>();
+      for (const sub of patch.patches) for (const id of affectedIds(sub)) seen.add(id);
+      return [...seen];
+    }
     case 'cut':
     case 'captions':
     case 'speed':
+    // Not a word change, so nothing to select or flash — but it MUST be listed.
+    // Falling off the end of this switch returns undefined, and undo() hands the
+    // result straight to the caller as `affected`, where .length throws.
+    case 'studioSound':
+    case 'frame':
       return [];
   }
 }
@@ -174,8 +222,17 @@ export function invertPatch(patch: DocPatch): DocPatch {
       return { kind: 'captions', prev: patch.next, next: patch.prev };
     case 'speed':
       return { kind: 'speed', prev: patch.next, next: patch.prev };
+    case 'studioSound':
+      return { kind: 'studioSound', prev: patch.next, next: patch.prev };
+    case 'frame':
+      return { kind: 'frame', prev: patch.next, next: patch.prev };
     case 'replace':
       return { kind: 'replace', prev: patch.next, next: patch.prev };
+    case 'batch':
+      // Reversed, not merely mapped. If two sub-patches touch the same field, the
+      // second one's `prev` is the first one's `next`; unwinding them in forward
+      // order would restore that intermediate value and leave the original lost.
+      return { kind: 'batch', patches: [...patch.patches].reverse().map(invertPatch) };
   }
 }
 
@@ -204,8 +261,19 @@ export function applyPatch(doc: Doc, patch: DocPatch): Doc {
       return { ...doc, captions: { ...patch.next }, rev: doc.rev + 1 };
     case 'speed':
       return { ...doc, speed: patch.next, rev: doc.rev + 1 };
+    case 'studioSound':
+      return { ...doc, studioSound: patch.next, rev: doc.rev + 1 };
+    case 'frame':
+      return { ...doc, frame: { ...patch.next }, rev: doc.rev + 1 };
     case 'replace':
       return { ...doc, words: patch.next, rev: doc.rev + 1 };
+    case 'batch': {
+      // Structure sharing survives this: each step returns the SAME doc object
+      // when its patch is a no-op, so an all-no-op batch comes out identical.
+      let out = doc;
+      for (const sub of patch.patches) out = applyPatch(out, sub);
+      return out;
+    }
   }
 }
 
@@ -281,9 +349,16 @@ export function isEmptyPatch(patch: DocPatch): boolean {
         (k) => patch.prev[k] === patch.next[k],
       );
     case 'speed':
+    case 'studioSound':
       return patch.prev === patch.next;
+    case 'frame':
+      return (Object.keys(patch.next) as Array<keyof FrameSettings>).every(
+        (k) => patch.prev[k] === patch.next[k],
+      );
     case 'replace':
       return false;
+    case 'batch':
+      return patch.patches.every(isEmptyPatch);
   }
 }
 
@@ -295,8 +370,14 @@ export function patchBytes(patch: DocPatch): number {
     case 'cut':
     case 'captions':
     case 'speed':
+    // Must be listed for the same reason as in affectedIds: an undefined here
+    // makes prune()'s running total NaN, and the byte budget stops evicting.
+    case 'studioSound':
+    case 'frame':
       return 100;
     case 'replace':
       return (patch.prev.length + patch.next.length) * 130;
+    case 'batch':
+      return patch.patches.reduce((sum, sub) => sum + patchBytes(sub), 0);
   }
 }

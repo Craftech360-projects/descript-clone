@@ -61,6 +61,15 @@ export const CONFIG = {
   elevenLabsKey: process.env.ELEVENLABS_API_KEY ?? '',
 
   /**
+   * Optional, and the music picker works without it — Openverse needs no key at
+   * all, so a fresh clone can search on first run. Setting this (free, instant,
+   * from devportal.jamendo.com) swaps in a far larger catalogue, an instrumental
+   * filter Openverse cannot express, and no 200-searches-a-day ceiling. See
+   * music-search.ts.
+   */
+  jamendoClientId: process.env.JAMENDO_CLIENT_ID ?? '',
+
+  /**
    * Where the ffmpeg/ffprobe binaries live. A bare name is resolved off PATH,
    * which is right for dev and the Docker image where both are installed
    * system-wide. The desktop build has no such guarantee — it sets these to the

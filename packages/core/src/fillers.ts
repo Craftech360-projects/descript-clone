@@ -31,6 +31,39 @@ const HESITATION = new RegExp(
 );
 
 /**
+ * The stalling "So" that opens an utterance — "So, I was thinking…", "So we
+ * shipped it." Treated as a hesitation by default, because in that position it
+ * is one: the speaker is buying a beat before the sentence starts, and the
+ * sentence reads the same without it.
+ *
+ * Unlike everything in HESITATION, "so" IS a real word, so shape alone cannot
+ * decide it — position does. Only an utterance-initial "so" qualifies: the first
+ * word, one after a sentence-ending mark, or one after a pause long enough to be
+ * a fresh start. Mid-sentence "so" ("it was so big", "so that it works") is
+ * never touched.
+ */
+const SO_PAUSE_MS = 350;
+
+/**
+ * Words that make a leading "So" load-bearing rather than a stall: the degree
+ * modifier. "So much for that" without its "so" is broken English, where "So we
+ * left" without it is not. Cheap guard on the one case where position is not
+ * enough.
+ */
+const SO_KEEPERS = new Set(['much', 'many', 'far', 'long', 'few', 'little']);
+
+/** Is words[i] a stalling, utterance-initial "so"? See SO_PAUSE_MS. */
+function isLeadingSo(words: Word[], i: number): boolean {
+  if (normalize(words[i].text) !== 'so') return false;
+  if (SO_KEEPERS.has(normalize(words[i + 1]?.text ?? ''))) return false;
+
+  const prev = words[i - 1];
+  if (!prev) return true; // opens the transcript
+  if (/[.!?…]["')\]]*$/.test(prev.text.trim())) return true; // opens a sentence
+  return (words[i].start - prev.end) * 1000 >= SO_PAUSE_MS; // opens after a beat
+}
+
+/**
  * Discourse markers. DANGEROUS to remove blindly: "like" is a filler in
  * "it was, like, huge" but load-bearing in "I like it" and "cities like Paris".
  * Off by default; the UI should surface these as suggestions a human confirms,
@@ -64,7 +97,8 @@ export interface FillerOptions {
  * Parakeet) normalizes its output and silently drops most "um"/"uh" before you
  * ever see them — so on a normalized transcript this will correctly find almost
  * nothing, and that is not a bug in this function. Verbatim ASR is a hard
- * requirement for the feature, not a nice-to-have.
+ * requirement for the feature, not a nice-to-have. The one exception is the
+ * leading "so" — a real word, so every model transcribes it either way.
  */
 export function detectFillers(transcript: Transcript, options: FillerOptions = {}): number {
   const words = transcript.words;
@@ -78,7 +112,7 @@ export function detectFillers(transcript: Transcript, options: FillerOptions = {
 
   for (let i = 0; i < words.length; i++) {
     const n = normalize(words[i].text);
-    if (HESITATION.test(n) || custom.has(n)) {
+    if (HESITATION.test(n) || custom.has(n) || isLeadingSo(words, i)) {
       words[i].isFiller = true;
       found++;
     }

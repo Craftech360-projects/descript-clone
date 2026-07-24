@@ -59,7 +59,8 @@ button:disabled { opacity: var(--disabled-opacity); cursor: default; }
 button svg { display: block; flex-shrink: 0; }
 
 select,
-input[type='text'] {
+input[type='text'],
+input[type='number'] {
   width: 100%;
   background: var(--sunk);
   color: var(--text);
@@ -70,9 +71,11 @@ input[type='text'] {
   transition: border-color var(--dur-1) var(--ease);
 }
 select:hover,
-input[type='text']:hover { border-color: var(--line-strong); }
+input[type='text']:hover,
+input[type='number']:hover { border-color: var(--line-strong); }
 select:focus-visible,
-input[type='text']:focus-visible { border-color: var(--accent); }
+input[type='text']:focus-visible,
+input[type='number']:focus-visible { border-color: var(--accent); }
 
 input[type='range'] { width: 100%; accent-color: var(--accent); }
 

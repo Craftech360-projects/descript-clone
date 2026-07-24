@@ -1,4 +1,5 @@
 import type { Edl } from './types.ts';
+import { frameFilterStages, type FrameRender } from './frame.ts';
 
 export interface RenderPlan {
   /**
@@ -59,6 +60,20 @@ export interface RenderOptions {
    * cuts and never sped up with the picture. See bgMusicMixLines.
    */
   bgMusic?: BgMusicRender;
+  /**
+   * Run the program audio through the Studio Sound voice chain. Omit (the
+   * default) and the audio graph is emitted exactly as it was before the enhancer
+   * existed. Applied before the music bed, so it never processes the bed — see
+   * studioSoundStages.
+   */
+  studioSound?: boolean;
+  /**
+   * Reframe the picture to a target resolution, cropping to fill it. Already
+   * resolved to concrete pixels by the caller — resolveFrame returns null when the
+   * setting would change nothing, and that null is why a project that never opens
+   * the Frame panel emits no scale/crop at all. See frameFilterStages.
+   */
+  frame?: FrameRender;
 }
 
 /**
@@ -133,7 +148,60 @@ function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRe
   return [
     `${programLabel}aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgprog];`,
     `[${musicIndex}:a]${music.join(',')}[bgm];`,
-    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0[outa];`,
+    // amix sums, it does not limit: the bed's energy lands on top of a program
+    // that Studio Sound may already have normalised to TP -1.5, so a loud bed can
+    // push the sum past full scale. alimiter catches only those peaks — below the
+    // ceiling it is transparent, so a quiet bed sounds exactly as it did.
+    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0,alimiter=limit=-1.0dB:level=disabled[outa];`,
+  ];
+}
+
+/**
+ * The Studio Sound voice chain: the filters that turn a raw room recording into
+ * something that sounds recorded on purpose.
+ *
+ * Applied to the PROGRAM audio only — after the cut, before the music bed — so
+ * the enhancer never denoises or compresses the bed along with the voice.
+ *
+ * Stage by stage, and why each is where it is:
+ *  - `highpass` FIRST, not after the denoiser. Rumble, handling noise and HVAC
+ *    all live under ~85Hz and carry real energy; removing them up front means the
+ *    denoiser and the compressor are not spending their budget chasing something
+ *    a 2-pole filter deletes for free.
+ *  - `afftdn` at the default noise floor. `nf` is the level BELOW WHICH audio is
+ *    assumed to be noise, and dialogue keeps a lot of meaning down there —
+ *    consonants, word tails, breath. Pushing nf up towards -20 measurably eats
+ *    the voice itself and produces the watery, warbling artifact people recognise
+ *    instantly as "over-processed". `tn=1` tracks the noise profile as it changes
+ *    rather than fixing it from the first frame.
+ *  - `deesser` before the compressor, so the compressor is not pumping on
+ *    sibilance the de-esser is about to remove anyway.
+ *  - Two `equalizer` bells: a dip at 220Hz (the "mud" a close mic and a small
+ *    room both add) and a lift at 3.2kHz (presence — where consonants live and
+ *    intelligibility comes from). This is the EQ the panel promises.
+ *  - `acompressor`, not `compand`. compand with a zero attack makes the gain
+ *    follow the sample envelope instantaneously, which distorts the waveform
+ *    rather than compressing it; acompressor has a real attack/release and a
+ *    makeup gain.
+ *  - `loudnorm` last, to the -16 LUFS / -1.5 dBTP that every speech platform
+ *    targets — so the export lands at a sane level regardless of how the source
+ *    was recorded.
+ *  - `aresample=48000` is NOT optional. loudnorm runs its internals at 192kHz and
+ *    emits at that rate; left alone it propagates to the encoder, and AAC then
+ *    silently lands on 96kHz. Verified against ffmpeg 8.1. The music path happens
+ *    to resample anyway, so without this the bug appears only on music-free
+ *    renders — which is exactly the sort of thing that ships.
+ */
+export function studioSoundStages(): string[] {
+  return [
+    'highpass=f=85',
+    'afftdn=nr=12:nf=-30:tn=1',
+    'deesser=i=0.35',
+    'equalizer=f=220:t=q:w=1.0:g=-2',
+    'equalizer=f=3200:t=q:w=1.2:g=3',
+    'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
+    'loudnorm=I=-16:TP=-1.5:LRA=11',
+    'aresample=48000',
   ];
 }
 
@@ -160,7 +228,7 @@ export function escapeSubtitlePath(path: string): string {
  * broadband click. A ~12ms fade is inaudible as a fade and removes the click.
  */
 export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
-  const { input, output, hasVideo, subtitlePath, speed = 1, fps, fontsDir, bgMusic } = options;
+  const { input, output, hasVideo, subtitlePath, speed = 1, fps, fontsDir, bgMusic, frame } = options;
   const burnIn = Boolean(hasVideo && subtitlePath);
   // With a music bed the program audio is an intermediate that the mix consumes;
   // without one it writes straight to the final [outa] as it always did.
@@ -252,6 +320,13 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // what scaleCues is for.
   const videoStages: string[] = [];
   if (hasVideo) {
+    // Reframing comes FIRST, and specifically before burn-in. Captions are placed
+    // as a fraction of the OUTPUT frame and libass rasterises them at its size, so
+    // burning before the crop would paint them at the source's shape and then cut
+    // the edges off — a caption centred in a 16:9 is not centred in the 9:16 taken
+    // out of it, and one near the bottom is simply gone. Cropping first means
+    // every glyph is placed and scaled against the frame that ships.
+    if (frame) videoStages.push(...frameFilterStages(frame));
     if (burnIn) {
       // fontsdir is a second value in the same single-quoted filter-arg context
       // as filename, so it takes the identical escaping. Appended only when set,
@@ -275,6 +350,10 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // comes out 10ms at 1.2x. Both are far below the ~20ms where a fade stops
   // being a de-click and starts being audible as a duck.
   const audioStages: string[] = [];
+  // Before atempo: the enhancer's compressor and loudness measurement want the
+  // voice at its natural rate, and atempo does not change level enough to undo
+  // the normalisation.
+  if (options.studioSound) audioStages.push(...studioSoundStages());
   if (retime) audioStages.push(`atempo=${f(speed)}`);
 
   // Each chain writes straight to the final label when nothing follows it, so a
@@ -345,6 +424,20 @@ export interface SequenceRenderOptions {
   fontsDir?: string;
   /** A music bed mixed under the joined program — see RenderOptions.bgMusic. */
   bgMusic?: BgMusicRender;
+  /**
+   * Run the program audio through the Studio Sound voice chain. Omit (the
+   * default) and the audio graph is emitted exactly as it was before the enhancer
+   * existed. Applied before the music bed, so it never processes the bed — see
+   * studioSoundStages.
+   */
+  studioSound?: boolean;
+  /**
+   * Reframe the picture to a target resolution, cropping to fill it. Already
+   * resolved to concrete pixels by the caller — resolveFrame returns null when the
+   * setting would change nothing, and that null is why a project that never opens
+   * the Frame panel emits no scale/crop at all. See frameFilterStages.
+   */
+  frame?: FrameRender;
 }
 
 /**
@@ -441,9 +534,10 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
 
   // If nothing follows the join, concat writes straight to the output labels, so
   // a plain 1x render with no burn carries no relabel hops.
-  const wantsVideoStage = hasVideo && (burnIn || retime);
+  const wantsVideoStage = hasVideo && (burnIn || retime || Boolean(options.frame));
   const vJoin = hasVideo ? (wantsVideoStage ? '[vc]' : '[outv]') : '';
-  const aJoin = retime ? '[ac]' : programLabel;
+  const wantsAudioStage = retime || options.studioSound;
+  const aJoin = wantsAudioStage ? '[ac]' : programLabel;
 
   lines.push(`${concatInputs}concat=n=${n}:v=${hasVideo ? 1 : 0}:a=1${vJoin}${aJoin};`);
 
@@ -452,6 +546,11 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
   // ride the frames the speed change rescales.
   if (wantsVideoStage) {
     const stages: string[] = [];
+    // Reframing before burn-in, exactly as on the single-input path. Note it runs
+    // AFTER the per-clip normalise above, so a stitch of mismatched sources is one
+    // known rectangle by the time it is cropped — the clips never have to agree
+    // with the target frame, only with each other.
+    if (options.frame) stages.push(...frameFilterStages(options.frame));
     if (burnIn) {
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
       stages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
@@ -459,7 +558,12 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     if (retime) stages.push(`setpts=PTS/${f(speed)}`);
     lines.push(`[vc]${stages.join(',')}[outv];`);
   }
-  if (retime) lines.push(`[ac]atempo=${f(speed)}${programLabel};`);
+  if (wantsAudioStage) {
+    const aStages: string[] = [];
+    if (options.studioSound) aStages.push(...studioSoundStages());
+    if (retime) aStages.push(`atempo=${f(speed)}`);
+    lines.push(`[ac]${aStages.join(',')}${programLabel};`);
+  }
   // The music bed rides on top of the joined program: its input index is the
   // clip count, since the clips occupy inputs 0..n-1.
   if (bgMusic) lines.push(...bgMusicMixLines(programLabel, clips.length, bgMusic));

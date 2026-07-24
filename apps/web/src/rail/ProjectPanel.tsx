@@ -1,5 +1,15 @@
-import { useRef, useState } from 'react';
-import { Field, Hint, Slider, Segmented, Warn, Check, Color } from '../ui/Field.tsx';
+import { useId, useRef, useState } from 'react';
+import {
+  Field,
+  Hint,
+  Slider,
+  Segmented,
+  Section,
+  SectionGroup,
+  Warn,
+  Check,
+  Color,
+} from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import {
@@ -8,7 +18,19 @@ import {
   type Backdrop,
   type CaptionSettings,
 } from '../../../../packages/core/src/caption-style.ts';
-import type { CustomFont, Project } from '../api.ts';
+import {
+  FRAME_PRESETS,
+  MAX_DIM,
+  MAX_ZOOM,
+  MIN_DIM,
+  MIN_ZOOM,
+  fitZoom,
+  frameSize,
+  normalizeFrame,
+  type FramePreset,
+  type FrameSettings,
+} from '../../../../packages/core/src/frame.ts';
+import { api, type CustomFont, type MusicProvider, type MusicResult, type Project } from '../api.ts';
 
 export type FillerMode = 'off' | 'hesitations' | 'all';
 
@@ -28,6 +50,15 @@ interface Props {
   onCaptionDragStart: () => void;
   onCaptionDragEnd: (label: string) => void;
 
+  studioSound: boolean;
+  onToggleStudioSound: (enabled: boolean) => void;
+
+  /** The output frame — resolution plus the crop that fills it. */
+  frame: FrameSettings;
+  setFrame: (f: FrameSettings) => void;
+  onFrameDragStart: () => void;
+  onFrameDragEnd: (label: string) => void;
+
   /** Imported caption fonts, shared across every project. */
   customFonts: CustomFont[];
   onImportFont: (file: File) => void;
@@ -39,6 +70,10 @@ interface Props {
   onUpdateMusic: (patch: { volume?: number; durationSec?: number | null; loop?: boolean }) => void;
   onRemoveMusic: () => void;
   musicBusy: boolean;
+  /** Attach a track found through the picker. The server does the downloading. */
+  onPickMusic: (track: MusicResult) => void;
+  /** Catalogues the server can search. Never empty; the second entry is a fallback. */
+  musicProviders: MusicProvider[];
 
   fillerMode: FillerMode;
   setFillerMode: (m: FillerMode) => void;
@@ -70,6 +105,7 @@ function CustomFillers({ words, onAdd, onRemove }: {
   onRemove: (word: string) => void;
 }) {
   const [draft, setDraft] = useState('');
+  const inputId = useId();
   const commit = () => {
     onAdd(draft);
     setDraft('');
@@ -78,7 +114,14 @@ function CustomFillers({ words, onAdd, onRemove }: {
   return (
     <div className="custom-fillers">
       <div className="chip-input">
+        {/* A real label rather than the placeholder alone. The placeholder is
+          * the example, not the name — and it vanishes the moment you type, so
+          * a screen reader reaching this field mid-edit had nothing left to
+          * announce it by. Unpainted: the field sits under a heading that
+          * already says what it is. */}
+        <label className="sr-only" htmlFor={inputId}>Add a filler word</label>
         <input
+          id={inputId}
           type="text"
           value={draft}
           placeholder="Add a word — e.g. basically, literally"
@@ -109,7 +152,7 @@ function CustomFillers({ words, onAdd, onRemove }: {
 /** What the mode flags, said once, instead of inside all three option labels. */
 const FILLER_HINT: Record<FillerMode, string> = {
   off: 'Fillers are left alone and nothing is marked in the script.',
-  hesitations: 'Flags um, uh, er — the sounds nobody means to say.',
+  hesitations: 'Flags um, uh, er, and a "so" that only opens a sentence.',
   all: 'Also flags you know, I mean, sort of.',
 };
 
@@ -120,115 +163,181 @@ const FILLER_HINT: Record<FillerMode, string> = {
  * the document. The old "Cuts" tab was already the document's inspector — it
  * just sat in a row of pipeline stages and so read as one.
  *
- * On the arrangement, see .panel-project in app.css: the rail is wide and
- * short, so this is two columns — the words on the left, the render on the
- * right — rather than one stack that outran the box by 2-3x while half the
- * width sat unused.
+ * ── The panel states itself ───────────────────────────────────────────────
+ * Every section is a row carrying its own VALUE — "Reel · 1080×1920", "Capped
+ * at 400ms", "warm-piano.mp3". Closed, this panel is now a full status report
+ * on the project. It used to be a list of nouns: seven disclosures reading
+ * "Frame", "Captions", "Background music", so the only way to learn what you
+ * were about to export was to open all seven in turn and then close them again.
+ * That, not the control count, is what made this read as a settings dump.
+ *
+ * The two switches ride in their section headers for the same reason. Turning
+ * captions on is the single most frequent act in this panel and it used to cost
+ * three clicks — open, switch, close — with a dozen controls you did not want
+ * to see in between.
+ *
+ * ── The grouping is the meaning, not the layout ───────────────────────────
+ * Two groups, and they are a real distinction rather than a shelf each:
+ * EDIT changes which words survive — it moves the timeline. OUTPUT changes how
+ * the surviving words are delivered — it never moves a cut.
+ *
+ * Pauses is under Edit, where it belongs. It sat under the render column
+ * before, and the old comment here was honest about why: Captions swings from
+ * one switch to a dozen controls, so Pauses was BALLAST, there to stop the
+ * right column collapsing when captions were off. Rows that are uniformly one
+ * line tall until you open them need no ballast, so the meaning gets its place
+ * back.
  */
 export default function ProjectPanel(p: Props) {
-  // 0 is the sentinel for "keep every pause": Infinity does not survive JSON, so
-  // the wire speaks 0 and the document holds Infinity.
-  const gap = p.cut.maxGapMs === Infinity ? 0 : p.cut.maxGapMs;
-
   return (
     <div className="panel panel-project">
       {/* The output-length summary that led this panel now lives in the title bar,
         * beside Export — it is the document's running state, not a control. */}
 
-      {/* Left: the words — which of them survive. The transcript's provenance and
-        * the Re-transcribe action moved out: the summary lives in the Transcribe
-        * dialog (it is the "before" a re-transcribe replaces), and the entry point
-        * sits at the end of the script itself. */}
-      <div className="pcol">
-        <Field label="Clean up" collapsible>
-          <Segmented
-            name="filler"
-            value={p.fillerMode}
-            onChange={(v) => p.setFillerMode(v as FillerMode)}
-            options={[
-              ['off', 'Off'],
-              ['hesitations', 'Hesitations'],
-              ['all', 'All'],
-            ]}
-          />
-          {/* The examples moved out of the option labels and into one line that
-            * follows the choice — three long labels were most of this field's
-            * height, and only one of them was ever the answer. */}
-          <Hint>{FILLER_HINT[p.fillerMode]}</Hint>
-          {p.fillerMode === 'all' && (
-            <Warn>
-              "Sort of" and "kind of" are sometimes load-bearing. Review before cutting — these are
-              flagged, never cut automatically.
-            </Warn>
-          )}
+      {/* The words — which of them survive. The transcript's provenance and the
+        * Re-transcribe action moved out: the summary lives in the Transcribe
+        * dialog (it is the "before" a re-transcribe replaces), and the entry
+        * point sits at the end of the script itself. */}
+      <SectionGroup label="Edit">
+        <CleanUpField {...p} />
+        <PausesField {...p} />
+        <AdvancedField {...p} />
+      </SectionGroup>
 
-          {/* Your own words fold into the same sweep as the built-in hesitations.
-            * Hidden when the tool is off, since nothing is flagged then. */}
-          {p.fillerMode !== 'off' && (
-            <CustomFillers
-              words={p.customFillers}
-              onAdd={p.onAddCustomFiller}
-              onRemove={p.onRemoveCustomFiller}
-            />
-          )}
-
-          {/* The count lives IN the label, so you know the outcome before you
-            * commit rather than reading it in a notice afterwards. */}
-          <button
-            onClick={p.onRemoveFillers}
-            disabled={!!p.busy || p.fillerMode === 'off' || p.fillerCount === 0}
-          >
-            {p.fillerMode === 'off'
-              ? 'Remove filler words'
-              : p.fillerCount === 0
-                ? 'No filler words found'
-                : `Remove ${p.fillerCount} filler word${p.fillerCount === 1 ? '' : 's'}`}
-          </button>
-
-          <button onClick={p.onRemoveRetakes} disabled={!!p.busy || p.retakeCount === 0}>
-            {p.retakeCount === 0
-              ? 'No false starts found'
-              : `Remove ${p.retakeCount} false start${p.retakeCount === 1 ? '' : 's'}`}
-          </button>
-
-          <button onClick={p.onRestoreAll} disabled={!!p.busy || p.stats.kept === p.stats.words}>
-            Restore everything
-          </button>
-        </Field>
-
-      </div>
-
-      {/* Right: the render — how it is paced, and what it says on screen.
-        *
-        * Pauses is here rather than next to Clean up, which is where it belongs
-        * by meaning, because Captions swings from one checkbox to a dozen
-        * controls and nothing else in the panel does. Alone on the right it
-        * balanced the left beautifully with captions ON and left half the panel
-        * blank with them OFF — which is the default. Pauses is the ballast that
-        * keeps this column real in both states. */}
-      <div className="pcol">
-        <Field label="Pauses" collapsible>
-          <Slider
-            value={gap}
-            min={0}
-            max={2000}
-            step={50}
-            onPointerDown={p.onCutDragStart}
-            onPointerUp={() =>
-              p.onCutDragEnd(gap === 0 ? 'Keep every pause' : `Shorten pauses to ${gap}ms`)
-            }
-            onChange={(v) => p.setCut({ ...p.cut, maxGapMs: v > 0 ? v : Infinity })}
-            format={(v) => (v === 0 ? 'Keep every pause' : `Cap at ${v}ms`)}
-          />
-        </Field>
-
+      {/* The delivery — its shape, its sound, and what it says on screen. */}
+      <SectionGroup label="Output">
+        <FrameField {...p} />
+        <StudioSoundField {...p} />
         <MusicField {...p} />
-
         <CaptionsField {...p} />
-      </div>
-
-      <Advanced {...p} />
+      </SectionGroup>
     </div>
+  );
+}
+
+/**
+ * Fillers and false starts: what gets swept out of the script.
+ *
+ * The header value counts what is currently FLAGGED — the work waiting for you
+ * — because that is the one number that decides whether this section is worth
+ * opening at all. False starts are detected whichever filler mode you are in,
+ * so they count even at Off, and Off with retakes pending must not read as
+ * "nothing to do here".
+ */
+function CleanUpField(p: Props) {
+  const fillers = p.fillerMode === 'off' ? 0 : p.fillerCount;
+  const flagged = fillers + p.retakeCount;
+  const value =
+    p.fillerMode === 'off' && p.retakeCount === 0
+      ? 'Off'
+      : flagged === 0
+        ? 'Nothing flagged'
+        : `${flagged} flagged`;
+
+  return (
+    <Section icon="scissors" label="Clean up" value={value}>
+      <Segmented
+        name="filler"
+        value={p.fillerMode}
+        onChange={(v) => p.setFillerMode(v as FillerMode)}
+        options={[
+          ['off', 'Off'],
+          ['hesitations', 'Hesitations'],
+          ['all', 'All'],
+        ]}
+      />
+      {/* The examples moved out of the option labels and into one line that
+        * follows the choice — three long labels were most of this field's
+        * height, and only one of them was ever the answer. */}
+      <Hint>{FILLER_HINT[p.fillerMode]}</Hint>
+      {p.fillerMode === 'all' && (
+        <Warn>
+          "Sort of" and "kind of" are sometimes load-bearing. Review before cutting — these are
+          flagged, never cut automatically.
+        </Warn>
+      )}
+
+      {/* Your own words fold into the same sweep as the built-in hesitations.
+        * Hidden when the tool is off, since nothing is flagged then. */}
+      {p.fillerMode !== 'off' && (
+        <CustomFillers
+          words={p.customFillers}
+          onAdd={p.onAddCustomFiller}
+          onRemove={p.onRemoveCustomFiller}
+        />
+      )}
+
+      {/* The count lives IN the label, so you know the outcome before you
+        * commit rather than reading it in a notice afterwards. */}
+      <button
+        onClick={p.onRemoveFillers}
+        disabled={!!p.busy || p.fillerMode === 'off' || p.fillerCount === 0}
+      >
+        {p.fillerMode === 'off'
+          ? 'Remove filler words'
+          : p.fillerCount === 0
+            ? 'No filler words found'
+            : `Remove ${p.fillerCount} filler word${p.fillerCount === 1 ? '' : 's'}`}
+      </button>
+
+      <button onClick={p.onRemoveRetakes} disabled={!!p.busy || p.retakeCount === 0}>
+        {p.retakeCount === 0
+          ? 'No false starts found'
+          : `Remove ${p.retakeCount} false start${p.retakeCount === 1 ? '' : 's'}`}
+      </button>
+
+      <button onClick={p.onRestoreAll} disabled={!!p.busy || p.stats.kept === p.stats.words}>
+        Restore everything
+      </button>
+    </Section>
+  );
+}
+
+function PausesField(p: Props) {
+  // 0 is the sentinel for "keep every pause": Infinity does not survive JSON, so
+  // the wire speaks 0 and the document holds Infinity.
+  const gap = p.cut.maxGapMs === Infinity ? 0 : p.cut.maxGapMs;
+
+  return (
+    <Section
+      icon="clock"
+      label="Pauses"
+      value={gap === 0 ? 'All kept' : `Capped at ${gap}ms`}
+    >
+      <Slider
+        value={gap}
+        min={0}
+        max={2000}
+        step={50}
+        onPointerDown={p.onCutDragStart}
+        onPointerUp={() =>
+          p.onCutDragEnd(gap === 0 ? 'Keep every pause' : `Shorten pauses to ${gap}ms`)
+        }
+        onChange={(v) => p.setCut({ ...p.cut, maxGapMs: v > 0 ? v : Infinity })}
+        format={(v) => (v === 0 ? 'Keep every pause' : `Cap at ${v}ms`)}
+      />
+    </Section>
+  );
+}
+
+function StudioSoundField(p: Props) {
+  return (
+    <Section
+      icon="sparkle"
+      label="Studio Sound"
+      toggle={{
+        checked: p.studioSound,
+        onChange: p.onToggleStudioSound,
+        label: 'Studio Sound',
+      }}
+    >
+      <Hint>
+        Cleans up the voice: removes rumble and background noise, lifts presence, evens
+        out the level, and normalises to broadcast loudness. Music beds are left alone.
+        The monitor previews the tone; noise reduction and final loudness are applied on
+        export.
+      </Hint>
+    </Section>
   );
 }
 
@@ -300,6 +409,152 @@ function FontPicker({ value, onChange, customFonts, onImport, onRemove, busy }: 
 }
 
 /**
+ * The output frame: what shape the video is, and which part of the source fills it.
+ *
+ * The panel deliberately owns only the DECISIONS — which delivery, how big, how
+ * far in. Choosing WHAT IS IN SHOT is a spatial judgement about a picture, so it
+ * belongs on the picture: the monitor is dragged directly. This is the same split
+ * as captions, where the style lives here and the placement is a drag on the
+ * frame, and for the same reason — a pair of numeric x/y fields for "put the
+ * speaker's face in the reel" is a worse tool than the face.
+ *
+ * Zoom is here as well as on the wheel because a slider is the only affordance
+ * that shows its range and its current value, and because a trackpad wheel over a
+ * video is a gesture people expect to scroll the page.
+ */
+function FrameField(p: Props) {
+  const { frame } = p;
+  const source = { width: p.project.width ?? 0, height: p.project.height ?? 0 };
+  const out = frameSize(frame, source);
+  // A crop only exists where the picture overflows the frame. At the source
+  // preset with no zoom there is nothing to move, and saying so beats offering a
+  // control that silently does nothing.
+  const cropped =
+    frame.zoom > 1 ||
+    (source.width > 0 && Math.abs(out.width / out.height - source.width / source.height) > 0.01);
+  // The zoom that shows all of the source. 1 when the shapes already match.
+  const fit = fitZoom(source, out);
+
+  const presetName =
+    frame.preset === 'source' ? 'Source'
+      : frame.preset === 'custom' ? 'Custom'
+        : FRAME_PRESETS[frame.preset].label;
+  // The zoom only earns a place in the header when it is doing something. At 1×
+  // it is the default and saying "1.00×" would spend the row's scarcest space on
+  // the absence of a decision.
+  const zoomed = Math.abs(frame.zoom - 1) >= 0.005;
+
+  const setPreset = (preset: FramePreset) => {
+    // Panning is expressed as a fraction of the overflow, so it stays meaningful
+    // across a preset change — the same 0.3 keeps framing the same third of the
+    // picture whether the crop is 9:16 or 1:1. Only the size changes here.
+    const next = normalizeFrame(
+      preset === 'custom'
+        ? { ...frame, preset, width: out.width, height: out.height }
+        : { ...frame, preset },
+    );
+    p.setFrame(next);
+  };
+
+  return (
+    <Section
+      icon="crop"
+      label="Frame"
+      value={`${presetName} · ${out.width}×${out.height}${zoomed ? ` · ${frame.zoom.toFixed(2)}×` : ''}`}
+    >
+      <Segmented
+        name="frame-preset"
+        value={frame.preset}
+        onChange={(v) => setPreset(v as FramePreset)}
+        options={[
+          ['source', 'Source'],
+          ['reel', 'Reel'],
+          ['youtube', 'YouTube'],
+          ['square', 'Square'],
+          ['custom', 'Custom'],
+        ]}
+      />
+
+      {frame.preset === 'custom' ? (
+        <div className="dim-input">
+          <label>
+            <span>Width</span>
+            <input
+              type="number"
+              min={MIN_DIM}
+              max={MAX_DIM}
+              step={2}
+              value={frame.width}
+              onChange={(e) => p.setFrame(normalizeFrame({ ...frame, width: Number(e.target.value) }))}
+            />
+          </label>
+          <span className="dim-x">×</span>
+          <label>
+            <span>Height</span>
+            <input
+              type="number"
+              min={MIN_DIM}
+              max={MAX_DIM}
+              step={2}
+              value={frame.height}
+              onChange={(e) => p.setFrame(normalizeFrame({ ...frame, height: Number(e.target.value) }))}
+            />
+          </label>
+        </div>
+      ) : (
+        <Hint>
+          {frame.preset === 'source'
+            ? `Keeps the source resolution — ${out.width}×${out.height}.`
+            : `${FRAME_PRESETS[frame.preset].hint} — ${out.width}×${out.height}.`}
+        </Hint>
+      )}
+
+      <Slider
+        value={frame.zoom}
+        min={MIN_ZOOM}
+        max={MAX_ZOOM}
+        step={0.01}
+        onChange={(zoom) => p.setFrame({ ...frame, zoom })}
+        format={(v) =>
+          Math.abs(v - 1) < 0.005
+            ? 'Fill the frame'
+            : `${v < 1 ? 'Out' : 'In'} — ${v.toFixed(2)}×`
+        }
+        onPointerDown={p.onFrameDragStart}
+        onPointerUp={() => p.onFrameDragEnd('Zoom frame')}
+      />
+
+      <Hint>
+        {cropped
+          ? 'Drag the picture in the monitor to choose what stays in shot. Scroll over it to zoom.'
+          : 'The source already fills this frame. Zoom, or pick another size, to change the shot.'}
+        {' '}
+        Below 1× the whole picture fits and the rest of the frame is filled black.
+      </Hint>
+
+      <div className="frame-actions">
+        {/* Offered only when fit and fill are different pictures — at a matching
+          * aspect they are the same, and a button that does nothing is noise. */}
+        {fit < 0.995 && (
+          <button
+            type="button"
+            disabled={Math.abs(frame.zoom - fit) < 0.005}
+            onClick={() => p.setFrame({ ...frame, zoom: fit, x: 0, y: 0 })}
+          >
+            Fit whole video
+          </button>
+        )}
+        {(frame.zoom !== 1 || frame.x !== 0 || frame.y !== 0) && (
+          <button type="button" onClick={() => p.setFrame({ ...frame, zoom: 1, x: 0, y: 0 })}>
+            Fill frame
+          </button>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+/**
  * The background-music bed: import, volume, and how long it plays.
  *
  * The defining behaviour, said in the hint because it is the surprising part:
@@ -311,6 +566,7 @@ function FontPicker({ value, onChange, customFonts, onImport, onRemove, busy }: 
 function MusicField(p: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const music = p.project.music;
+  const [browsing, setBrowsing] = useState(false);
 
   const pick = () => inputRef.current?.click();
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -329,28 +585,72 @@ function MusicField(p: Props) {
   const lenValue = Math.min(maxLen, Math.round(music?.durationSec ?? maxLen));
 
   return (
-    <Field label="Background music" collapsible>
+    <Section icon="music" label="Background music" value={music ? music.name : 'None'}>
       <input ref={inputRef} type="file" accept="audio/*" hidden onChange={onFile} />
 
       {!music ? (
         <>
-          <button onClick={pick} disabled={p.musicBusy}>
-            {p.musicBusy ? 'Importing…' : 'Import music…'}
-          </button>
+          <div className="music-sources">
+            <button onClick={() => setBrowsing((v) => !v)} disabled={p.musicBusy}>
+              {browsing ? 'Close browser' : 'Browse free music…'}
+            </button>
+            <button className="link" onClick={pick} disabled={p.musicBusy}>
+              {p.musicBusy ? 'Importing…' : 'Import a file…'}
+            </button>
+          </div>
           <Hint>
             A music bed under the finished video. It plays across the whole cut — never chopped with
             the words — and you set its volume and how long it runs.
           </Hint>
+          {browsing && (
+            <MusicBrowser
+              providers={p.musicProviders}
+              busy={p.musicBusy}
+              onPick={(t) => {
+                p.onPickMusic(t);
+                setBrowsing(false);
+              }}
+            />
+          )}
         </>
       ) : (
         <>
           <div className="music-file">
             <span className="music-name" title={music.name}>{music.name}</span>
             <div className="font-actions">
+              <button className="link" onClick={() => setBrowsing((v) => !v)} disabled={p.musicBusy}>
+                {browsing ? 'Close' : 'Browse…'}
+              </button>
               <button className="link" onClick={pick} disabled={p.musicBusy}>Replace…</button>
               <button className="link danger" onClick={p.onRemoveMusic} disabled={p.musicBusy}>Remove</button>
             </div>
           </div>
+
+          {browsing && (
+            <MusicBrowser
+              providers={p.musicProviders}
+              busy={p.musicBusy}
+              onPick={(t) => {
+                p.onPickMusic(t);
+                setBrowsing(false);
+              }}
+            />
+          )}
+
+          {/* The credit, when the bed came from the picker. Not a Hint but a
+            * Warn, because it is not advice: a CC BY track used without this
+            * line in the video's description breaks the licence, and the person
+            * who has to act on that is the one exporting. Imported files have no
+            * attribution and show nothing. */}
+          {music.attribution && (
+            <Warn>
+              Credit required — put this in your video description:
+              <span className="music-credit">{music.attribution}</span>
+              {music.sourceLink && (
+                <a href={music.sourceLink} target="_blank" rel="noreferrer noopener">Track page</a>
+              )}
+            </Warn>
+          )}
 
           <Slider
             value={Math.round(music.volume * 100)}
@@ -389,7 +689,155 @@ function MusicField(p: Props) {
           </Hint>
         </>
       )}
-    </Field>
+    </Section>
+  );
+}
+
+/**
+ * Search the web for a bed, audition it, take one.
+ *
+ * Audition is the point. A music bed is chosen by ear in about four seconds, so
+ * the flow is search → click play → click play → Use, and nothing is downloaded
+ * until that last click: preview streams straight from the provider's CDN into
+ * one shared <audio>, costing this app nothing per track heard.
+ *
+ * One <audio> and not one per row, because two beds playing at once is never
+ * what anyone meant — starting a track is also how you stop the last one.
+ */
+function MusicBrowser({ providers, busy, onPick }: {
+  providers: MusicProvider[];
+  busy: boolean;
+  onPick: (track: MusicResult) => void;
+}) {
+  const [q, setQ] = useState('');
+  const [instrumental, setInstrumental] = useState(true);
+  const [provider, setProvider] = useState<MusicProvider>(providers[0] ?? 'openverse');
+  const [results, setResults] = useState<MusicResult[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Search on submit, not on keystroke. Both catalogues are public goods on
+  // donated infrastructure — Openverse allows 200 anonymous searches a DAY — and
+  // debounced search-as-you-type would spend that budget on prefixes nobody
+  // meant to search for.
+  const search = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!q.trim() || searching) return;
+    setSearching(true);
+    setError(null);
+    try {
+      const r = await api.music.search(q, { instrumental, provider });
+      setResults(r.results);
+    } catch (err) {
+      setResults(null);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const toggle = (track: MusicResult) => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (playing === track.id) {
+      el.pause();
+      setPlaying(null);
+      return;
+    }
+    el.src = track.previewUrl;
+    el.play().then(
+      () => setPlaying(track.id),
+      // A CDN hiccup or a dead track should not look like a broken app.
+      () => setError(`Could not play “${track.title}”.`),
+    );
+  };
+
+  return (
+    <div className="music-browser">
+      <form className="music-search" onSubmit={search}>
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="calm piano, upbeat, cinematic…"
+          aria-label="Search free music"
+        />
+        <button type="submit" disabled={searching || !q.trim()}>
+          {searching ? '…' : 'Search'}
+        </button>
+      </form>
+
+      <Check
+        checked={instrumental}
+        onChange={setInstrumental}
+        label="Instrumental only"
+      />
+      {/* On by default and worth defending: a bed with a vocal fights the voice
+        * it is sitting under. Jamendo filters on it properly; Openverse has no
+        * such field, so there it only weights the keywords. */}
+      {provider === 'openverse' && instrumental && (
+        <Hint>Openverse has no instrumental filter — this only nudges the search terms.</Hint>
+      )}
+
+      {providers.length > 1 && (
+        <Segmented
+          name="music-provider"
+          value={provider}
+          onChange={(v) => {
+            setProvider(v as MusicProvider);
+            setResults(null);
+          }}
+          options={providers.map((id) => [id, id === 'jamendo' ? 'Jamendo' : 'Openverse'] as [string, string])}
+        />
+      )}
+
+      {/* alert, because this box is the ONLY report that a search you just ran
+        * failed — nothing takes focus and nothing else says so. */}
+      {error && <Warn alert>{error}</Warn>}
+
+      {results?.length === 0 && (
+        <p className="music-empty">
+          Nothing matched. Try a mood rather than a title — “warm”, “tense”, “lo-fi”.
+        </p>
+      )}
+
+      {results && results.length > 0 && (
+        <ul className="music-results">
+          {results.map((t) => (
+            <li key={t.id} className={playing === t.id ? 'music-hit on' : 'music-hit'}>
+              <button
+                className="music-play"
+                onClick={() => toggle(t)}
+                aria-label={playing === t.id ? `Stop ${t.title}` : `Preview ${t.title}`}
+              >
+                {playing === t.id ? '❚❚' : '▶'}
+              </button>
+              <span className="music-meta">
+                <span className="music-title" title={t.title}>{t.title}</span>
+                <span className="music-sub">
+                  {t.artist} · {timecode(t.durationSec)}
+                  {t.license && <em className="music-lic">CC {t.license.toUpperCase()}</em>}
+                </span>
+              </span>
+              <button className="link" disabled={busy} onClick={() => onPick(t)}>
+                Use
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Said once, here, where a track is chosen — rather than only at export,
+        * when it is too late to pick a different one. */}
+      <Hint>
+        Creative Commons tracks. Most require crediting the artist in your video description —
+        the credit line is kept with the project once you pick one.
+      </Hint>
+
+      <audio ref={audioRef} onEnded={() => setPlaying(null)} hidden />
+    </div>
   );
 }
 
@@ -413,20 +861,31 @@ function CaptionsField(p: Props) {
     p.onCaptionDragEnd(label);
   };
 
-  return (
-    <Field label="Captions" collapsible>
-      <Check
-        checked={c.enabled && hasVideo}
-        onChange={(v) => commit(v ? 'Enable captions' : 'Disable captions')({ enabled: v })}
-        disabled={!hasVideo}
-        label="Burn captions into the video"
-      />
+  const on = c.enabled && hasVideo;
 
+  return (
+    <Section
+      icon="captions"
+      label="Captions"
+      /* `c.font` and not the CAPTION_FONTS label: the stored value is the family
+       * name for BOTH a built-in and an imported font ("Arial", "Inter Tight"),
+       * which is short and is what anyone recognises. The picker's labels are
+       * long on purpose — "Sans — Arial / Liberation Sans" names the fallback
+       * you get on a Linux render box — and one of those in a header would
+       * truncate away the size, which is the number worth reading here. */
+      value={on ? `${c.font} · ${c.fontSize}px` : undefined}
+      toggle={{
+        checked: on,
+        onChange: (v) => commit(v ? 'Enable captions' : 'Disable captions')({ enabled: v }),
+        disabled: !hasVideo,
+        label: 'Burn captions into the video',
+      }}
+    >
       {!hasVideo && (
         <Hint>This project is audio only, so there is no picture to burn captions onto.</Hint>
       )}
 
-      {c.enabled && hasVideo && (
+      {on && (
         <>
           <Hint>Drag the caption on the monitor to place it.</Hint>
 
@@ -543,22 +1002,22 @@ function CaptionsField(p: Props) {
           </Hint>
         </>
       )}
-    </Field>
+    </Section>
   );
 }
 
 /* Cut padding and micro-fades are engine constants with correct defaults, not
  * decisions. Surfacing them as top-level sliders is a large part of why this
- * read as a debug panel. Native <details>: full keyboard and screen-reader
- * support, no JS. */
-function Advanced(p: Props) {
+ * read as a debug panel.
+ *
+ * It is a Section like the rest now rather than a lone <details> slung under
+ * both columns. Its old full-width, two-up shape existed to keep it off the
+ * scroll; a row that is one line tall until you ask has no such problem, and
+ * being the last row under EDIT is also where it belongs — every control in
+ * here shapes the cut. */
+function AdvancedField(p: Props) {
   return (
-    <details className="advanced">
-        <summary>Advanced</summary>
-
-        {/* Spans both columns, so these two sit side by side rather than
-          * extending the scroll by another 260px. */}
-        <div className="adv-grid">
+    <Section icon="sliders" label="Advanced">
         <Field label="Retake detection">
           <Slider
             value={p.retakeMin}
@@ -596,7 +1055,6 @@ function Advanced(p: Props) {
           />
           {p.cut.fadeMs === 0 && <Warn>0ms will click audibly at every cut.</Warn>}
         </Field>
-        </div>
-    </details>
+    </Section>
   );
 }

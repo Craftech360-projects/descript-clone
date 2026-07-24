@@ -165,6 +165,12 @@ export interface RenderJob {
    * Its `durationSec` is already resolved to the output clock by the caller.
    */
   bgMusic?: BgMusicRender;
+  /**
+   * Run the program audio through the Studio Sound voice chain before the music
+   * bed is mixed in — so the enhancer works on the voice alone and never touches
+   * the bed. See studioSoundStages in render.ts.
+   */
+  studioSound?: boolean;
 }
 
 export async function renderEdl(
@@ -172,7 +178,7 @@ export async function renderEdl(
   job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
-  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic } = job;
+  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound } = job;
   // A multi-clip stitch when the caller handed us one file per EDL clip. A single
   // clip falls through to the original single-input path, byte-identical.
   const sequence = Boolean(edl.clips && edl.clips.length > 1 && job.clips && job.clips.length === edl.clips.length);
@@ -229,6 +235,7 @@ export async function renderEdl(
       speed,
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
+      studioSound,
     });
   } else {
     plan = buildRenderPlan(edl, {
@@ -240,6 +247,7 @@ export async function renderEdl(
       fps,
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
+      studioSound,
     });
   }
   await writeFile(scriptPath, plan.filterScript, 'utf8');

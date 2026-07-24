@@ -4,8 +4,9 @@ import { Empty } from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
+import type { FrameSettings } from '../../../../packages/core/src/frame.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
-import type { CustomFont, Project } from '../api.ts';
+import type { CustomFont, MusicProvider, MusicResult, Project } from '../api.ts';
 
 interface Props {
   project: Project | null;
@@ -25,6 +26,14 @@ interface Props {
   onCaptionDragStart: () => void;
   onCaptionDragEnd: (label: string) => void;
 
+  studioSound: boolean;
+  onToggleStudioSound: (enabled: boolean) => void;
+
+  frame: FrameSettings;
+  setFrame: (f: FrameSettings) => void;
+  onFrameDragStart: () => void;
+  onFrameDragEnd: (label: string) => void;
+
   customFonts: CustomFont[];
   onImportFont: (file: File) => void;
   onRemoveFont: (id: string) => void;
@@ -34,6 +43,8 @@ interface Props {
   onUpdateMusic: (patch: { volume?: number; durationSec?: number | null }) => void;
   onRemoveMusic: () => void;
   musicBusy: boolean;
+  onPickMusic: (track: MusicResult) => void;
+  musicProviders: MusicProvider[];
 
   fillerMode: FillerMode;
   setFillerMode: (m: FillerMode) => void;
@@ -130,6 +141,12 @@ export default function Rail(p: Props) {
         setCaptions={p.setCaptions}
         onCaptionDragStart={p.onCaptionDragStart}
         onCaptionDragEnd={p.onCaptionDragEnd}
+        studioSound={p.studioSound}
+        onToggleStudioSound={p.onToggleStudioSound}
+        frame={p.frame}
+        setFrame={p.setFrame}
+        onFrameDragStart={p.onFrameDragStart}
+        onFrameDragEnd={p.onFrameDragEnd}
         customFonts={p.customFonts}
         onImportFont={p.onImportFont}
         onRemoveFont={p.onRemoveFont}
@@ -138,6 +155,8 @@ export default function Rail(p: Props) {
         onUpdateMusic={p.onUpdateMusic}
         onRemoveMusic={p.onRemoveMusic}
         musicBusy={p.musicBusy}
+        onPickMusic={p.onPickMusic}
+        musicProviders={p.musicProviders}
         fillerMode={p.fillerMode}
         setFillerMode={p.setFillerMode}
         customFillers={p.customFillers}

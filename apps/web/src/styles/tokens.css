@@ -67,6 +67,11 @@
   --sunk: #070707;        /* wells: inputs, chips, readouts */
   --chrome: #0b0b0b;      /* panel surfaces: rails, dock, titlebar */
   --raised: #151515;      /* floats above chrome: menus, dialogs, drawer */
+  --mat: #303030;         /* the stage AROUND the output frame — see .stage.
+                           * Deliberately not black: the frame's own letterbox
+                           * bars ARE black and do ship in the file, so a black
+                           * surround made the deliverable's edge invisible.
+                           * Grey is the mount board, black is the picture. */
 
   /* Load-bearing. On black these ARE the layout. */
   --line: #262626;

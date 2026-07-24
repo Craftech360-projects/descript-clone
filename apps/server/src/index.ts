@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, rename, unlink } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -13,6 +13,13 @@ import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
+import {
+  availableProviders,
+  downloadMusic,
+  isAllowedMusicUrl,
+  searchMusic,
+  type MusicProviderId,
+} from './music-search.ts';
 
 import {
   normalizeCaptions,
@@ -23,6 +30,12 @@ import { detectFillers, removeFillers } from '../../../packages/core/src/fillers
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
 import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
 import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts';
+import {
+  frameSize,
+  normalizeFrame,
+  resolveFrame,
+  type FrameSettings,
+} from '../../../packages/core/src/frame.ts';
 import type { CompileOptions, Edl, Transcript, Word } from '../../../packages/core/src/types.ts';
 
 await store.init();
@@ -73,6 +86,12 @@ app.get('/api/capabilities', (c) =>
     asrModels: ASR_MODELS,
     asrDefaults: ASR_DEFAULTS,
     editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
+    /**
+     * Where the music picker can search. Never empty — Openverse needs no key,
+     * so unlike ASR this capability degrades in QUALITY rather than switching
+     * off, and the panel says which catalogue it is on rather than hiding.
+     */
+    musicProviders: availableProviders(),
   }),
 );
 
@@ -183,6 +202,50 @@ app.post('/api/projects', async (c) => {
 app.get('/api/projects/:id', async (c) => {
   const project = await store.get(c.req.param('id'));
   return project ? c.json(project) : c.json({ error: 'No such project' }, 404);
+});
+
+/** How long a project name may be. Long enough for a real filename, short
+ *  enough that a card, a title bar and a render filename can all hold it. */
+const MAX_NAME = 120;
+
+/**
+ * Rename a project.
+ *
+ * The name is a label and nothing else: every file on disk is keyed by the
+ * project's id, so this touches one string and no bytes move. It is still a
+ * PATCH on the project rather than a field on the transcript PATCH, because it
+ * is not part of the edit — renaming does not dirty the document or push an
+ * undo step.
+ */
+app.patch('/api/projects/:id', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  const body = await c.req.json<{ name?: unknown }>().catch(() => ({ name: undefined }));
+  // Collapse whitespace as well as trim: a name pasted out of a shell or a
+  // spreadsheet arrives with newlines in it, and a card cannot show those.
+  const name = String(body.name ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME);
+  if (!name) return c.json({ error: 'A project needs a name.' }, 400);
+
+  project.name = name;
+  await store.save(project);
+  return c.json({ project });
+});
+
+/**
+ * Delete a project: the record, its media, its cover, its filmstrip. Renders are
+ * kept — see store.remove.
+ *
+ * There is no undo for this on either side, so the client asks before it calls.
+ */
+app.delete('/api/projects/:id', async (c) => {
+  const id = c.req.param('id');
+  // Anything still running against this project would write its result back to a
+  // record that no longer exists — and, for thumbs, back into a directory we are
+  // in the middle of clearing. Stop them first.
+  for (const job of jobs.list(id)) jobs.cancel(job.id);
+  const removed = await store.remove(id);
+  return removed ? c.json({ ok: true }) : c.json({ error: 'No such project' }, 404);
 });
 
 /**
@@ -516,6 +579,102 @@ app.post('/api/projects/:id/music', async (c) => {
   return c.json(project);
 });
 
+/**
+ * Search the web for a bed, and import one that was found.
+ *
+ * Split in two on purpose: searching is cheap and happens on every keystroke's
+ * worth of intent, while importing spends a real download. Preview in between
+ * costs this server nothing — the client points an <audio> straight at the
+ * provider's CDN, and only the track actually chosen is ever fetched to disk.
+ */
+app.get('/api/music/search', async (c) => {
+  const q = c.req.query('q') ?? '';
+  const provider = c.req.query('provider') as MusicProviderId | undefined;
+  const available = availableProviders();
+  if (provider && !available.includes(provider)) {
+    return c.json({ error: `The "${provider}" music provider is not configured.` }, 400);
+  }
+  try {
+    const results = await searchMusic(
+      { q, instrumental: c.req.query('instrumental') === '1', limit: Number(c.req.query('limit')) || 24 },
+      provider,
+    );
+    return c.json({ results, provider: provider ?? available[0] });
+  } catch (e) {
+    // A provider being down or rate-limiting is not this server erroring; say
+    // which it was so the panel can show something better than "failed".
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+  }
+});
+
+/**
+ * Attach a searched track as the project's bed.
+ *
+ * Deliberately a sibling of the upload route rather than a branch inside it:
+ * once the bytes are on disk the two are identical, so everything after the
+ * fetch — probe-as-validation, the BgMusic record, the quiet default volume — is
+ * the same code path, and a bed sourced from the web is indistinguishable
+ * downstream from one that was imported. What it adds is the credit trail.
+ */
+app.post('/api/projects/:id/music/url', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  const body = await c.req
+    .json<{ url?: string; name?: string; attribution?: string; license?: string; link?: string }>()
+    .catch(() => ({}) as Record<string, undefined>);
+
+  const url = typeof body.url === 'string' ? body.url : '';
+  // The URL always comes from our own search results, so an allowlist of the
+  // providers' hosts is free — and without it this route is an SSRF into
+  // whatever the server can reach. See MUSIC_HOSTS in music-search.ts.
+  if (!isAllowedMusicUrl(url)) {
+    return c.json({ error: 'That music URL is not from a supported provider.' }, 400);
+  }
+
+  const musicId = randomUUID();
+  // The extension is not known until the response's content-type arrives — the
+  // Jamendo CDN URL has no path extension at all — so download to a temporary
+  // name and rename once it is. ffprobe sniffs the container, but keeping the
+  // extension honest matters for the <audio> the browser previews it with.
+  const tmpPath = join(CONFIG.mediaDir, 'uploads', `${musicId}.part`);
+  let sourcePath: string;
+  let sourceUrl: string;
+  try {
+    const { ext } = await downloadMusic(url, tmpPath);
+    sourcePath = join(CONFIG.mediaDir, 'uploads', `${musicId}${ext}`);
+    await rename(tmpPath, sourcePath);
+    sourceUrl = `/media/uploads/${musicId}${ext}`;
+  } catch (e) {
+    await unlink(tmpPath).catch(() => {});
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+  }
+
+  let duration: number;
+  try {
+    duration = (await probe(sourcePath)).duration;
+  } catch {
+    await unlink(sourcePath).catch(() => {});
+    return c.json({ error: 'That track could not be read as audio.' }, 400);
+  }
+
+  project.music = {
+    id: musicId,
+    name: typeof body.name === 'string' && body.name ? body.name : 'Background music',
+    sourcePath,
+    sourceUrl,
+    sourceDuration: duration,
+    volume: MUSIC_DEFAULT_VOLUME,
+    // Kept with the project, not just shown once in the picker: a CC BY bed owes
+    // its credit at publish time, which is long after the picker closed.
+    attribution: typeof body.attribution === 'string' ? body.attribution : undefined,
+    license: typeof body.license === 'string' ? body.license : undefined,
+    sourceLink: typeof body.link === 'string' ? body.link : undefined,
+  };
+  await store.save(project);
+  return c.json(project);
+});
+
 app.patch('/api/projects/:id/music', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project) return c.json({ error: 'No such project' }, 404);
@@ -556,11 +715,13 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions, speed, cut } = await c.req.json<{
+  const { deletedIds, captions, speed, cut, studioSound, frame } = await c.req.json<{
     deletedIds: string[];
     captions?: CaptionSettings;
     speed?: number;
     cut?: Partial<CutSettings>;
+    studioSound?: boolean;
+    frame?: Partial<FrameSettings>;
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
@@ -572,6 +733,10 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   // keep every pause), and every field is coerced to a real number so a bad body
   // cannot poison the compiler on the next render.
   if (cut) project.cut = sanitizeCut(cut);
+  if (studioSound !== undefined) project.studioSound = Boolean(studioSound);
+  // normalizeFrame is the coercion, same contract as sanitizeCut above: a bad
+  // width, a NaN zoom, or an unknown preset off the wire cannot reach the graph.
+  if (frame !== undefined) project.frame = normalizeFrame(frame);
 
   await store.save(project);
   return c.json({ ok: true });
@@ -653,7 +818,17 @@ app.post('/api/projects/:id/captions', async (c) => {
     format === 'vtt'
       ? toVtt(cues)
       : format === 'ass'
-        ? toAss(cues, captions, { width: project.width ?? 1920, height: project.height ?? 1080 })
+        ? // The frame the sidecar will be laid over is the RENDERED one, not the
+          // source — an .ass authored at 1920x1080 puts every caption in the wrong
+          // place over a 1080x1920 reel.
+          toAss(
+            cues,
+            captions,
+            frameSize(normalizeFrame(project.frame), {
+              width: project.width ?? 1920,
+              height: project.height ?? 1080,
+            }),
+          )
         : toSrt(cues);
 
   return c.json({ format, cues: cues.length, content: body });
@@ -688,6 +863,23 @@ app.post('/api/projects/:id/render', async (c) => {
     ...(options.captions ?? {}),
   });
   const wantsCaptions = Boolean(options.burnCaptions ?? captions.enabled);
+
+  // The output frame, resolved before captions because captions are placed
+  // against it. Layered the same way as the caption style: the request wins over
+  // the record, per field, so an Export fired mid-debounce reframes to what is on
+  // screen. The SOURCE it is resolved against is the stitched canvas on a
+  // multi-clip project (render.width/height) and the file's own size otherwise.
+  const frameSettings = normalizeFrame({ ...project.frame, ...(options.frame ?? {}) });
+  const sourceSize = {
+    width: render?.width ?? project.width ?? 1920,
+    height: render?.height ?? project.height ?? 1080,
+  };
+  const outSize = frameSize(frameSettings, sourceSize);
+  // null when the setting would change nothing — then no scale/crop is emitted at
+  // all and the picture is passed through untouched. Audio-only has no picture to
+  // reframe, so it never gets one either.
+  const frame = project.hasVideo ? (resolveFrame(frameSettings, sourceSize) ?? undefined) : undefined;
+
   const subtitles =
     wantsCaptions && project.hasVideo
       ? toAss(
@@ -697,8 +889,10 @@ app.post('/api/projects/:id/render', async (c) => {
           }),
           captions,
           // libass scales the script canvas to the frame, so these must be the
-          // real output dimensions or every position lands somewhere else.
-          { width: project.width ?? 1920, height: project.height ?? 1080 },
+          // real output dimensions or every position lands somewhere else — which
+          // is why this is the RESOLVED frame and not the source's size. Burn-in
+          // happens after the crop, so the canvas libass paints on is outSize.
+          outSize,
         )
       : undefined;
 
@@ -757,6 +951,13 @@ app.post('/api/projects/:id/render', async (c) => {
         height: render?.height,
         // The music bed, mixed under the finished program. Absent = clean render.
         bgMusic,
+        // The Studio Sound voice chain, run on the program before the bed. Live
+        // settings win over the stored flag for the same reason the music ones do:
+        // an Export fired mid-debounce should use the toggle on screen.
+        studioSound: Boolean(options.studioSound ?? project.studioSound),
+        // The crop into the target resolution. Absent = the picture keeps the
+        // source's shape, and the video graph is emitted as it was before.
+        frame,
         // fps deliberately omitted: renderEdl probes fresh so a project imported
         // before the avg_frame_rate fix does not export at its stale, wrong rate.
       },
@@ -967,4 +1168,7 @@ app.onError((err, c) => {
 serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
   console.log(`server  http://localhost:${info.port}`);
   console.log(`asr     ${CONFIG.hasAsr() ? 'ElevenLabs Scribe' : 'disabled (mock ASR)'}`);
+  console.log(
+    `music   ${CONFIG.jamendoClientId ? 'Jamendo + Openverse' : 'Openverse only (set JAMENDO_CLIENT_ID for more)'}`,
+  );
 });

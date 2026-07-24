@@ -77,8 +77,14 @@ export const DEFAULT_CAPTIONS: CaptionSettings = {
   // #FFD500 highlighter yellow, which belongs to no palette here.
   highlightColor: '#C8A87A',
   strokeColor: '#000000',
+  // In box mode this is the box's padding, not an outline width — see strokeRole.
   strokeWidth: 3,
-  backdrop: 'none',
+  // A solid box, because a default has to survive footage nobody has shot yet.
+  // An outline holds up over most pictures and disappears over a few — high-key
+  // white, snow, a blown-out sky — and the one it fails over is exactly the one
+  // where you would not think to check. The box is legible over anything, which
+  // is the only property a default can be chosen on.
+  backdrop: 'box',
   allCaps: false,
   maxChars: 42,
   x: 0.5,

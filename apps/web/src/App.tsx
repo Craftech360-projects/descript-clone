@@ -10,6 +10,7 @@ import {
   type CustomFont,
   type JobKind,
   type MediaItem,
+  type MusicResult,
   type Project,
   type RenderResult,
   type AsrOptions,
@@ -19,6 +20,7 @@ import { renderFilename, saveAs } from './download.ts';
 import Script from './Script.tsx';
 import Timeline from './Timeline.tsx';
 import TitleBar from './shell/TitleBar.tsx';
+import Dashboard from './shell/Dashboard.tsx';
 import Library from './shell/Library.tsx';
 import Monitor from './shell/Monitor.tsx';
 import Transport from './shell/Transport.tsx';
@@ -42,6 +44,7 @@ import {
   removeRetakes,
   restoreAll,
   retrySave,
+  runImportChain,
   selectedIds,
   setSaver,
   setSelection,
@@ -50,6 +53,10 @@ import {
   updateCut,
   updateCaptions,
   updateSpeed,
+  updateStudioSound,
+  updateFrame,
+  beginFrameDrag,
+  endFrameDrag,
   beginCaptionDrag,
   endCaptionDrag,
   useEditor,
@@ -61,7 +68,15 @@ import { lastStartingAtOrBefore } from '../../../packages/core/src/paragraphs.ts
 import { speakers, colorMap } from './speakers.ts';
 import { usePlayback } from './store/playback.ts';
 import { useMusicPreview } from './store/musicPreview.ts';
+import { useStudioSoundPreview } from './store/studioSound.ts';
+import {
+  autoImportCount,
+  loadAutoImport,
+  saveAutoImport,
+  type AutoImport,
+} from './store/autoImport.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
+import { DEFAULT_FRAME } from '../../../packages/core/src/frame.ts';
 import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
 import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
@@ -143,6 +158,11 @@ export default function App() {
   const [customFillers, setCustomFillers] = useState<string[]>(loadCustomFillers);
   const [retakeMin, setRetakeMin] = useState(2);
 
+  // Which steps run by themselves on import. A personal preference, so it is
+  // read from and written to localStorage, exactly like the custom filler words.
+  const [autoImport, setAutoImport] = useState<AutoImport>(loadAutoImport);
+  useEffect(() => saveAutoImport(autoImport), [autoImport]);
+
   // Persist the user's custom filler words across reloads. They are a personal
   // preference, not project data, so localStorage — not the server — is home.
   useEffect(() => {
@@ -170,11 +190,17 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   // The <audio> that plays the music bed in the monitor, on the output clock.
   const musicRef = useRef<HTMLAudioElement>(null);
+  // The output frame element in the monitor. Shared with the caption overlay,
+  // which measures the same rectangle so a caption is placed against the frame
+  // that ships rather than against the source picture behind it.
+  const frameRef = useRef<HTMLDivElement>(null);
+
   const { doc, selection, flash, reveal, saveStatus } = useEditor();
 
   const words = doc?.words ?? [];
   const cut = doc?.cut ?? null;
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
+  const frame = doc?.frame ?? DEFAULT_FRAME;
   const speed = doc?.speed ?? DEFAULT_SPEED;
   const history = historyState();
 
@@ -248,6 +274,8 @@ export default function App() {
           deletedIds: d.words.filter((w) => w.deleted).map((w) => w.id),
           captions: d.captions,
           speed: d.speed,
+          studioSound: d.studioSound,
+          frame: d.frame,
           // Infinity ("keep every pause") does not survive JSON — cutToWire maps
           // it to the 0 the server and disk speak.
           cut: cutToWire(d.cut),
@@ -378,8 +406,89 @@ export default function App() {
       // its clip's offset once here, so every consumer downstream stays a single-
       // timeline code path and only the EDL compile splits back per clip. A
       // single-source project has offset 0, so this is a no-op for it.
-      loadDoc(globalizeTranscript(p), cutFromWire(p.cut, defaults), normalizeCaptions(p.captions), p.speed);
+      loadDoc(
+        globalizeTranscript(p),
+        cutFromWire(p.cut, defaults),
+        normalizeCaptions(p.captions),
+        p.speed,
+        p.studioSound,
+        p.frame,
+      );
     } else clearDoc();
+  };
+
+  // --- the on-import chain ------------------------------------------------------
+  /**
+   * Take a file that just landed all the way to something you could export.
+   *
+   * Transcribe, cut the hesitations, cap the pauses, set the speed, enhance the
+   * voice, turn on the captions — the six things you would otherwise do by hand,
+   * in the only order they work in. Which of them run is the user's, in the
+   * Library drawer under "On import"; see store/autoImport.ts.
+   *
+   * The split here is deliberate. Transcription is a SERVER JOB: it has to be
+   * awaited, it can fail, and it replaces the document wholesale, so it lives up
+   * here where the project state and the progress bar are. The steps after it are
+   * pure edits to the document, so they go down into the store as one batch —
+   * one undo step, one save, and no chance of racing the debounced write.
+   *
+   * Failures propagate to `run`, which shows the banner and clears busy. A chain
+   * that dies at transcription leaves an imported, untranscribed project — which
+   * is exactly the state importing has always left you in, so nothing is lost.
+   */
+  const runAutoImport = async (imported: Project): Promise<Project> => {
+    const steps = autoImport;
+    let p = imported;
+    if (autoImportCount(steps) === 0) return p;
+
+    let transcribed = false;
+    if (steps.transcribe && !p.transcript) {
+      if (!caps?.hasAsr || !asr) {
+        setNotice(
+          'Imported. The on-import chain starts with transcription, and no ASR provider is ' +
+            'configured — set ELEVENLABS_API_KEY on the server, or run Transcribe by hand.',
+        );
+        return p;
+      }
+      const { jobId } = await api.transcribe(p.id, asr);
+      setJob({ id: jobId, progress: -1, stage: 'Transcribing', kind: 'transcribe' });
+      await waitForJob(jobId, (j) =>
+        setJob({ id: jobId, progress: j.progress, stage: j.stage, kind: 'transcribe' }),
+      );
+      setJob(null);
+      // The job returns an id, not the project — a 485KB payload has no business
+      // in a record polled twice a second. Same reason as doTranscribe.
+      p = await api.get(p.id);
+      setProject(p);
+      openTranscript(p, editDefaults(caps));
+      setLibrary(await api.list());
+      transcribed = true;
+    }
+
+    // Hesitations only, never the wider "All" sweep: "sort of" and "I mean" are
+    // load-bearing often enough that nothing should cut them unasked. The custom
+    // words ride along, since those the user chose by name.
+    const done = runImportChain({
+      fillers: steps.fillers
+        ? { includeDiscourseMarkers: false, customWords: customFillers }
+        : null,
+      maxGapMs: steps.pauses ? steps.pauseCapMs : null,
+      speed: steps.speed ? steps.speedValue : null,
+      studioSound: steps.studioSound ? true : null,
+      captions: steps.captions ? true : null,
+    });
+
+    // Land it now rather than 800ms from now: the chain is the last thing that
+    // happens to an import, so there is nothing coming to coalesce with.
+    flushSave();
+
+    const applied = [...(transcribed ? ['transcribed'] : []), ...done.applied];
+    setNotice(
+      applied.length > 0
+        ? `Ready — ${applied.join(', ')}. Undo takes the clean-up back in one step.`
+        : 'Imported. Nothing in the on-import chain had anything to do.',
+    );
+    return p;
   };
 
   // --- library -----------------------------------------------------------------
@@ -390,10 +499,15 @@ export default function App() {
       openTranscript(p, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
-      // Import does NOT transcribe — that is your call. The rail now offers it
-      // in place, so there is no tab to send you to.
-      return p;
-    });
+      // Import still does not transcribe on its own — but if you have asked for
+      // the on-import chain, this is where it runs. With every step off this
+      // returns immediately and importing means exactly what it always did.
+      //
+      // After the api.list() await, deliberately: React has flushed the render
+      // that setProject queued, so the effect keyed on project.id has installed
+      // the saver and the chain's edits actually persist.
+      return await runAutoImport(p);
+    }).finally(() => setJob(null));
 
   /**
    * Append another source file to the OPEN project, extending its timeline.
@@ -433,6 +547,23 @@ export default function App() {
       openTranscript(fresh, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+
+      // The on-import chain applies here too, but only its filler step, and only
+      // over the clip that just arrived. The rest are DOCUMENT settings — pauses,
+      // speed, the enhancer, captions — which this project already decided when it
+      // was imported; re-asserting them would quietly overrule any change made
+      // since. Adding footage is not permission to reset the edit.
+      if (autoImport.fillers && newId && jobId) {
+        const done = runImportChain({
+          fillers: { includeDiscourseMarkers: false, customWords: customFillers },
+          fillersInClipId: newId,
+          maxGapMs: null,
+          speed: null,
+          studioSound: null,
+          captions: null,
+        });
+        if (done.fillers > 0) setNotice(`Clip added — ${done.applied.join(', ')} from it.`);
+      }
       return fresh;
     }).finally(() => setJob(null));
 
@@ -554,6 +685,32 @@ export default function App() {
     }
   };
 
+  /**
+   * Attach a bed found through the picker.
+   *
+   * Same shape as importMusic, and deliberately so — the difference is only
+   * where the bytes come from, and the server does that fetching, so the browser
+   * never holds them. Everything after this point cannot tell the two apart.
+   */
+  const pickMusic = async (track: MusicResult) => {
+    if (!project) return;
+    setMusicBusy(true);
+    setError(null);
+    try {
+      const p = await api.music.fromUrl(project.id, track);
+      setProject((cur) => (cur?.id === p.id ? p : cur));
+      setNotice(
+        track.attribution
+          ? `Added “${track.title}”. Remember to credit ${track.artist} — the line is in the Music panel.`
+          : `Added “${track.title}” as background music.`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMusicBusy(false);
+    }
+  };
+
   const removeMusic = async () => {
     if (!project) return;
     setMusicBusy(true);
@@ -630,6 +787,65 @@ export default function App() {
       setResult(null);
       return p;
     });
+
+  /**
+   * Close the project and go back to the grid.
+   *
+   * flushSave first, and awaited: edits are written on a debounce, so leaving the
+   * editor is the one moment where a pending write has nowhere left to land —
+   * clearDoc would drop it. Everything after is the reverse of openProject.
+   */
+  const goHome = async () => {
+    await flushSave();
+    videoRef.current?.pause();
+    clearDoc();
+    setProject(null);
+    setResult(null);
+    setLibOpen(false);
+    setDialog(null);
+    setError(null);
+    setNotice(null);
+    api.list().then(setLibrary).catch(() => {});
+  };
+
+  /**
+   * Delete a project outright — the record and the media file behind it.
+   *
+   * The one action here with no undo, which is why both callers ask first. If it
+   * is the open project, leave the editor BEFORE the request: goHome flushes the
+   * debounced save, and a pending write landing on a record the server has just
+   * deleted would either 404 into the error strip or, worse, recreate it.
+   */
+  /**
+   * Rename a project, optimistically.
+   *
+   * The grid updates before the request lands. A rename is one string on a
+   * record nothing else is keyed by, so the only failure mode is that it does
+   * not stick — and the refresh in the catch puts the old name straight back.
+   * Waiting a round trip to redraw a label you just typed is the worse trade.
+   */
+  const renameProject = async (id: string, name: string) => {
+    const clean = name.replace(/\s+/g, ' ').trim();
+    const before = library.find((m) => m.id === id);
+    if (!clean || !before || clean === before.name) return;
+
+    setLibrary((prev) => prev.map((m) => (m.id === id ? { ...m, name: clean } : m)));
+    if (project?.id === id) setProject((p) => (p ? { ...p, name: clean } : p));
+    try {
+      await api.rename(id, clean);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setLibrary(await api.list().catch(() => library));
+    }
+  };
+
+  const deleteProject = async (id: string) => {
+    if (project?.id === id) await goHome();
+    await run('delete', async () => {
+      await api.remove(id);
+      setLibrary(await api.list());
+    });
+  };
 
   /**
    * Build the filmstrip on first open of a video project.
@@ -712,13 +928,16 @@ export default function App() {
         speed,
         // The bed's live settings ride along too, so an Export fired mid-debounce
         // still uses the volume/length on screen rather than the last saved ones.
-        music: project!.music
-          ? {
-              volume: project!.music.volume,
-              durationSec: project!.music.durationSec ?? null,
-              loop: Boolean(project!.music.loop),
-            }
-          : undefined,
+        music: {
+          enabled: project?.music ? true : false,
+          volume: pendingMusic.current?.volume ?? project?.music?.volume ?? 1,
+          durationSec: pendingMusic.current?.durationSec ?? project?.music?.durationSec ?? null,
+          loop: pendingMusic.current?.loop ?? project?.music?.loop ?? false,
+        },
+        studioSound: doc?.studioSound ?? project?.studioSound ?? false,
+        // Same reason as captions and speed above: an Export fired mid-debounce
+        // must reframe to the crop on screen, not to the last one that saved.
+        frame: doc?.frame ?? project?.frame,
       });
       setJob({ id: jobId, progress: -1, stage: 'Starting', kind: 'render' });
 
@@ -878,6 +1097,11 @@ export default function App() {
     loop: Boolean(project?.music?.loop),
     sourceDuration: project?.music?.sourceDuration ?? 0,
   });
+
+  // The voice enhancer on the monitor. Deliberately on the <video> only: the bed
+  // has its own element and the render mixes it in AFTER the chain, so leaving it
+  // out here is what makes the preview match.
+  useStudioSoundPreview({ videoRef, enabled: doc?.studioSound ?? false });
 
   // The bed drawn as a lane on the timeline. The timeline is SOURCE time and the
   // bed lives on the OUTPUT clock, so map its end back: musicEndSec is post-speed,
@@ -1039,6 +1263,33 @@ export default function App() {
 
   if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
 
+  // --- the start screen ---------------------------------------------------------
+  /**
+   * With nothing open, the app IS the project grid — not the workspace with its
+   * five columns greyed out around a line of text. The editor is a view onto a
+   * document; with no document there is nothing for it to be a view onto.
+   *
+   * Every hook above still runs, so this early return is a rendering choice and
+   * not a second app: opening a project from here flips it back with all the
+   * state — capabilities, fonts, the on-import chain — already in place.
+   */
+  if (!project) {
+    return (
+      <Dashboard
+        projects={library}
+        importing={busy === 'import'}
+        progress={job?.progress ?? null}
+        opening={busy === 'open'}
+        onOpen={(id) => void openProject(id)}
+        onDelete={(id) => void deleteProject(id)}
+        onRename={(id, name) => void renameProject(id, name)}
+        onImport={importFile}
+        error={error}
+        onDismissError={() => setError(null)}
+      />
+    );
+  }
+
   // --- workspace ---------------------------------------------------------------
   return (
     <div
@@ -1052,6 +1303,7 @@ export default function App() {
         saveStatus={saveStatus}
         onRetrySave={retrySave}
         onToggleLibrary={() => setLibOpen((v) => !v)}
+        onHome={() => void goHome()}
         canUndo={history.canUndo}
         canRedo={history.canRedo}
         undoLabel={history.undoLabel}
@@ -1064,13 +1316,12 @@ export default function App() {
         exporting={busy === 'render'}
       />
 
-      {/* ---- media library + speakers: a drawer behind the ☰ ---- */}
+      {/* ---- the open project's clips + speakers: a drawer behind the ☰ ----
+        * No longer the media library. Every project lives on the Dashboard, at a
+        * size worth looking at; this is about the one you have open. */}
       <Library
-        library={library}
-        openId={project?.id ?? null}
         speakers={cast}
         hasScript={!!doc}
-        importing={busy === 'import'}
         clips={clips}
         activeClipId={activeClip?.id ?? null}
         addingClip={busy === 'addClip'}
@@ -1080,9 +1331,10 @@ export default function App() {
         onSelectClip={(c) => seek(c.offset)}
         open={libOpen}
         onClose={() => setLibOpen(false)}
-        onOpen={(id) => { setLibOpen(false); void openProject(id); }}
-        onImport={importFile}
         onSeek={seek}
+        autoImport={autoImport}
+        onAutoImport={setAutoImport}
+        canTranscribe={!!caps?.hasAsr}
       />
 
       {/* ---- the transcript: the left column, the surface you edit on ---- */}
@@ -1101,13 +1353,9 @@ export default function App() {
         {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
         {notice && !error && <p className="notice" onClick={() => setNotice(null)}>{notice}</p>}
 
-        {!project && (
-          <div className="canvas-empty">
-            <h2>Nothing open</h2>
-            <p>Open the ☰ menu to import media. Nothing is transcribed until you ask for it.</p>
-          </div>
-        )}
-
+        {/* No "nothing open" state here any more: with no project the app renders
+          * the Dashboard instead of this workspace, so `project` is non-null from
+          * here down. */}
         {project && !doc && (
           <div className="canvas-empty">
             <h2>{project.name}</h2>
@@ -1147,10 +1395,16 @@ export default function App() {
           onTimeUpdate={onTimeUpdate}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
+          frame={frame}
+          frameRef={frameRef}
+          onFrameChange={updateFrame}
+          onFrameDragStart={beginFrameDrag}
+          onFrameDragEnd={endFrameDrag}
           overlay={
             project?.hasVideo ? (
               <CaptionOverlay
                 videoRef={videoRef}
+                frameRef={frameRef}
                 words={words}
                 edl={edl}
                 captions={captions}
@@ -1194,11 +1448,19 @@ export default function App() {
             setCaptions={updateCaptions}
             onCaptionDragStart={beginCaptionDrag}
             onCaptionDragEnd={endCaptionDrag}
+            studioSound={doc?.studioSound ?? false}
+            onToggleStudioSound={updateStudioSound}
+            frame={frame}
+            setFrame={updateFrame}
+            onFrameDragStart={beginFrameDrag}
+            onFrameDragEnd={endFrameDrag}
             customFonts={customFonts}
             onImportFont={importFont}
             onRemoveFont={removeFont}
             fontBusy={fontBusy}
             onImportMusic={importMusic}
+            onPickMusic={pickMusic}
+            musicProviders={caps.musicProviders ?? ['openverse']}
             onUpdateMusic={updateMusic}
             onRemoveMusic={removeMusic}
             musicBusy={musicBusy}

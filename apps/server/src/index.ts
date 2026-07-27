@@ -1,9 +1,12 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createNodeWebSocket } from '@hono/node-ws';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { writeFile, rename, unlink } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -182,6 +185,33 @@ app.delete('/api/fonts/:id', async (c) => {
 });
 
 /**
+ * Stream a raw upload body straight to disk, no buffering.
+ *
+ * Uploads arrive as the RAW file body (not multipart) with the original name in
+ * the X-Filename header. That lets us pipe the request stream through to a file
+ * at a fixed memory footprint, however big the source — the old path did
+ * `Buffer.from(await file.arrayBuffer())`, which both held the whole file in RAM
+ * and hit V8's ~2GB ArrayBuffer ceiling, so anything past ~2GB failed outright.
+ *
+ * Returns the on-disk path, the resolved extension, and the display name.
+ */
+async function streamUploadToDisk(
+  c: Context,
+  id: string,
+): Promise<{ sourcePath: string; ext: string; name: string }> {
+  const rawName = c.req.header('x-filename');
+  const name = rawName ? decodeURIComponent(rawName) : 'upload.mp4';
+  const ext = extname(name) || '.mp4';
+  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${id}${ext}`);
+  const body = c.req.raw.body;
+  if (!body) throw new Error('The upload had no body.');
+  // Web ReadableStream → Node stream → file. pipeline destroys the write stream
+  // (and removes a partial file's grip) if the client aborts mid-upload.
+  await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(sourcePath));
+  return { sourcePath, ext, name };
+}
+
+/**
  * IMPORT ONLY. This does not transcribe.
  *
  * An editor should not decide for you. Import lands the media in the project and
@@ -189,8 +219,9 @@ app.delete('/api/fonts/:id', async (c) => {
  * options, so it waits until you configure it and ask.
  */
 app.post('/api/projects', async (c) => {
-  // Checked BEFORE parseBody, which buffers the whole upload into memory. Once
-  // that has run the allocation already happened and refusing is too late.
+  // content-length is the only size signal available before we start streaming,
+  // and it arrives before a byte of body — so an over-limit upload is refused
+  // without ever touching disk.
   const declared = Number(c.req.header('content-length') ?? 0);
   if (declared > CONFIG.maxUploadBytes) {
     return c.json(
@@ -199,30 +230,21 @@ app.post('/api/projects', async (c) => {
     );
   }
 
-  const body = await c.req.parseBody();
-  const file = body['file'];
-
-  if (!(file instanceof File)) {
-    return c.json({ error: 'Attach a media file as the "file" field.' }, 400);
-  }
-
-  if (file.size > CONFIG.maxUploadBytes) {
-    return c.json(
-      { error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` },
-      413,
-    );
-  }
-
   const id = randomUUID();
-  const ext = extname(file.name) || '.mp4';
-  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${id}${ext}`);
-  await writeFile(sourcePath, Buffer.from(await file.arrayBuffer()));
+  let sourcePath: string;
+  let name: string;
+  let ext: string;
+  try {
+    ({ sourcePath, name, ext } = await streamUploadToDisk(c, id));
+  } catch {
+    return c.json({ error: 'Could not read the upload.' }, 400);
+  }
 
   const info = await probe(sourcePath);
 
   const project: store.Project = {
     id,
-    name: file.name,
+    name,
     sourcePath,
     sourceUrl: `/media/uploads/${id}${ext}`,
     duration: info.duration,
@@ -409,17 +431,14 @@ app.post('/api/projects/:id/clips', async (c) => {
     return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
   }
 
-  const body = await c.req.parseBody();
-  const file = body['file'];
-  if (!(file instanceof File)) return c.json({ error: 'Attach a media file as the "file" field.' }, 400);
-  if (file.size > CONFIG.maxUploadBytes) {
-    return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
-  }
-
   const clipId = randomUUID();
-  const ext = extname(file.name) || '.mp4';
-  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${clipId}${ext}`);
-  await writeFile(sourcePath, Buffer.from(await file.arrayBuffer()));
+  let sourcePath: string;
+  let ext: string;
+  try {
+    ({ sourcePath, ext } = await streamUploadToDisk(c, clipId));
+  } catch {
+    return c.json({ error: 'Could not read the upload.' }, 400);
+  }
 
   const info = await probe(sourcePath);
   const clip: store.StoredClip = {

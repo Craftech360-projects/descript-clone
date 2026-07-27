@@ -382,16 +382,31 @@ const post = (url: string, body?: unknown) =>
   });
 
 export const api = {
-  capabilities: () => fetch('/api/capabilities').then(json<Capabilities>),
+  // no-store: this is live status (which keys/backends are on). A browser-cached
+  // response would tell refreshCaps the ASR key is still missing right after the
+  // user added it, so the on-import chain would keep refusing to transcribe.
+  capabilities: () => fetch('/api/capabilities', { cache: 'no-store' }).then(json<Capabilities>),
   list: () => fetch('/api/projects').then(json<MediaItem[]>),
   get: (id: string) => fetch(`/api/projects/${id}`).then(json<Project>),
 
-  /** Import only — this does NOT transcribe. */
-  import: (file: File) => {
-    const form = new FormData();
-    form.append('file', file);
-    return fetch('/api/projects', { method: 'POST', body: form }).then(json<Project>);
-  },
+  /**
+   * Import only — this does NOT transcribe.
+   *
+   * The file is sent as the RAW request body (not multipart) so the server can
+   * stream it straight to disk. A multipart FormData upload made the browser and
+   * the server each buffer the whole file, which failed on large sources — past
+   * ~2GB the server could not even allocate the ArrayBuffer. The name rides in a
+   * header instead of a form field.
+   */
+  import: (file: File) =>
+    fetch('/api/projects', {
+      method: 'POST',
+      headers: {
+        'content-type': file.type || 'application/octet-stream',
+        'x-filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    }).then(json<Project>),
 
   /**
    * Rename a project. A label only — nothing on disk is keyed by the name, so
@@ -415,13 +430,16 @@ export const api = {
    * the project was already transcribed — a `jobId` for transcribing the new clip
    * (poll it with `waitForJob`, then re-fetch the project for the added words).
    */
-  addClip: (id: string, file: File) => {
-    const form = new FormData();
-    form.append('file', file);
-    return fetch(`/api/projects/${id}/clips`, { method: 'POST', body: form }).then(
-      json<{ project: Project; jobId?: string }>,
-    );
-  },
+  addClip: (id: string, file: File) =>
+    // Raw body + name header, streamed to disk — same as `import` above.
+    fetch(`/api/projects/${id}/clips`, {
+      method: 'POST',
+      headers: {
+        'content-type': file.type || 'application/octet-stream',
+        'x-filename': encodeURIComponent(file.name),
+      },
+      body: file,
+    }).then(json<{ project: Project; jobId?: string }>),
 
   /** Remove a clip. Refused if it is the project's only clip. */
   removeClip: (id: string, clipId: string) =>

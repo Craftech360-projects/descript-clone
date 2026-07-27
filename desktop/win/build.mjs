@@ -10,7 +10,7 @@
  */
 import { build } from 'esbuild';
 import { execSync } from 'node:child_process';
-import { cpSync, rmSync, mkdirSync } from 'node:fs';
+import { cpSync, rmSync, mkdirSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
@@ -51,11 +51,37 @@ await build({
   format: 'esm',
   target: 'node20', // Electron's bundled Node — keep in step with the electron version
   outfile: join(out, 'server.mjs'),
+  // The Claude Agent SDK MUST stay external. It finds its native CLI binary with
+  // createRequire(import.meta.url).resolve(...); inlined into server.mjs that
+  // lookup runs from resources/ (no node_modules) and throws "Native CLI binary
+  // for <platform> not found". Left external, sdk.mjs keeps its own import.meta.url
+  // and resolves the platform package we copy in below.
+  external: ['@anthropic-ai/claude-agent-sdk'],
   // Replace the one read of this env var with the literal key, so the compiled
   // server carries it. Every OTHER process.env.* stays a runtime lookup.
   define: { 'process.env.ELEVENLABS_API_KEY': JSON.stringify(asrKey) },
   logLevel: 'warning',
 });
+
+// Ship the SDK beside the bundle so its `import '@anthropic-ai/claude-agent-sdk'`
+// resolves at runtime, and its native binary package (claude.exe / claude) sits
+// on disk. resources/ is copied verbatim by electron-builder's extraResources and
+// is NOT packed into the asar, so the binary stays executable. We copy every
+// claude-agent-sdk* dir present — the SDK proper plus whichever platform packages
+// this machine's `npm install` fetched (win32-x64 here, darwin-* on a Mac).
+console.log('• copying Claude Agent SDK → resources/node_modules');
+const sdkScope = join(repo, 'node_modules', '@anthropic-ai');
+const sdkDst = join(out, 'node_modules', '@anthropic-ai');
+const sdkDirs = readdirSync(sdkScope).filter((n) => n.startsWith('claude-agent-sdk'));
+if (!sdkDirs.some((n) => n === 'claude-agent-sdk')) {
+  throw new Error('@anthropic-ai/claude-agent-sdk not found in node_modules — run `npm install` at the repo root first.');
+}
+if (!sdkDirs.some((n) => n.startsWith('claude-agent-sdk-'))) {
+  throw new Error('No native claude-agent-sdk-<platform> package installed — run `npm install` WITHOUT --omit=optional so the CLI binary ships.');
+}
+for (const name of sdkDirs) {
+  cpSync(join(sdkScope, name), join(sdkDst, name), { recursive: true });
+}
 
 console.log('• building web app (vite)');
 execSync('npm run build --workspace apps/web', { cwd: repo, stdio: 'inherit' });

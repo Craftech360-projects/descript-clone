@@ -2,6 +2,9 @@ import type { Hono } from 'hono';
 import type { UpgradeWebSocket, WSContext } from 'hono/ws';
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z, type ZodTypeAny } from 'zod';
+import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 import { CONFIG } from './config.ts';
 import {
@@ -53,6 +56,63 @@ const ALLOWED_TOOLS = AGENT_TOOL_NAMES.map((n) => `mcp__${MCP_NAME}__${n}`);
 const MAX_TURNS = 12;
 /** How long a single tool round-trip to the browser may take before we give up on it. */
 const TOOL_TIMEOUT_MS = 60_000;
+
+/**
+ * Find the Claude Code CLI the SDK will spawn, so a missing native binary does
+ * not kill the assistant.
+ *
+ * The SDK normally spawns a binary shipped as a platform-specific OPTIONAL
+ * dependency (@anthropic-ai/claude-agent-sdk-<platform>). When that package is
+ * absent — node_modules copied between a Mac and Windows, or an install run with
+ * `--omit=optional` — the SDK throws "Native CLI binary for <platform> not
+ * found" the first time you send a message. Rather than make the user reinstall,
+ * we locate a usable `claude` ourselves and pass it as pathToClaudeCodeExecutable.
+ *
+ * Order: an explicit override, then the SDK's own binary if it IS installed, then
+ * any Claude Code CLI already on this machine's PATH (the common dev case — if
+ * you have Claude Code, the app can just borrow it). null means "let the SDK try
+ * its default", which is only reached when nothing else was found.
+ */
+function resolveClaudeExecutable(): string | null {
+  const override = process.env.CLAUDE_CODE_EXECUTABLE;
+  if (override && existsSync(override)) return override;
+
+  const bin = process.platform === 'win32' ? 'claude.exe' : 'claude';
+
+  // The SDK's own optional binary, if that package got installed. Resolving it
+  // here (rather than trusting the SDK to) lets us fall through cleanly to PATH
+  // when it is missing, instead of the SDK throwing mid-turn.
+  try {
+    const require = createRequire(import.meta.url);
+    return require.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/${bin}`);
+  } catch {
+    /* optional package not installed — try a system install next */
+  }
+
+  // A Claude Code CLI already on PATH. This is what rescues the copied-across-OSes
+  // dev setup without any reinstall.
+  try {
+    const locator = process.platform === 'win32' ? 'where' : 'which';
+    const found = execFileSync(locator, ['claude'], { encoding: 'utf8' })
+      .split(/\r?\n/)[0]
+      ?.trim();
+    if (found && existsSync(found)) return found;
+  } catch {
+    /* not on PATH */
+  }
+
+  return null;
+}
+
+/** Resolved once — a `which` per boot is enough; a new install needs a restart (dev --watch gives that for free). */
+let cachedExecutable: string | null | undefined;
+function claudeExecutable(): string | null {
+  if (cachedExecutable === undefined) {
+    cachedExecutable = resolveClaudeExecutable();
+    if (cachedExecutable) console.log(`agent   Claude CLI ${cachedExecutable}`);
+  }
+  return cachedExecutable;
+}
 
 // ── JSON Schema → Zod ────────────────────────────────────────────────────────
 //
@@ -196,6 +256,7 @@ async function runTurn(
    */
   const attempt = async (resume: string | null): Promise<'ok' | 'retry' | 'fail'> => {
     try {
+      const exe = claudeExecutable();
       const q = query({
         prompt,
         options: {
@@ -208,6 +269,10 @@ async function runTurn(
           allowedTools: ALLOWED_TOOLS,
           permissionMode: 'bypassPermissions',
           maxTurns: MAX_TURNS,
+          // Point the SDK at a CLI we found ourselves, so a missing platform binary
+          // does not sink the turn. Omitted when null — the SDK falls back to its
+          // own lookup (which then produces the error we translate below).
+          ...(exe ? { pathToClaudeCodeExecutable: exe } : {}),
           // Resume the same session so the SDK carries history for us.
           ...(resume ? { resume } : {}),
         },
@@ -239,7 +304,13 @@ async function runTurn(
       return 'ok';
     } catch (e) {
       if (resume && !emitted) return 'retry';
-      send(conn, { error: e instanceof Error ? e.message : String(e) });
+      const raw = e instanceof Error ? e.message : String(e);
+      // The raw "Native CLI binary…" message is developer-speak. If we reach it,
+      // every fallback in claudeExecutable() also came up empty — say what to do.
+      const msg = /Native CLI binary/i.test(raw)
+        ? "Claude's local CLI isn't available. Fix any one of these: run `npm install` (without --omit=optional) in the app folder so the platform binary installs; install Claude Code so it's on your PATH; or set CLAUDE_CODE_EXECUTABLE to a claude binary."
+        : raw;
+      send(conn, { error: msg });
       return 'fail';
     }
   };

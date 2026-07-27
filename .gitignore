@@ -15,3 +15,6 @@ media/jobs/*
 media/thumbs/*
 !media/**/.gitkeep
 *.log
+
+# Runtime API keys set from the dashboard (settings.ts). Plaintext secrets — never commit.
+.jumpcut-secrets.json

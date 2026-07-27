@@ -19,6 +19,8 @@ interface Props {
   onImport: (file: File) => void;
   error: string | null;
   onDismissError: () => void;
+  /** Open the API-keys dialog (assistant + transcription credentials). */
+  onOpenSettings: () => void;
 }
 
 /**
@@ -222,6 +224,7 @@ export default function Dashboard({
   onImport,
   error,
   onDismissError,
+  onOpenSettings,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   /** A file is over the window. Drives the drop outline; never a layout change. */
@@ -268,6 +271,12 @@ export default function Dashboard({
       <header className="dash-top">
         <img className="dash-logo" src="/jumpcut.png" alt="JumpCut" draggable={false} />
         <p className="dash-tag">Edit video by editing its transcript.</p>
+        {/* API keys live here so the assistant and transcription can be turned on
+          * without editing .env or restarting the server. */}
+        <button className="dash-settings" onClick={onOpenSettings} title="API keys">
+          <Icon name="sliders" size={16} />
+          <span>Settings</span>
+        </button>
       </header>
 
       <div className="dash-body">

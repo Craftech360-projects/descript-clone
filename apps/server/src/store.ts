@@ -98,6 +98,22 @@ export interface BgMusic {
   sourceLink?: string;
 }
 
+/**
+ * A project's saved assistant conversation. Persisted so the chat survives a reload
+ * and a project switch, exactly like cut settings and captions do.
+ *
+ * The server stores it opaquely and never reads its shape: `entries` is the panel
+ * timeline, `wire` the Grok history, `claudeSessionId` the Agent SDK session the
+ * client resumes so Claude keeps context without resending it. The canonical typed
+ * shape lives on the client (api.ts ProjectChat) — here it is just JSON to round-trip.
+ * Stripped from the library listing (it can grow) — see list().
+ */
+export interface ProjectChat {
+  entries: unknown[];
+  wire: unknown[];
+  claudeSessionId?: string | null;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -186,6 +202,11 @@ export interface Project {
    * no music (all of them, until asked for). Mixed under the render — see BgMusic.
    */
   music?: BgMusic;
+  /**
+   * The saved assistant conversation. Absent until the user chats. Written by the
+   * dedicated PUT /api/projects/:id/chat endpoint and stripped from the listing.
+   */
+  chat?: ProjectChat;
   createdAt: string;
 }
 
@@ -302,8 +323,8 @@ async function migrate(project: Project): Promise<Project> {
   return project;
 }
 
-/** The media library listing. Peaks are omitted — too big, and not needed here. */
-export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'>>> {
+/** The media library listing. Peaks, transcript and chat are omitted — big, and not needed here. */
+export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript' | 'chat'>>> {
   const files = await readdir(projectsDir).catch(() => [] as string[]);
   const projects = await Promise.all(
     files.filter((f) => f.endsWith('.json')).map((f) => get(f.replace('.json', ''))),
@@ -318,7 +339,7 @@ export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'
   await Promise.all(live.map(ensurePoster));
 
   return live
-    .map(({ peaks, transcript, ...rest }) => rest)
+    .map(({ peaks, transcript, chat, ...rest }) => rest)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 

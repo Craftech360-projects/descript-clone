@@ -58,7 +58,14 @@ export type AsrModelId = (typeof ASR_MODELS)[number]['id'];
 
 export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
-  elevenLabsKey: process.env.ELEVENLABS_API_KEY ?? '',
+
+  // The credential fields below are GETTERS, not captured values, so a key set at
+  // runtime from the dashboard (which writes process.env — see settings.ts) takes
+  // effect on the very next request without a restart. The Claude SDK reads
+  // process.env itself, so writing there is what makes both backends live-editable.
+  get elevenLabsKey() {
+    return process.env.ELEVENLABS_API_KEY ?? '';
+  },
 
   /**
    * Optional, and the music picker works without it — Openverse needs no key at
@@ -67,7 +74,45 @@ export const CONFIG = {
    * filter Openverse cannot express, and no 200-searches-a-day ceiling. See
    * music-search.ts.
    */
-  jamendoClientId: process.env.JAMENDO_CLIENT_ID ?? '',
+  get jamendoClientId() {
+    return process.env.JAMENDO_CLIENT_ID ?? '';
+  },
+
+  /**
+   * The AI assistant (Grok, via xAI). The key is the only hard requirement — the
+   * assistant is off until it is set, exactly like ASR without ELEVENLABS_API_KEY.
+   * xAI's Chat Completions API is OpenAI-compatible, so the base URL and model id
+   * are the whole configuration; XAI_MODEL only sets the DEFAULT — the user picks
+   * a model per session in the chat panel.
+   */
+  get xaiKey() {
+    return process.env.XAI_API_KEY ?? '';
+  },
+  xaiBaseUrl: process.env.XAI_BASE_URL || 'https://api.x.ai/v1',
+  xaiModel: process.env.XAI_MODEL || 'grok-4',
+
+  /**
+   * The AI assistant, Claude branch — served through the Claude Agent SDK, not a
+   * plain HTTP proxy like Grok. It authenticates two ways, in this order:
+   *
+   *   1. CLAUDE_CODE_OAUTH_TOKEN — a one-year token minted by `claude setup-token`
+   *      that draws on the user's Claude Pro/Max SUBSCRIPTION (no per-token bill).
+   *      This is the intended path for the desktop app: run setup-token once, drop
+   *      the token in the env, and the agent runs on the plan you already pay for.
+   *   2. ANTHROPIC_API_KEY — a Console key billed per token. The fallback for CI or
+   *      anyone without a subscription.
+   *
+   * The SDK reads whichever env var is set on its own, so we don't pass the token
+   * around — we only need to KNOW one exists to light up the picker (hasClaude()).
+   * CLAUDE_MODEL only sets the default; the user picks per session in the panel.
+   */
+  get claudeOauthToken() {
+    return process.env.CLAUDE_CODE_OAUTH_TOKEN ?? '';
+  },
+  get claudeApiKey() {
+    return process.env.ANTHROPIC_API_KEY ?? '';
+  },
+  claudeModel: process.env.CLAUDE_MODEL || 'claude-haiku-4-5',
 
   /**
    * Where the ffmpeg/ffprobe binaries live. A bare name is resolved off PATH,
@@ -82,6 +127,21 @@ export const CONFIG = {
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
     return Boolean(this.elevenLabsKey) && process.env.ASR_PROVIDER !== 'mock';
+  },
+
+  /** Whether the Grok assistant is configured — it needs an xAI key and nothing else. */
+  hasAgent(): boolean {
+    return Boolean(this.xaiKey);
+  },
+
+  /** Whether the Claude assistant is configured — a subscription token or an API key. */
+  hasClaude(): boolean {
+    return Boolean(this.claudeOauthToken || this.claudeApiKey);
+  },
+
+  /** Whether EITHER assistant backend is available (gates the chat panel at all). */
+  hasAnyAgent(): boolean {
+    return this.hasAgent() || this.hasClaude();
   },
 
   /**
@@ -101,11 +161,14 @@ export const CONFIG = {
   webDist: process.env.WEB_DIST ?? '',
 
   /**
-   * Hard cap on an upload. The import route buffers the entire file in memory
-   * before it touches disk, so an unbounded upload is an unbounded allocation —
-   * this is the difference between a rejected request and a killed container.
+   * Cap on an upload. Unlimited by default; set MAX_UPLOAD_MB to impose one.
+   * Note the import route buffers the entire file in memory before it touches
+   * disk, so an unbounded upload is an unbounded allocation — a very large file
+   * can OOM the container. Set MAX_UPLOAD_MB in constrained environments.
    */
-  maxUploadBytes: Number(process.env.MAX_UPLOAD_MB ?? 512) * 1024 * 1024,
+  maxUploadBytes: process.env.MAX_UPLOAD_MB
+    ? Number(process.env.MAX_UPLOAD_MB) * 1024 * 1024
+    : Infinity,
 };
 
 /** Defaults for the Cuts panel. The user can change every one of these. */

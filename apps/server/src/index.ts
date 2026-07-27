@@ -1,5 +1,6 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { writeFile, rename, unlink } from 'node:fs/promises';
@@ -13,6 +14,9 @@ import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
+import { registerAgent } from './agent.ts';
+import { registerClaudeAgent } from './agent-claude.ts';
+import * as settings from './settings.ts';
 import {
   availableProviders,
   downloadMusic,
@@ -49,11 +53,18 @@ import {
 } from '../../../packages/core/src/color.ts';
 import type { CompileOptions, Edl, Transcript, Word } from '../../../packages/core/src/types.ts';
 
+// Load any dashboard-set API keys into process.env BEFORE anything reads them —
+// so CONFIG's credential getters and the Claude SDK both see them from the start.
+await settings.init();
 await store.init();
 await jobs.init();
 await fonts.init();
 
 const app = new Hono();
+
+// WebSocket support for the Claude agent branch. `upgradeWebSocket` declares WS
+// routes; `injectWebSocket` is attached to the Node server after serve() below.
+const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
 /**
  * CORS_ORIGIN pins the browser origin allowed to call this API. Unset keeps the
@@ -103,8 +114,29 @@ app.get('/api/capabilities', (c) =>
      * off, and the panel says which catalogue it is on rather than hiding.
      */
     musicProviders: availableProviders(),
+    /**
+     * The AI assistant. `enabled` gates the chat panel exactly as `hasAsr` gates
+     * transcription; `defaultModel` is the pre-selected entry in the model picker.
+     */
+    agent: {
+      // Enabled if EITHER backend is configured. `grok`/`claude` say which are
+      // available so the picker can label and route; defaultModel prefers Claude
+      // (Haiku by default) when present, else Grok.
+      enabled: CONFIG.hasAnyAgent(),
+      grok: CONFIG.hasAgent(),
+      claude: CONFIG.hasClaude(),
+      defaultModel: CONFIG.hasClaude() ? CONFIG.claudeModel : CONFIG.xaiModel,
+    },
   }),
 );
+
+// The assistant's routes: the Grok proxy (POST /api/agent) + model list, and the
+// Claude branch (WebSocket at /api/agent/claude/ws). Registered here, before the
+// static catch-all below, like every other /api route.
+registerAgent(app);
+registerClaudeAgent(app, upgradeWebSocket);
+// Runtime API-key management from the dashboard (see settings.ts).
+settings.registerSettings(app);
 
 app.get('/api/projects', async (c) => c.json(await store.list()));
 
@@ -757,6 +789,40 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   return c.json({ ok: true });
 });
 
+/**
+ * Persist the assistant conversation for a project. Its own endpoint, not part of
+ * the transcript PATCH: the chat is not the edit document (no undo step) and must
+ * save even before a project is transcribed — so this is modelled on the rename
+ * PATCH (any project), not on the transcript one (which 400s without a transcript).
+ *
+ * The body is stored opaquely, but bounded and lightly coerced so a stray or hostile
+ * client cannot grow a project file without limit: entries and wire are capped to
+ * their most recent slice, and an empty conversation clears the field entirely so
+ * "Clear" leaves no residue on disk.
+ */
+app.put('/api/projects/:id/chat', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  const MAX_CHAT_ENTRIES = 1000;
+  const MAX_CHAT_WIRE = 2000;
+  const body = await c.req
+    .json<{ entries?: unknown; wire?: unknown; claudeSessionId?: unknown }>()
+    .catch(() => ({} as { entries?: unknown; wire?: unknown; claudeSessionId?: unknown }));
+
+  const entries = Array.isArray(body.entries) ? body.entries.slice(-MAX_CHAT_ENTRIES) : [];
+  const wire = Array.isArray(body.wire) ? body.wire.slice(-MAX_CHAT_WIRE) : [];
+  const claudeSessionId = typeof body.claudeSessionId === 'string' ? body.claudeSessionId : null;
+
+  if (entries.length === 0 && wire.length === 0 && !claudeSessionId) {
+    delete project.chat;
+  } else {
+    project.chat = { entries, wire, claudeSessionId };
+  }
+  await store.save(project);
+  return c.json({ ok: true });
+});
+
 /** Edit actions, each taking the settings from its panel. */
 app.post('/api/projects/:id/actions/:action', async (c) => {
   const project = await store.get(c.req.param('id'));
@@ -1228,10 +1294,17 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500);
 });
 
-serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
   console.log(`server  http://localhost:${info.port}`);
   console.log(`asr     ${CONFIG.hasAsr() ? 'ElevenLabs Scribe' : 'disabled (mock ASR)'}`);
   console.log(
     `music   ${CONFIG.jamendoClientId ? 'Jamendo + Openverse' : 'Openverse only (set JAMENDO_CLIENT_ID for more)'}`,
   );
+  const grok = CONFIG.hasAgent() ? 'Grok' : '';
+  const claude = CONFIG.hasClaude() ? 'Claude (subscription/key)' : '';
+  const agent = [grok, claude].filter(Boolean).join(' + ') || 'disabled (no key)';
+  console.log(`agent   ${agent}`);
 });
+
+// Attach the WebSocket upgrade handler to the running Node server (Claude branch).
+injectWebSocket(server);

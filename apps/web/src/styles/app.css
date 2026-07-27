@@ -1883,3 +1883,228 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* Back to the grid, from the title bar. Sits with the ☰ because it is the same
  * kind of thing: where you are, rather than what you are doing. */
 .tb-home { margin-left: -2px; }
+
+/* ── the AI assistant · a chat surface in the rail ────────────────────────────
+ * The rail is a fixed-height column, so the chat is a flex column: a thin bar on
+ * top, a scrolling transcript that takes the slack, and a composer pinned to the
+ * bottom. Everything reads on the neutral chrome, and gold is spent only where it
+ * means "you" (the user bubble) or "acted" (a tool chip). */
+.rail-tabs {
+  display: flex; gap: var(--s-1);
+  padding: var(--s-2) var(--s-3) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.rail-tab {
+  appearance: none; background: none; border: none;
+  color: var(--dim); font: inherit; font-size: var(--t-ui); font-weight: 600;
+  padding: var(--s-2) var(--s-2) var(--s-3); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.rail-tab:hover { color: var(--text); }
+.rail-tab.on { color: var(--text); border-bottom-color: var(--accent); }
+
+.agent {
+  display: flex; flex-direction: column;
+  flex: 1; min-height: 0;
+}
+.agent-model {
+  flex: 1; min-width: 0;
+  background: var(--sunk); color: var(--dim);
+  border: 1px solid var(--line); border-radius: var(--r-1);
+  font: inherit; font-size: var(--t-small); padding: var(--s-1) var(--s-2);
+}
+.agent-model:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
+.agent-clear {
+  background: none; border: 1px solid var(--line); border-radius: var(--r-1);
+  color: var(--dim); font: inherit; font-size: var(--t-small);
+  padding: var(--s-1) var(--s-2); cursor: pointer;
+}
+.agent-clear:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
+.agent-clear:disabled { opacity: var(--disabled-opacity); cursor: default; }
+
+.agent-msgs {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--s-3);
+  display: flex; flex-direction: column; gap: var(--s-3);
+}
+
+.agent-empty { color: var(--faint); font-size: var(--t-ui); padding: var(--s-3) var(--s-1); }
+.agent-empty p { margin: 0 0 var(--s-2); }
+.agent-empty .sub { color: var(--faint); line-height: 1.5; }
+.agent-empty code { font-family: var(--font-mono); color: var(--dim); }
+.agent-empty .primary { margin-top: var(--s-3); }
+
+/* The blank-chat welcome: an avatar, a line, and tappable openers — the shape
+ * every AI chat greets you with, so the first turn is one click, not a blank box. */
+.agent-welcome { display: flex; flex-direction: column; align-items: flex-start; padding: var(--s-3) var(--s-1); }
+.agent-welcome-title { margin: 0 0 var(--s-1); color: var(--text); font-size: var(--t-lg); font-weight: 600; }
+.agent-welcome-sub { margin: 0 0 var(--s-4); color: var(--faint); font-size: var(--t-ui); line-height: 1.5; }
+.agent-suggest { display: flex; flex-direction: column; gap: var(--s-1); align-self: stretch; }
+.agent-chip {
+  text-align: left; background: var(--sunk); color: var(--dim);
+  border: 1px solid var(--line); border-radius: var(--r-2);
+  font: inherit; font-size: var(--t-ui); padding: var(--s-2) var(--s-3); cursor: pointer;
+  transition: color .12s var(--ease), border-color .12s var(--ease), background .12s var(--ease);
+}
+.agent-chip:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+
+/* A turn: an avatar and a body, side by side — the assistant on the left, the
+ * user's own words in a bubble pushed to the right. */
+.agent-msg { display: flex; gap: var(--s-2); align-items: flex-start; max-width: 100%; }
+.agent-msg.user { justify-content: flex-end; }
+
+.agent-avatar {
+  flex: 0 0 auto; width: 24px; height: 24px; margin-top: 1px;
+  display: grid; place-items: center; border-radius: var(--r-full);
+  background: var(--selected); color: var(--accent); border: 1px solid var(--accent-dim);
+}
+.agent-avatar-lg { width: 34px; height: 34px; margin: 0 0 var(--s-3); }
+.agent-msg.error .agent-avatar { background: var(--cut-bg); color: var(--cut-fg); border-color: var(--cut-line); }
+
+.agent-body { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.agent-msg.assistant .agent-body, .agent-msg.error .agent-body { flex: 1; }
+.agent-msg.user .agent-body { max-width: 85%; align-items: flex-end; }
+
+.agent-text {
+  font-size: var(--t-base); line-height: 1.55; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
+/* The user's turn is the only bubble now — a soft gold well pushed right, with a
+ * squared top-right corner so it reads as "spoken from this side". */
+.agent-msg.user .agent-text {
+  background: var(--selected); border: 1px solid var(--accent-dim);
+  border-radius: var(--r-3); border-top-right-radius: var(--r-1);
+  padding: var(--s-2) var(--s-3);
+}
+.agent-msg.error .agent-text { color: var(--cut-fg); }
+
+/* Assistant replies are Markdown, rendered by agent/Markdown.tsx. The structure
+ * carries the line breaks now, so pre-wrap is off and the blocks own the spacing;
+ * the first/last child shed their outer margins so the run sits flush. */
+.agent-text.md { white-space: normal; }
+.agent-text.md > :first-child { margin-top: 0; }
+.agent-text.md > :last-child { margin-bottom: 0; }
+.agent-text.md .md-p { margin: 0 0 var(--s-2); }
+.agent-text.md .md-h { margin: var(--s-3) 0 var(--s-1); font-weight: 600; color: var(--text); line-height: 1.35; }
+.agent-text.md .md-h1 { font-size: var(--t-lg); }
+.agent-text.md .md-h2 { font-size: var(--t-base); }
+.agent-text.md .md-h3, .agent-text.md .md-h4 { font-size: var(--t-base); color: var(--dim); }
+.agent-text.md .md-list {
+  margin: 0 0 var(--s-2); padding-left: 1.4em;
+  display: flex; flex-direction: column; gap: var(--s-1);
+}
+.agent-text.md ol.md-list { list-style: decimal; }
+.agent-text.md ul.md-list { list-style: disc; }
+.agent-text.md .md-list .md-list { margin: var(--s-1) 0 0; }
+.agent-text.md li { line-height: 1.5; padding-left: .15em; }
+.agent-text.md li::marker { color: var(--faint); }
+.agent-text.md strong { font-weight: 600; color: var(--text); }
+.agent-text.md em { font-style: italic; }
+.agent-text.md a { color: var(--accent); text-decoration: underline; }
+.agent-text.md code {
+  font-family: var(--font-mono); font-size: .92em;
+  background: var(--raised); border: 1px solid var(--line-soft);
+  border-radius: var(--r-1); padding: 0 .32em;
+}
+
+/* One chip per tool the assistant ran — the edit made visible as an action. */
+.agent-tools { display: flex; flex-direction: column; gap: var(--s-1); }
+.agent-tool {
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--sunk); border: 1px solid var(--line-soft); border-left: 2px solid var(--accent);
+  border-radius: var(--r-1); padding: var(--s-1) var(--s-2);
+}
+.agent-tool-name { font-size: var(--t-micro); color: var(--accent); text-transform: capitalize; letter-spacing: .02em; }
+.agent-tool-result {
+  font-size: var(--t-small); color: var(--dim); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+
+/* The three-dot "thinking" pulse while a turn is in flight. */
+.agent-thinking { display: inline-flex; gap: 4px; padding: var(--s-1) 0; }
+.agent-thinking span {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--faint);
+  animation: agent-pulse 1s var(--ease) infinite;
+}
+.agent-thinking span:nth-child(2) { animation-delay: .15s; }
+.agent-thinking span:nth-child(3) { animation-delay: .3s; }
+@keyframes agent-pulse { 0%, 60%, 100% { opacity: .3; } 30% { opacity: 1; } }
+
+/* The composer: one rounded field that grows with the text, a round send button
+ * tucked in its corner, and a quiet hint below — the shape people expect. */
+.agent-compose {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding: var(--s-3); border-top: 1px solid var(--line-soft);
+}
+.agent-input {
+  display: flex; align-items: flex-end; gap: var(--s-1);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-4);
+  padding: var(--s-1) var(--s-1) var(--s-1) var(--s-3);
+  transition: border-color .12s var(--ease);
+}
+.agent-input:focus-within { border-color: var(--line-strong); }
+.agent-input textarea {
+  flex: 1; min-width: 0; resize: none; overflow-y: auto;
+  background: none; color: var(--text); border: none; outline: none;
+  font: inherit; font-size: var(--t-base); line-height: 1.5;
+  padding: var(--s-2) 0; max-height: 140px;
+}
+.agent-input textarea:disabled { opacity: var(--disabled-opacity); }
+.agent-send {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: var(--r-full);
+  display: grid; place-items: center; border: none; cursor: pointer;
+  background: var(--accent); color: var(--accent-fg);
+  transition: background .12s var(--ease);
+}
+.agent-send:hover:not(:disabled) { background: var(--accent-hover); }
+.agent-send:disabled { background: var(--line); color: var(--faint); cursor: default; }
+
+/* Model picker + Clear, tucked under the input where the typing happens. */
+.agent-controls { display: flex; gap: var(--s-2); align-items: center; }
+
+/* ── Settings: API keys ───────────────────────────────────────────────────────
+ * A quiet button top-right of the dashboard header, and the dialog's rows. */
+.dash-top { position: relative; }
+.dash-settings {
+  position: absolute; top: 0; right: 0;
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--dim); font: inherit; font-size: var(--t-ui);
+  padding: var(--s-2) var(--s-3); cursor: pointer;
+}
+.dash-settings:hover { color: var(--text); border-color: var(--line-strong); background: var(--hover); }
+
+.set-status {
+  color: var(--dim); font-size: var(--t-ui); margin: 0 0 var(--s-3);
+  padding-bottom: var(--s-3); border-bottom: 1px solid var(--line-soft);
+}
+.set-keys { display: flex; flex-direction: column; gap: var(--s-4); }
+.set-key { display: flex; flex-direction: column; gap: var(--s-1); }
+.set-key-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.set-key-head label { font-size: var(--t-ui); font-weight: 600; color: var(--text); }
+.set-badge {
+  font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .05em;
+  padding: 1px 6px; border-radius: var(--r-full); border: 1px solid var(--line);
+}
+.set-badge.on { color: var(--ok-fg); border-color: var(--ok-line); background: var(--ok-bg); }
+.set-badge.off { color: var(--faint); }
+.set-key-row { display: flex; gap: var(--s-2); }
+.set-key-row input {
+  flex: 1; min-width: 0;
+  background: var(--sunk); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-1);
+  font: inherit; font-family: var(--font-mono); font-size: var(--t-ui);
+  padding: var(--s-2);
+}
+.set-key-row input:focus { outline: none; border-color: var(--line-strong); }
+.set-clear {
+  flex: 0 0 auto; background: none; border: 1px solid var(--line); border-radius: var(--r-1);
+  color: var(--dim); font: inherit; font-size: var(--t-small); padding: 0 var(--s-3); cursor: pointer;
+}
+.set-clear:hover:not(:disabled) { color: var(--cut-fg); border-color: var(--cut-line); }
+.set-note { margin: 0; color: var(--faint); font-size: var(--t-small); }
+.set-warn {
+  margin: var(--s-4) 0 0; padding: var(--s-2) var(--s-3);
+  background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: var(--r-1);
+  color: var(--warn-fg); font-size: var(--t-small); line-height: 1.5;
+}

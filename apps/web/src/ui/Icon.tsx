@@ -49,7 +49,8 @@ export type IconName =
   | 'music'
   | 'captions'
   | 'contrast'
-  | 'sliders';
+  | 'sliders'
+  | 'arrow-up';
 
 /**
  * Solid, not stroked. At 16px a stroked triangle is mostly hole, and the
@@ -234,6 +235,9 @@ const PATHS: Record<IconName, ReactNode> = {
       <circle cx="9" cy="15.5" r="2" />
     </>
   ),
+  /* The composer's send affordance. An upward arrow, the near-universal "send"
+   * mark in a chat, so the round button reads without a label. */
+  'arrow-up': <path d="M12 20V5M6 11l6-6 6 6" />,
 };
 
 interface Props {

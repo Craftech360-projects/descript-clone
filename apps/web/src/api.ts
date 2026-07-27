@@ -61,6 +61,12 @@ export interface Project {
   color?: ColorSettings;
   /** The background-music bed, if one has been imported. Absent otherwise. */
   music?: ProjectMusic;
+  /**
+   * The saved assistant conversation. Absent on projects with no chat yet, and
+   * stripped from the library listing (it can grow) — a full `api.get` carries it,
+   * which is what opening a project uses. See ProjectChat.
+   */
+  chat?: ProjectChat;
   createdAt: string;
 }
 
@@ -249,6 +255,59 @@ export interface Capabilities {
   editDefaults: CutSettings;
   /** Catalogues the music picker can search. Never empty — Openverse needs no key. */
   musicProviders: MusicProvider[];
+  /** The AI assistant. `enabled` is false until XAI_API_KEY is set on the server. */
+  agent: { enabled: boolean; defaultModel: string };
+}
+
+/**
+ * One message on the wire to/from the assistant, in the OpenAI Chat Completions
+ * shape Grok speaks. `content` is null on an assistant turn that is pure tool
+ * calls; a `tool` turn carries the result for one `tool_call_id`.
+ */
+export interface AgentToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
+export interface AgentWireMessage {
+  role: 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: AgentToolCall[];
+  tool_call_id?: string;
+}
+export interface AgentAssistantMessage {
+  role: 'assistant';
+  content: string | null;
+  tool_calls?: AgentToolCall[];
+}
+
+// ── The assistant conversation, persisted per project ───────────────────────────
+//
+// These are the canonical definitions (store/agent.ts imports them) so the persisted
+// `Project.chat` and the live chat store never drift. `entries` is the panel timeline;
+// `wire` is the Grok history resent each turn; `claudeSessionId` is the Agent SDK
+// session to resume so Claude keeps context across a reload without resending it.
+
+/** One tool the assistant ran, shown as a chip under its turn. */
+export interface ToolChip {
+  name: string;
+  result: string;
+}
+
+/** One line in the panel timeline: the user's text, the assistant's reply, or an error. */
+export interface ChatEntry {
+  id: string;
+  role: 'user' | 'assistant' | 'error';
+  text: string;
+  /** Tool calls made while producing this assistant turn. */
+  tools?: ToolChip[];
+}
+
+/** A project's saved assistant conversation — round-tripped through the server verbatim. */
+export interface ProjectChat {
+  entries: ChatEntry[];
+  wire: AgentWireMessage[];
+  claudeSessionId?: string | null;
 }
 
 /** Everything the Export panel lets the user decide. */
@@ -416,6 +475,19 @@ export const api = {
       body: JSON.stringify(doc),
     }).then(json<{ ok: boolean }>),
 
+  /**
+   * Persist the assistant conversation for a project. Its own endpoint, not part of
+   * saveDoc: the chat is not the edit document (it pushes no undo step and must save
+   * even before a project is transcribed), and it saves on its own cadence — once per
+   * completed turn, not on the doc's 800ms debounce.
+   */
+  saveChat: (id: string, chat: ProjectChat) =>
+    fetch(`/api/projects/${id}/chat`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(chat),
+    }).then(json<{ ok: boolean }>),
+
   action: (id: string, action: string, options: Record<string, unknown> = {}) =>
     post(`/api/projects/${id}/actions/${action}`, options).then(
       json<{ changed: number; transcript: Transcript }>,
@@ -502,7 +574,43 @@ export const api = {
         }),
       }).then(json<Project>),
   },
+
+  /**
+   * The AI assistant. `models` populates the picker; `chat` is one turn of the
+   * loop — the client sends its running history plus a fresh state snapshot, and
+   * gets back the assistant's next message (which may ask to call tools).
+   */
+  agent: {
+    models: () =>
+      fetch('/api/agent/models').then(json<{ models: string[]; default: string; enabled: boolean }>),
+    chat: (body: { model: string; context: string; messages: AgentWireMessage[] }) =>
+      post('/api/agent', body).then(json<{ message: AgentAssistantMessage }>),
+  },
+
+  /**
+   * Runtime API-key management from the dashboard. The server never returns a
+   * secret — only whether each key is set and a short tail hint — so `keys` is
+   * safe to hold in the client. `save` sends { id: value } (empty string clears).
+   */
+  settings: {
+    keys: () => fetch('/api/settings/keys').then(json<KeysResponse>),
+    save: (patch: Record<string, string>) =>
+      post('/api/settings/keys', patch).then(json<KeysResponse>),
+  },
 };
+
+/** One managed key's masked status, as the server reports it. */
+export interface KeyStatus {
+  configured: boolean;
+  /** A tail hint like "…a1b2", never the secret itself. */
+  hint: string;
+  label: string;
+  note: string;
+}
+export interface KeysResponse {
+  keys: Record<string, KeyStatus>;
+  backends: { grok: boolean; claude: boolean; asr: boolean };
+}
 
 /**
  * Poll a job to completion.

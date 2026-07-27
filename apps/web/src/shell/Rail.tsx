@@ -1,5 +1,8 @@
+import { useState } from 'react';
+
 import ProjectPanel, { type FillerMode } from '../rail/ProjectPanel.tsx';
 import SelectionPanel from '../rail/SelectionPanel.tsx';
+import AgentPanel from '../agent/AgentPanel.tsx';
 import { Empty } from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
@@ -83,6 +86,12 @@ interface Props {
   onRestoreSelection: () => void;
   onPlaySelection: () => void;
   busy: string | null;
+
+  /** The AI assistant. `enabled` is false until a Grok or Claude key is set. */
+  agentEnabled: boolean;
+  agentDefaultModel: string;
+  /** Open the API-keys dialog — surfaced from the assistant panel when it is off. */
+  onOpenSettings: () => void;
 }
 
 /**
@@ -95,6 +104,12 @@ interface Props {
  * fourth, "Cuts", was already the document's inspector and only needed saying so.
  */
 export default function Rail(p: Props) {
+  // The rail is two tabs: the manual inspector and the assistant (drive the editor
+  // from chat). The inspector is first and the default — the hands-on surface you
+  // land on — with the assistant one click away. Kept above the early return below
+  // so the hook order never changes.
+  const [tab, setTab] = useState<'chat' | 'inspector'>('inspector');
+
   if (!p.project) {
     return (
       <div className="rail">
@@ -106,49 +121,42 @@ export default function Rail(p: Props) {
     );
   }
 
-  if (!p.hasScript) {
-    return (
-      <div className="rail">
-        <div className="rail-head">{p.project.name}</div>
-        <div className="panel">
-          <div className="hero">
-            <strong>{timecode(p.project.duration)}</strong>
-            <small>
-              {p.project.hasVideo ? `${p.project.width}×${p.project.height}` : 'Audio only'}
-              {p.project.fps ? ` · ${Math.round(p.project.fps * 100) / 100} fps` : ''}
-            </small>
-          </div>
-          <p className="hint">
-            No script yet. Transcribing is the one thing this app will not do behind your back.
-          </p>
-          <button className="primary go" onClick={p.onTranscribe} disabled={!!p.busy}>
-            Transcribe…
-          </button>
+  const inspector = !p.hasScript ? (
+    <>
+      <div className="rail-head">{p.project.name}</div>
+      <div className="panel">
+        <div className="hero">
+          <strong>{timecode(p.project.duration)}</strong>
+          <small>
+            {p.project.hasVideo ? `${p.project.width}×${p.project.height}` : 'Audio only'}
+            {p.project.fps ? ` · ${Math.round(p.project.fps * 100) / 100} fps` : ''}
+          </small>
         </div>
+        <p className="hint">
+          No script yet. Transcribing is the one thing this app will not do behind your back —
+          though you can just ask the assistant to do it.
+        </p>
+        <button className="primary go" onClick={p.onTranscribe} disabled={!!p.busy}>
+          Transcribe…
+        </button>
       </div>
-    );
-  }
-
-  if (p.selectedWords.length > 0) {
-    return (
-      <div className="rail">
-        <div className="rail-head">Selection</div>
-        <SelectionPanel
-          words={p.selectedWords}
-          onDelete={p.onDeleteSelection}
-          onRestore={p.onRestoreSelection}
-          onPlaySelection={p.onPlaySelection}
-          // Audio has no picture to push in on, so the affordance is absent
-          // rather than present and permanently disabled.
-          onPunchIn={p.project.hasVideo ? p.onPunchIn : undefined}
-          punchBlocked={p.punchBlocked}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="rail">
+    </>
+  ) : p.selectedWords.length > 0 ? (
+    <>
+      <div className="rail-head">Selection</div>
+      <SelectionPanel
+        words={p.selectedWords}
+        onDelete={p.onDeleteSelection}
+        onRestore={p.onRestoreSelection}
+        onPlaySelection={p.onPlaySelection}
+        // Audio has no picture to push in on, so the affordance is absent
+        // rather than present and permanently disabled.
+        onPunchIn={p.project.hasVideo ? p.onPunchIn : undefined}
+        punchBlocked={p.punchBlocked}
+      />
+    </>
+  ) : (
+    <>
       <div className="rail-head">Project</div>
       <ProjectPanel
         project={p.project}
@@ -206,6 +214,34 @@ export default function Rail(p: Props) {
         onRetranscribe={p.onRetranscribe}
         busy={p.busy}
       />
+    </>
+  );
+
+  return (
+    <div className="rail">
+      <div className="rail-tabs">
+        <button
+          className={`rail-tab ${tab === 'inspector' ? 'on' : ''}`}
+          onClick={() => setTab('inspector')}
+        >
+          Inspector
+        </button>
+        <button
+          className={`rail-tab ${tab === 'chat' ? 'on' : ''}`}
+          onClick={() => setTab('chat')}
+        >
+          Assistant
+        </button>
+      </div>
+      {tab === 'chat' ? (
+        <AgentPanel
+          enabled={p.agentEnabled}
+          defaultModel={p.agentDefaultModel}
+          onOpenSettings={p.onOpenSettings}
+        />
+      ) : (
+        inspector
+      )}
     </div>
   );
 }

@@ -28,6 +28,7 @@ import Splitter from './shell/Splitter.tsx';
 import Rail from './shell/Rail.tsx';
 import TranscribeDialog from './dialogs/TranscribeDialog.tsx';
 import ExportDialog from './dialogs/ExportDialog.tsx';
+import SettingsDialog from './dialogs/SettingsDialog.tsx';
 import type { FillerMode } from './rail/ProjectPanel.tsx';
 
 import {
@@ -95,6 +96,8 @@ import { DEFAULT_COLOR } from '../../../packages/core/src/color.ts';
 import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
 import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
+import { setAgentBridge, type AgentBridge } from './agent/tools.ts';
+import { setChatProject } from './store/agent.ts';
 
 const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
 
@@ -166,6 +169,13 @@ export default function App() {
   >(null);
 
   const [dialog, setDialog] = useState<'transcribe' | 'export' | null>(null);
+  /** The API-keys dialog — reachable from the dashboard and the assistant panel. */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Re-read capabilities after keys change so the assistant/transcription light up
+  // (or dim) without a reload. setAsr keeps the transcribe defaults in step too.
+  const refreshCaps = useCallback(() => {
+    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch(() => {});
+  }, []);
   /** The media/speakers drawer behind the title-bar ☰. */
   const [libOpen, setLibOpen] = useState(false);
   const [asr, setAsr] = useState<AsrOptions | null>(null);
@@ -302,6 +312,16 @@ export default function App() {
       }
     });
     return () => setSaver(null);
+  }, [project?.id]);
+
+  // Hydrate the assistant panel from the opened project's saved conversation, and
+  // clear it when the editor closes. Keyed on the id, like the saver above, so an
+  // in-place refresh of the same project (an edit action returning a fresh record)
+  // never clobbers the live chat — only an actual project switch does. This one hook
+  // covers every path that changes the open project (import, open, home).
+  useEffect(() => {
+    setChatProject(project?.id ?? null, project?.chat ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project?.id]);
 
   useEffect(() => {
@@ -1419,6 +1439,71 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [togglePlay, libOpen]);
 
+  // ── the AI assistant's bridge ────────────────────────────────────────────
+  //
+  // The chat runtime executes most tools by calling store/editor.ts directly, but
+  // the async, App-level actions (switching projects, transcription, rendering,
+  // music) live here as closures over live state — so App hands the agent a bridge
+  // to them, exactly as it hands the store a saver. Re-registered every render with
+  // no dep array: the closures must be fresh, and building the object inside the
+  // effect keeps it clear of the const temporal-dead-zone at render time.
+  useEffect(() => {
+    const bridge: AgentBridge = {
+      snapshot: () => ({
+        project: project
+          ? { id: project.id, name: project.name, durationSec: project.duration, hasVideo: project.hasVideo }
+          : null,
+        transcribed: Boolean(doc),
+        asrAvailable: Boolean(caps?.hasAsr),
+        doc,
+        selectedWordIds: [...selectedSet],
+        selectionText: selectedWords.map((w) => w.text).join(' '),
+        stats: { words: stats.words, kept: stats.kept, cuts: stats.cuts, outputSec: stats.outputSec },
+        music: project?.music ? { name: project.music.name, volume: project.music.volume } : null,
+      }),
+      listProjects: async () => {
+        const items = await api.list();
+        return items.map((m) => ({ id: m.id, name: m.name, transcribed: m.status === 'transcribed' }));
+      },
+      openProject: async (id) => {
+        await openProject(id);
+      },
+      renameProject: async (id, name) => {
+        await renameProject(id, name);
+      },
+      deleteProject: async (id) => {
+        await deleteProject(id);
+      },
+      transcribe: async () => {
+        await doTranscribe();
+      },
+      exportVideo: async () => {
+        const r = await doRender();
+        return r ? `Exported ${fmtShort(r.outputDuration)} of finished video.` : 'The export did not complete.';
+      },
+      addMusic: async (query, instrumental) => {
+        if (!project) return 'No project is open.';
+        const { results } = await api.music.search(query, {
+          instrumental,
+          provider: caps?.musicProviders?.[0],
+        });
+        if (results.length === 0) return `No tracks found for "${query}".`;
+        await pickMusic(results[0]);
+        return `Added "${results[0].title}" by ${results[0].artist} as background music.`;
+      },
+      setMusicVolume: async (volume) => {
+        updateMusic({ volume });
+      },
+      removeMusic: async () => {
+        await removeMusic();
+      },
+      seek: (seconds) => seek(seconds),
+      playSelection: () => playSelection(),
+    };
+    setAgentBridge(bridge);
+  });
+  useEffect(() => () => setAgentBridge(null), []);
+
   if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
 
   // --- the start screen ---------------------------------------------------------
@@ -1433,18 +1518,22 @@ export default function App() {
    */
   if (!project) {
     return (
-      <Dashboard
-        projects={library}
-        importing={busy === 'import'}
-        progress={job?.progress ?? null}
-        opening={busy === 'open'}
-        onOpen={(id) => void openProject(id)}
-        onDelete={(id) => void deleteProject(id)}
-        onRename={(id, name) => void renameProject(id, name)}
-        onImport={importFile}
-        error={error}
-        onDismissError={() => setError(null)}
-      />
+      <>
+        <Dashboard
+          projects={library}
+          importing={busy === 'import'}
+          progress={job?.progress ?? null}
+          opening={busy === 'open'}
+          onOpen={(id) => void openProject(id)}
+          onDelete={(id) => void deleteProject(id)}
+          onRename={(id, name) => void renameProject(id, name)}
+          onImport={importFile}
+          error={error}
+          onDismissError={() => setError(null)}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+        <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
+      </>
     );
   }
 
@@ -1662,6 +1751,9 @@ export default function App() {
             onRestoreSelection={() => setSelectionDeleted(false)}
             onPlaySelection={playSelection}
             busy={busy}
+            agentEnabled={caps.agent?.enabled ?? false}
+            agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+            onOpenSettings={() => setSettingsOpen(true)}
           />
 
       <footer className="tl">
@@ -1732,6 +1824,8 @@ export default function App() {
         job={job?.kind === 'render' ? job : null}
         onCancelJob={cancelJob}
       />
+
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
     </div>
   );
 }

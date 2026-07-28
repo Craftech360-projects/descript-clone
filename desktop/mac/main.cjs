@@ -57,6 +57,11 @@ function startServer(port, userData) {
       WEB_DIST: path.join(res, 'web'),
       FFMPEG_PATH: ffmpegPath,
       FFPROBE_PATH: ffprobePath,
+      // Same reasoning as MEDIA_DIR: settings.ts's default path is computed
+      // relative to its own (bundled) file location, which resolves outside
+      // the app once packaged — e.g. /Applications on Mac, C:\ on Windows.
+      // userData is the one place Electron guarantees is per-user writable.
+      SETTINGS_PATH: path.join(userData, '.jumpcut-secrets.json'),
       // The ElevenLabs key is compiled into server.mjs at build time
       // (see build.mjs) — nothing to inject here.
     },

@@ -1296,12 +1296,18 @@ function mb(bytes: number): number {
  * static host plus an API. Registered last: it ends in a catch-all, which would
  * otherwise shadow every /api route declared below it.
  *
- * The catch-all rewrites unknown paths to index.html because the client routes
- * in the browser — without it, a refresh on any deep link 404s.
+ * Two-step lookup: first try the request path as a real file (this covers
+ * /assets/* AND root-level files copied from Vite's public/ dir, like the
+ * jumpcut.png logo — serveStatic no-ops via next() when the file doesn't
+ * exist, so this never blocks the second step). The catch-all then rewrites
+ * anything else to index.html because the client routes in the browser —
+ * without it, a refresh on any deep link 404s.
  */
 if (CONFIG.webDist) {
-  app.use('/assets/*', serveStatic({ root: CONFIG.webDist }));
-  app.get('/', serveStatic({ path: 'index.html', root: CONFIG.webDist }));
+  app.use('*', async (c, next) => {
+    if (c.req.path.startsWith('/api') || c.req.path.startsWith('/media')) return next();
+    return serveStatic({ root: CONFIG.webDist })(c, next);
+  });
   app.get('*', async (c, next) => {
     if (c.req.path.startsWith('/api') || c.req.path.startsWith('/media')) return next();
     return serveStatic({ path: 'index.html', root: CONFIG.webDist })(c, next);

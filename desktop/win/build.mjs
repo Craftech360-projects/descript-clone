@@ -57,9 +57,20 @@ await build({
   // for <platform> not found". Left external, sdk.mjs keeps its own import.meta.url
   // and resolves the platform package we copy in below.
   external: ['@anthropic-ai/claude-agent-sdk'],
-  // Replace the one read of this env var with the literal key, so the compiled
-  // server carries it. Every OTHER process.env.* stays a runtime lookup.
-  define: { 'process.env.ELEVENLABS_API_KEY': JSON.stringify(asrKey) },
+  // Bake the key in as a FALLBACK, not the live var: config.ts reads
+  // process.env.ELEVENLABS_API_KEY || process.env.__BAKED_ELEVENLABS_KEY__, so
+  // this only fills the second half. Defining ELEVENLABS_API_KEY itself here
+  // would replace that getter's live process.env read with a frozen literal —
+  // which broke the dashboard's runtime key editing (settings.ts) the app
+  // ships with, since a key set later from the dashboard would never be seen.
+  define: { 'process.env.__BAKED_ELEVENLABS_KEY__': JSON.stringify(asrKey) },
+  // Bundled CJS deps (e.g. `ws`, pulled in via @hono/node-ws) call require()
+  // for builtins like 'events' at runtime. esbuild's CJS→ESM interop only
+  // works if a global `require` exists, which a plain .mjs file doesn't have
+  // — without this banner those calls throw "Dynamic require is not supported".
+  banner: {
+    js: "import { createRequire as __topLevelCreateRequire } from 'node:module';\nconst require = __topLevelCreateRequire(import.meta.url);",
+  },
   logLevel: 'warning',
 });
 

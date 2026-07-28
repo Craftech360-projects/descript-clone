@@ -63,8 +63,14 @@ export const CONFIG = {
   // runtime from the dashboard (which writes process.env — see settings.ts) takes
   // effect on the very next request without a restart. The Claude SDK reads
   // process.env itself, so writing there is what makes both backends live-editable.
+  // The desktop build can bake a fallback key in at compile time (see
+  // desktop/*/build.mjs) so a shipped app works before anyone opens the
+  // dashboard. That define targets __BAKED_ELEVENLABS_KEY__ only — never
+  // ELEVENLABS_API_KEY itself — so a key set later from the dashboard, which
+  // writes process.env.ELEVENLABS_API_KEY, always wins over whatever was
+  // baked in and is never frozen to it.
   get elevenLabsKey() {
-    return process.env.ELEVENLABS_API_KEY ?? '';
+    return process.env.ELEVENLABS_API_KEY || process.env.__BAKED_ELEVENLABS_KEY__ || '';
   },
 
   /**

@@ -45,8 +45,17 @@ const byId = new Map(MANAGED_KEYS.map((k) => [k.id, k]));
 /**
  * Where the persisted keys live: the repo root, NOT the media directory (which is
  * served statically at /media, so a secrets file there would be downloadable).
+ *
+ * That default is computed relative to THIS file, which is only correct in dev.
+ * Bundled into one file for the desktop build (see desktop/mac/build.mjs and
+ * desktop/win/build.mjs), the same relative path resolves outside the
+ * installed app instead — e.g. /Applications on Mac, C:\ on Windows — usually
+ * unwritable and always wrong. The desktop main process sets SETTINGS_PATH to
+ * Electron's per-user userData dir (see desktop/mac/main.cjs and
+ * desktop/win/main.cjs) precisely to override this.
  */
-const SETTINGS_PATH = fileURLToPath(new URL('../../../.jumpcut-secrets.json', import.meta.url));
+const SETTINGS_PATH =
+  process.env.SETTINGS_PATH || fileURLToPath(new URL('../../../.jumpcut-secrets.json', import.meta.url));
 
 /** Load persisted keys into process.env. Missing file is the normal first-run case. */
 export async function init(): Promise<void> {

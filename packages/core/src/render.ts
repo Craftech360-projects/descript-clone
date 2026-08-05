@@ -1,4 +1,6 @@
 import type { Edl } from './types.ts';
+import { outputDuration } from './edl.ts';
+import { bedFadeOut } from './music.ts';
 import { colorFilterStages, type Grade } from './color.ts';
 import { frameFilterStages, type FrameRender } from './frame.ts';
 import { punchFilterStage, type OutputMove } from './frame-track.ts';
@@ -132,8 +134,19 @@ export interface BgMusicRender {
    * always knows exactly where the bed ends and can fade it there.
    */
   durationSec: number;
-  /** Seconds of fade-out at the music's end, so a trimmed bed does not cut hard. */
+  /**
+   * Seconds of fade-out at the music's end, so a TRIMMED bed does not cut hard.
+   * Omit for the default, which is a ramp when the bed stops before the program
+   * and nothing at all when it plays to the last frame — see bedFadeOut.
+   */
   fadeOutSec?: number;
+  /**
+   * The finished program's length on the output clock, in seconds. Only the fade
+   * needs it: a bed that reaches this is ending because the video ended, and must
+   * not be ramped out. Omit and the bed is treated as trimmed, which is the old
+   * behaviour and always fades.
+   */
+  programSec?: number;
   /**
    * Loop the file to fill `durationSec`. Without this a bed shorter than the
    * requested length simply stops early; with it the track repeats end-to-end
@@ -142,10 +155,6 @@ export interface BgMusicRender {
    */
   loop?: boolean;
 }
-
-/** Default fade-out at the end of a music bed. Trimming a song at a hard sample
- *  boundary is as audible as any other cut; this ramps it out instead. */
-const DEFAULT_BG_FADE_OUT = 1.5;
 
 /**
  * The filtergraph lines that mix a music bed under the finished program audio.
@@ -170,7 +179,11 @@ const DEFAULT_BG_FADE_OUT = 1.5;
 function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRender): string[] {
   const vol = Math.max(0, bg.volume);
   const dur = bg.durationSec;
-  const fade = Math.min(bg.fadeOutSec ?? DEFAULT_BG_FADE_OUT, dur / 2);
+  // Zero when the bed plays to the last frame: there is nothing after it to ease
+  // into, and ramping there just deletes the tail of the mix. See bedFadeOut.
+  // Infinity, not 0, for the missing case: an unknown program is one the bed
+  // cannot be shown to reach, so it stays trimmed and keeps its ramp.
+  const fade = bedFadeOut(dur, bg.programSec ?? Infinity, bg.fadeOutSec);
 
   const music = [
     `volume=${vol.toFixed(3)}`,
@@ -432,8 +445,15 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   if (videoStages.length > 0) lines.push(`[vcut]${videoStages.join(',')}[outv];`);
   if (audioStages.length > 0) lines.push(`[acut]${audioStages.join(',')}${programLabel};`);
   // The music bed rides on top of the finished program: input index 1, since the
-  // single source is input 0.
-  if (bgMusic) lines.push(...bgMusicMixLines(programLabel, 1, bgMusic));
+  // single source is input 0. The program length is filled in here rather than
+  // asked of the caller — the EDL and the speed are what decide it, and both are
+  // already in hand, so the two cannot disagree.
+  if (bgMusic) {
+    lines.push(...bgMusicMixLines(programLabel, 1, {
+      programSec: outputDuration(edl, speed),
+      ...bgMusic,
+    }));
+  }
 
   const args = [
     '-hide_banner',
@@ -660,8 +680,13 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     lines.push(`[ac]${aStages.join(',')}${programLabel};`);
   }
   // The music bed rides on top of the joined program: its input index is the
-  // clip count, since the clips occupy inputs 0..n-1.
-  if (bgMusic) lines.push(...bgMusicMixLines(programLabel, clips.length, bgMusic));
+  // clip count, since the clips occupy inputs 0..n-1. programSec as above.
+  if (bgMusic) {
+    lines.push(...bgMusicMixLines(programLabel, clips.length, {
+      programSec: outputDuration(edl, speed),
+      ...bgMusic,
+    }));
+  }
 
   const inputs = clips.flatMap((c) => ['-i', c.input]);
   const args = [

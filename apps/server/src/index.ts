@@ -44,6 +44,7 @@ import { removeRetakes } from '../../../packages/core/src/retakes.ts';
 import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
 import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts';
 import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
+import { bedLength, bedLoops } from '../../../packages/core/src/music.ts';
 import {
   frameSize,
   normalizeFrame,
@@ -766,7 +767,7 @@ app.patch('/api/projects/:id/music', async (c) => {
   if (patch.durationSec === null) {
     delete project.music.durationSec;
   } else if (typeof patch.durationSec === 'number' && Number.isFinite(patch.durationSec)) {
-    const cap = project.music.loop ? Infinity : project.music.sourceDuration;
+    const cap = bedLoops(project.music) ? Infinity : project.music.sourceDuration;
     project.music.durationSec = Math.min(Math.max(0, patch.durationSec), cap);
   }
 
@@ -1051,9 +1052,12 @@ app.post('/api/projects/:id/render', async (c) => {
   // The background-music bed, resolved to a concrete length on the OUTPUT clock.
   // The request may override volume/length (or switch it off) so a render reflects
   // what is on screen, exactly as captions and speed do above; otherwise the
-  // stored settings win. The end is capped three ways — any user length, the
-  // music file's own duration, and the program length — so the bed can never run
-  // past the picture or past itself.
+  // stored settings win.
+  //
+  // The three-way cap itself is bedLength in core, NOT re-derived here: the
+  // monitor resolves the same bed for the preview, and every time the two sides
+  // held their own copy of this arithmetic they drifted — which the user hears as
+  // an export that does not match what they signed off on.
   const music = project.music;
   const mOpt = (options.music ?? {}) as {
     enabled?: boolean;
@@ -1065,17 +1069,16 @@ app.post('/api/projects/:id/render', async (c) => {
   if (music && (mOpt.enabled ?? true)) {
     const outLen = outputDuration(edl, speed);
     const volume = typeof mOpt.volume === 'number' && Number.isFinite(mOpt.volume) ? Math.max(0, mOpt.volume) : music.volume;
-    const loop = typeof mOpt.loop === 'boolean' ? mOpt.loop : Boolean(music.loop);
+    // A live override wins; otherwise the stored bed answers — and an absent
+    // `loop` there means "fill", not "off". See bedLoops.
+    const loop = typeof mOpt.loop === 'boolean' ? mOpt.loop : bedLoops(music);
     const wanted =
       mOpt.durationSec === null
         ? undefined
         : typeof mOpt.durationSec === 'number'
           ? mOpt.durationSec
           : music.durationSec;
-    // Looping lets the bed run to the program length; otherwise it can be no
-    // longer than the file itself. Either way the program length is the ceiling.
-    const fileCap = loop ? Infinity : music.sourceDuration;
-    const end = Math.min(wanted ?? outLen, fileCap, outLen);
+    const end = bedLength({ sourceDuration: music.sourceDuration, durationSec: wanted, loop }, outLen);
     if (end > 0) bgMusic = { input: music.sourcePath, volume, durationSec: end, loop };
   }
 

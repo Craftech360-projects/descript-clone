@@ -11,6 +11,7 @@ import {
   Color,
 } from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
+import { bedLoops } from '../../../../packages/core/src/music.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import {
   CAPTION_FONTS,
@@ -911,7 +912,9 @@ function MusicField(p: Props) {
   // Length lives on the output clock. Without looping it can be no longer than
   // the file itself (a bed would otherwise trail off into silence); with looping
   // it can run the whole program. Either way the video length is the ceiling.
-  const loop = Boolean(music?.loop);
+  // Absent means looping, not off — a bed that stops halfway through the video is
+  // something you choose, never something you get by default. See bedLoops.
+  const loop = music ? bedLoops(music) : false;
   const lenCeil = loop ? p.stats.outputSec : Math.min(music?.sourceDuration ?? 0, p.stats.outputSec);
   const maxLen = Math.max(1, Math.floor(lenCeil));
   const trimmed = music?.durationSec !== undefined;

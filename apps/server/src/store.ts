@@ -75,10 +75,13 @@ export interface BgMusic {
    */
   durationSec?: number;
   /**
-   * Loop the track to fill its length. Off: a bed shorter than `durationSec`
-   * stops early (and the length is capped at the file's own duration). On: the
-   * track repeats to cover the whole requested length — how a short song fills a
-   * long video. See BgMusicRender.loop.
+   * Loop the track to fill its length: how a short song covers a long video.
+   *
+   * ABSENT MEANS ON. Only an explicit `false` — the user clearing the checkbox —
+   * lets a bed shorter than the program stop early (and caps the length at the
+   * file's own duration). Read it through `bedLoops`, never as `Boolean(loop)`:
+   * treating absent as off is what left a 5.6-minute track under a 6.9-minute
+   * cut with the last 81 seconds in silence. See core/music.ts.
    */
   loop?: boolean;
 

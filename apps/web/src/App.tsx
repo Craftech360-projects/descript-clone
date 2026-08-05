@@ -93,6 +93,7 @@ import {
 } from '../../../packages/core/src/frame-track.ts';
 import { FollowAborted, followObject } from './track/follow.ts';
 import { DEFAULT_COLOR } from '../../../packages/core/src/color.ts';
+import { bedFadeOut, bedLength, bedLoops } from '../../../packages/core/src/music.ts';
 import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
 import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
@@ -798,6 +799,11 @@ export default function App() {
     }, 350);
   };
 
+  // The finished program's length on the output clock. One value, used by the
+  // bed's resolve, its lane on the timeline, and the preview — the bed is capped
+  // by it in three places and they must be the same number in all three.
+  const programSec = useMemo(() => (edl ? outputDuration(edl, speed) : 0), [edl, speed]);
+
   // Trim/extend the bed by dragging its right edge on the timeline. The handle
   // reports a SOURCE time; convert it to a length on the output clock. keptBefore
   // is the output(1x) time at that source point (gap-safe, unlike sourceToOutput
@@ -807,8 +813,9 @@ export default function App() {
   const resizeMusic = (endSourceSec: number) => {
     if (!project?.music || !edl) return;
     const out1x = keptBefore(edl, endSourceSec);
-    const programSec = outputDuration(edl, speed);
-    const cap = project.music.loop ? programSec : Math.min(project.music.sourceDuration, programSec);
+    const cap = bedLoops(project.music)
+      ? programSec
+      : Math.min(project.music.sourceDuration, programSec);
     const durationSec = Math.min(Math.max(0.1, out1x / speed), cap);
     updateMusic({ durationSec });
   };
@@ -970,7 +977,10 @@ export default function App() {
           enabled: project?.music ? true : false,
           volume: pendingMusic.current?.volume ?? project?.music?.volume ?? 1,
           durationSec: pendingMusic.current?.durationSec ?? project?.music?.durationSec ?? null,
-          loop: pendingMusic.current?.loop ?? project?.music?.loop ?? false,
+          // bedLoops, not `?? false`: an absent flag means "fill the video", and
+          // sending a literal false here would tell the server the user had
+          // turned looping OFF — overriding the very default it falls back to.
+          loop: pendingMusic.current?.loop ?? (project?.music ? bedLoops(project.music) : false),
         },
         studioSound: doc?.studioSound ?? project?.studioSound ?? false,
         // Same reason as captions and speed above: an Export fired mid-debounce
@@ -1251,18 +1261,14 @@ export default function App() {
     seekAcrossClip: requestClipSeek,
   });
 
-  // The music bed's length on the OUTPUT clock: the shortest of any length the
-  // user set, the music file itself, and the program — the same three-way cap the
-  // server resolves for the render, so the preview ends where the export does.
+  // The music bed's length on the OUTPUT clock. bedLength is the SAME function
+  // the server calls to resolve the render, rather than a mirror of it — the
+  // preview ending where the export does is the one thing the monitor is for.
   const musicEndSec = useMemo(() => {
     const m = project?.music;
     if (!m || !edl) return 0;
-    const outLen = outputDuration(edl, speed);
-    // Looping lets the bed run to the program length; otherwise the file's own
-    // length caps it. Mirrors the server's render resolve.
-    const fileCap = m.loop ? outLen : m.sourceDuration;
-    return Math.min(m.durationSec ?? outLen, fileCap, outLen);
-  }, [project?.music, edl, speed]);
+    return bedLength(m, programSec);
+  }, [project?.music, edl, programSec]);
 
   useMusicPreview({
     musicRef,
@@ -1272,8 +1278,11 @@ export default function App() {
     getCurrentTime,
     volume: project?.music?.volume ?? 0,
     endSec: musicEndSec,
-    loop: Boolean(project?.music?.loop),
+    loop: project?.music ? bedLoops(project.music) : false,
     sourceDuration: project?.music?.sourceDuration ?? 0,
+    // Match the render's ramp: a bed cut short fades, one that plays to the last
+    // frame does not. Both sides ask bedFadeOut, so neither can drift.
+    fadeOutSec: bedFadeOut(musicEndSec, programSec),
   });
 
   // The voice enhancer on the monitor. Deliberately on the <video> only: the bed
@@ -1297,7 +1306,7 @@ export default function App() {
       endOut >= sum - 1e-6
         ? edl.keep[edl.keep.length - 1].end
         : outputToSource(edl, endOut) ?? edl.keep[edl.keep.length - 1].end;
-    return { name: m.name, startSec, endSec, loop: Boolean(m.loop) };
+    return { name: m.name, startSec, endSec, loop: bedLoops(m) };
   }, [project?.music, edl, musicEndSec, speed]);
 
   /**

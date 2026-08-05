@@ -86,7 +86,11 @@ export interface ProjectMusic {
   volume: number;
   /** Length cap in OUTPUT seconds; absent = plays under the whole program. */
   durationSec?: number;
-  /** Loop the track to fill its length — how a short song covers a long video. */
+  /**
+   * Loop the track to fill its length — how a short song covers a long video.
+   * ABSENT MEANS ON; only an explicit `false` lets the bed stop early. Read it
+   * through `bedLoops` (core/music.ts), never as `Boolean(loop)`.
+   */
   loop?: boolean;
 
   /**

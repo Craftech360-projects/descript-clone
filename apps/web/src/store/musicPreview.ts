@@ -35,6 +35,12 @@ interface Options {
   loop: boolean;
   /** The file's own length, in seconds — the modulus a looped position wraps at. */
   sourceDuration: number;
+  /**
+   * Seconds of ramp at the bed's end, from the same bedFadeOut the render calls.
+   * Zero when the bed plays to the last frame, which is the usual case — the
+   * element then just stops with the program, exactly as it always did.
+   */
+  fadeOutSec?: number;
 }
 
 export function useMusicPreview({
@@ -47,19 +53,24 @@ export function useMusicPreview({
   endSec,
   loop,
   sourceDuration,
+  fadeOutSec = 0,
 }: Options): void {
   // Volume, rate, and the element's own loop flag follow the controls in every
   // state — paused, scrubbing, or playing — so a change is heard at once. The
   // native loop flag keeps the file repeating as it free-runs between reseeks.
+  //
+  // The fade below writes el.volume too, so the dialled-in level is kept here for
+  // it to scale rather than read back off the element it is currently ramping.
+  const level = Math.min(1, Math.max(0, volume));
   useEffect(() => {
     const el = musicRef.current;
     if (!el) return;
-    el.volume = Math.min(1, Math.max(0, volume));
+    el.volume = level;
     el.defaultPlaybackRate = speed;
     el.playbackRate = speed;
     el.preservesPitch = true;
     el.loop = loop;
-  }, [musicRef, volume, speed, loop]);
+  }, [musicRef, level, speed, loop]);
 
   useEffect(() => {
     const el = musicRef.current;
@@ -81,7 +92,15 @@ export function useMusicPreview({
       if (out === null) return; // inside a cut the player is skipping over
       if (out >= endSec) {
         if (!el.paused) el.pause(); // the bed has run its length
+        el.volume = level; // ready at full level for the next play
         return;
+      }
+      // The ramp the render burns in, so a bed that stops before the picture does
+      // eases out here too instead of vanishing mid-bar. fadeOutSec is 0 whenever
+      // the bed plays to the end, and this whole branch is then dead.
+      if (fadeOutSec > 0) {
+        const left = endSec - out;
+        el.volume = left < fadeOutSec ? level * (left / fadeOutSec) : level;
       }
       // Where in the FILE that output moment sits: the bed advances with output
       // time, wrapping at the file's length when looping so a 30s track keeps
@@ -101,5 +120,5 @@ export function useMusicPreview({
       cancelAnimationFrame(raf);
       el.pause();
     };
-  }, [musicRef, edl, playing, endSec, speed, getCurrentTime, loop, sourceDuration]);
+  }, [musicRef, edl, playing, endSec, speed, getCurrentTime, loop, sourceDuration, fadeOutSec, level]);
 }

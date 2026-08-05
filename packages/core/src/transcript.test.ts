@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { detectFillers, removeFillers } from './fillers.ts';
 import { detectRetakes, removeRetakes } from './retakes.ts';
 import { compileEdl, outputDuration } from './edl.ts';
-import type { Transcript } from './types.ts';
+import { uniqueWordIds } from './transcript.ts';
+import { buildWordPatch } from './doc.ts';
+import type { Transcript, Word } from './types.ts';
 
 /** Build a transcript from a sentence, one word per 0.5s. */
 function fromText(text: string): Transcript {
@@ -151,4 +153,63 @@ test('fillers and retakes compose into one EDL', () => {
 
   const edl = compileEdl(t, { padMs: 0, mergeWithinMs: 0 });
   assert.equal(outputDuration(edl), 3.0, '6 kept words x 0.5s');
+});
+
+// ── word id uniqueness across clips ───────────────────────────────────────────
+
+/** One clip's ASR output: ids restart at w0 for every file, as the real one does. */
+function clipWords(clipId: string, text: string): Word[] {
+  return text.split(/\s+/).map((t, i) => ({
+    id: `w${i * 2}`,
+    text: t,
+    start: i * 0.5,
+    end: i * 0.5 + 0.5,
+    clipId,
+  }));
+}
+
+test('uniqueWordIds leaves a single-clip script exactly as it was', () => {
+  const words = fromText('nothing here repeats').words;
+  assert.equal(uniqueWordIds(words), words, 'same array, so nothing downstream sees a change');
+});
+
+test('uniqueWordIds separates the twins two stitched clips produce', () => {
+  const stitched = [...clipWords('A', 'hello wrold there'), ...clipWords('B', 'second clip wrold')];
+  assert.equal(new Set(stitched.map((w) => w.id)).size, 3, 'the bug: 6 words, 3 ids');
+
+  const fixed = uniqueWordIds(stitched);
+  assert.equal(fixed.length, 6);
+  assert.equal(new Set(fixed.map((w) => w.id)).size, 6);
+  assert.deepEqual(
+    fixed.map((w) => w.text),
+    ['hello', 'wrold', 'there', 'second', 'clip', 'wrold'],
+    'text and order are untouched — only ids move',
+  );
+  // The first clip keeps its ids, so an existing project's words are unchanged.
+  assert.deepEqual(fixed.slice(0, 3).map((w) => w.id), ['w0', 'w2', 'w4']);
+  assert.deepEqual(fixed.slice(3).map((w) => w.id), ['B:w0', 'B:w2', 'B:w4']);
+});
+
+test('uniqueWordIds is idempotent', () => {
+  const once = uniqueWordIds([...clipWords('A', 'a b'), ...clipWords('B', 'c d')]);
+  assert.equal(uniqueWordIds(once), once, 'a repaired script is already clean');
+});
+
+test('correcting a word after uniqueWordIds touches only that word', () => {
+  const fixed = uniqueWordIds([...clipWords('A', 'hello wrold'), ...clipWords('B', 'bye wrold')]);
+  const patch = buildWordPatch(fixed, ['w2'], { text: 'world' });
+  assert.equal(patch.kind, 'words');
+  assert.equal(patch.kind === 'words' && patch.edits.length, 1, 'clip B is not dragged along');
+  const after = fixed.map((w) => (w.id === 'w2' ? { ...w, text: 'world' } : w));
+  assert.deepEqual(after.map((w) => w.text), ['hello', 'world', 'bye', 'wrold']);
+});
+
+test('uniqueWordIds survives a hand-edited record with no clipId', () => {
+  const words: Word[] = [
+    { id: 'w0', text: 'a', start: 0, end: 1 },
+    { id: 'w0', text: 'b', start: 1, end: 2 },
+    { id: 'w0', text: 'c', start: 2, end: 3 },
+  ];
+  const fixed = uniqueWordIds(words);
+  assert.equal(new Set(fixed.map((w) => w.id)).size, 3);
 });

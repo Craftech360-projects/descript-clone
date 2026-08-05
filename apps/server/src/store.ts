@@ -10,6 +10,7 @@ import type { CaptionSettings } from '../../../packages/core/src/caption-style.t
 import type { CutSettings } from '../../../packages/core/src/doc.ts';
 import type { ColorSettings } from '../../../packages/core/src/color.ts';
 import type { FrameSettings } from '../../../packages/core/src/frame.ts';
+import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
 /**
@@ -305,6 +306,21 @@ async function unlinkInMedia(path: string): Promise<void> {
  * work is cheap, and a project that is never opened never needs it.
  */
 async function migrate(project: Project): Promise<Project> {
+  // Repair a script stitched by a build that let per-clip word ids collide: ASR
+  // numbers words from zero per FILE, so every clip past the first arrived with
+  // its own w0, w2, w4… . Two words sharing an id are one word to everything
+  // that addresses words by id, which is everything — selecting a word in clip 1
+  // also selected its twin in clip 2, and a spelling correction rewrote both.
+  // Free on a healthy project: uniqueWordIds returns the same array untouched.
+  if (project.transcript) {
+    const words = uniqueWordIds(project.transcript.words);
+    if (words !== project.transcript.words) {
+      const next = { ...project, transcript: { ...project.transcript, words } };
+      await save(next);
+      return migrate(next);
+    }
+  }
+
   // fps was added after this project was imported. It is one ffprobe call, once,
   // and then it is on disk forever.
   if (project.hasVideo && project.fps === undefined) {

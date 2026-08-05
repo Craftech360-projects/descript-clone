@@ -43,6 +43,7 @@ import { detectFillers, removeFillers } from '../../../packages/core/src/fillers
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
 import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
 import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts';
+import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
 import {
   frameSize,
   normalizeFrame,
@@ -398,7 +399,16 @@ async function transcribeProject(
   }
 
   runner.onProgress({ progress: -1, stage: 'Saving' });
-  project.transcript = { mediaId: project.id, duration: project.duration, words };
+  // The stitch above is the ONE place per-clip word sets become a single script,
+  // so it is the one place their ids can collide: ASR numbers from zero per file,
+  // so clip 2 arrives with a w0 and a w4 of its own. Every id-keyed path
+  // downstream (selection, buildWordPatch, the deletedIds save) would then
+  // address both twins at once. See uniqueWordIds — a no-op for one clip.
+  project.transcript = {
+    mediaId: project.id,
+    duration: project.duration,
+    words: uniqueWordIds(words),
+  };
   project.asrProvider = provider;
   project.verbatim = verbatim;
   project.asrOptions = options;

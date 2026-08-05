@@ -324,6 +324,23 @@ async function migrate(project: Project): Promise<Project> {
     }
   }
 
+  // Write the looping default INTO the record rather than leaving it implicit.
+  //
+  // A default that lives only in the readers is a default every reader has to
+  // know about, and the client is one of the readers: the export request carries
+  // the bed's settings, so a UI that has not been reloaded sends the flag it
+  // still believes in — `false` — and the server has no way to tell that from a
+  // user who genuinely unticked the box. The bed then stops early again, which is
+  // exactly the bug this was meant to end. Stamping the record settles it for
+  // every reader at once, old and new.
+  //
+  // Only `undefined` is touched: an explicit false is a decision and stays.
+  if (project.music && project.music.loop === undefined) {
+    const next = { ...project, music: { ...project.music, loop: true } };
+    await save(next);
+    return migrate(next);
+  }
+
   // fps was added after this project was imported. It is one ffprobe call, once,
   // and then it is on disk forever.
   if (project.hasVideo && project.fps === undefined) {

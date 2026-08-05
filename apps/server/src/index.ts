@@ -647,6 +647,9 @@ app.post('/api/projects/:id/music', async (c) => {
     sourceUrl: `/media/uploads/${musicId}${ext}`,
     sourceDuration: duration,
     volume: MUSIC_DEFAULT_VOLUME,
+    // Stamped rather than left implicit, so every reader — including a client
+    // that has not been reloaded — sees the same answer. See bedLoops.
+    loop: true,
   };
   await store.save(project);
   return c.json(project);
@@ -738,6 +741,8 @@ app.post('/api/projects/:id/music/url', async (c) => {
     sourceUrl,
     sourceDuration: duration,
     volume: MUSIC_DEFAULT_VOLUME,
+    // Stamped for the same reason as on the upload route above — see bedLoops.
+    loop: true,
     // Kept with the project, not just shown once in the picker: a CC BY bed owes
     // its credit at publish time, which is long after the picker closed.
     attribution: typeof body.attribution === 'string' ? body.attribution : undefined,

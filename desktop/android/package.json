@@ -1,0 +1,19 @@
+{
+  "name": "jumpcut-android-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-assets": "node build.mjs",
+    "fetch-libnode": "node third_party/fetch-libnode.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "//": [
+    "prepare-assets bundles the server + web UI into app/src/main/assets/nodejs-project/.",
+    "It is run automatically by the Gradle preBuild hook; run it by hand after",
+    "changing server or web code if you want to inspect the bundle.",
+    "fetch-libnode downloads the pinned nodejs-mobile release into jniLibs + cpp headers.",
+    "Requires `npm install` at the repo root first (esbuild resolves hono etc. from the workspace)."
+  ]
+}

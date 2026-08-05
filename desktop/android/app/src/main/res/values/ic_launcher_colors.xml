@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same dark surface as the splash/editor background (#0e0e12). -->
+    <color name="ic_launcher_background">#0E0E12</color>
+</resources>

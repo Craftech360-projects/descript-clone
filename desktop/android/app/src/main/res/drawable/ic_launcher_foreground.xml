@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "JC" monogram, stroked with round caps to echo the rounded Jump Cut
+     wordmark; tan on the app's dark surface. Both glyphs sit inside the
+     adaptive-icon safe zone (66dp circle centered in the 108dp canvas). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- J -->
+    <path
+        android:pathData="M47,40 L47,58 A9,9 0 0 1 29,58"
+        android:strokeColor="#C9A56C"
+        android:strokeWidth="8"
+        android:strokeLineCap="round" />
+    <!-- C -->
+    <path
+        android:pathData="M77,47 A14,14 0 1 0 77,61"
+        android:strokeColor="#C9A56C"
+        android:strokeWidth="8"
+        android:strokeLineCap="round" />
+</vector>

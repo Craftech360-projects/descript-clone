@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- targetSdk 28+ blocks cleartext HTTP by default, INCLUDING loopback. The
+     WebView talks to the in-process server over http://127.0.0.1:<port>, so
+     cleartext is permitted for exactly that host and nothing else. Everything
+     leaving the device (ElevenLabs, music providers, Grok) is HTTPS. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

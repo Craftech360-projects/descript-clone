@@ -21,12 +21,32 @@ export function renderFilename(project: Project, result: RenderResult): string {
 }
 
 /**
+ * The Android shell's save bridge, when this is running inside it. Android
+ * WebView silently drops `<a download>` clicks — there is no downloads shelf
+ * and no dialog, the file just never appears — so the shell injects this
+ * object (see desktop/android DownloadBridge.kt) and we hand it the save
+ * instead. Feature-detected: absent everywhere but the Android app.
+ */
+declare global {
+  interface Window {
+    JumpCutAndroid?: {
+      saveUrl(url: string, filename: string): void;
+      saveText(content: string, filename: string, mime: string): void;
+    };
+  }
+}
+
+/**
  * Hand a URL to the browser as a save.
  *
  * Appended to the document before clicking: a detached anchor works in Chrome
  * but not everywhere, and this costs one node for the length of a call.
  */
 export function saveAs(url: string, filename: string): void {
+  if (window.JumpCutAndroid?.saveUrl) {
+    window.JumpCutAndroid.saveUrl(url, filename);
+    return;
+  }
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -34,4 +54,22 @@ export function saveAs(url: string, filename: string): void {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+/**
+ * Save generated text (caption sidecars) as a file.
+ *
+ * Same fork as saveAs: the Android bridge takes the content directly — a
+ * `createObjectURL` blob anchor is doubly dead in a WebView — and everywhere
+ * else the blob+anchor dance still works, including the desktop shells.
+ */
+export function saveTextAs(content: string, filename: string, mime = 'text/plain'): void {
+  if (window.JumpCutAndroid?.saveText) {
+    window.JumpCutAndroid.saveText(content, filename, mime);
+    return;
+  }
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  saveAs(url, filename);
+  URL.revokeObjectURL(url);
 }

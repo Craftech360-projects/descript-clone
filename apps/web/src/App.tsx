@@ -16,7 +16,7 @@ import {
   type AsrOptions,
   type Thumbs,
 } from './api.ts';
-import { renderFilename, saveAs } from './download.ts';
+import { renderFilename, saveAs, saveTextAs } from './download.ts';
 import Script from './Script.tsx';
 import Timeline from './Timeline.tsx';
 import TitleBar from './shell/TitleBar.tsx';
@@ -179,6 +179,11 @@ export default function App() {
   }, []);
   /** The media/speakers drawer behind the title-bar ☰. */
   const [libOpen, setLibOpen] = useState(false);
+  // Which surface a phone shows: the transcript or the tools rail. On a phone
+  // the two cannot share the width, so a switcher under the monitor picks one.
+  // Desktop never sees this — the .m-* elements are display:none outside the
+  // mobile media query, and the m-view-* class matches no desktop rule.
+  const [mobileTab, setMobileTab] = useState<'script' | 'tools'>('script');
   const [asr, setAsr] = useState<AsrOptions | null>(null);
   const [fillerMode, setFillerMode] = useState<FillerMode>('hesitations');
   const [customFillers, setCustomFillers] = useState<string[]>(loadCustomFillers);
@@ -641,16 +646,16 @@ export default function App() {
    * non-destructive: the halves share the one source file. Refused at the very
    * edge of a clip, where there is nothing to cut off.
    */
-  const splitAtPlayhead = () => {
+  const splitAtPlayhead = async (): Promise<string> => {
     const t = getCurrentTime();
     const clip = clips.find((c) => t >= c.offset && t < c.offset + c.duration) ?? activeClip;
-    if (!clip) return;
+    if (!clip) return 'No clip is under the playhead.';
     const at = t - clip.offset;
     if (at <= 0.2 || at >= clip.duration - 0.2) {
       setNotice('Move the playhead into a clip, away from its edges, to split it.');
-      return;
+      return 'The playhead is at a clip edge — move it into the clip first.';
     }
-    void run('splitClip', async () => {
+    const fresh = await run('splitClip', async () => {
       flushSave();
       await api.splitClip(project!.id, clip.id, at);
       const fresh = await api.get(project!.id);
@@ -660,6 +665,7 @@ export default function App() {
       setNotice('Clip split. The two pieces are now separate clips.');
       return fresh;
     });
+    return fresh ? 'Clip split. The two pieces are now separate clips.' : 'The split did not complete.';
   };
   // The global keydown effect below subscribes on a small dep set, so it would
   // otherwise close over a stale splitAtPlayhead (which reads clips/project). A
@@ -951,12 +957,9 @@ export default function App() {
       // speed rides along: a sidecar file is read against the RENDERED clock, so
       // its cues have to be divided the way the render's are.
       const r = await api.captions(project!.id, { format, ...cut, speed });
-      const blob = new Blob([r.content], { type: 'text/plain' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `${project!.name.replace(/\.[^.]+$/, '')}.${format}`;
-      a.click();
-      URL.revokeObjectURL(a.href);
+      // saveTextAs, not an inline anchor: on Android the shell's bridge does
+      // the save, and everywhere else this is the same blob+anchor as before.
+      saveTextAs(r.content, `${project!.name.replace(/\.[^.]+$/, '')}.${format}`);
       setNotice(`${r.cues} caption cues, timed to the edit.`);
       return r;
     });
@@ -1442,7 +1445,7 @@ export default function App() {
       else if (e.key === 'Escape') { if (libOpen) setLibOpen(false); else setSelection(null); }
       else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
       // The razor: cut the clip under the playhead in two. Bare S, like an NLE.
-      else if (!mod && e.key.toLowerCase() === 's') { e.preventDefault(); splitRef.current(); }
+      else if (!mod && e.key.toLowerCase() === 's') { e.preventDefault(); void splitRef.current(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1469,6 +1472,8 @@ export default function App() {
         selectionText: selectedWords.map((w) => w.text).join(' '),
         stats: { words: stats.words, kept: stats.kept, cuts: stats.cuts, outputSec: stats.outputSec },
         music: project?.music ? { name: project.music.name, volume: project.music.volume } : null,
+        playheadSec: getCurrentTime(),
+        playing,
       }),
       listProjects: async () => {
         const items = await api.list();
@@ -1508,6 +1513,14 @@ export default function App() {
       },
       seek: (seconds) => seek(seconds),
       playSelection: () => playSelection(),
+      setPlayback: (action) => {
+        const video = videoRef.current;
+        if (!video) return 'No media is loaded.';
+        if (action === 'play' || (action === 'toggle' && video.paused)) void video.play();
+        else video.pause();
+        return video.paused ? 'Paused.' : 'Playing.';
+      },
+      splitAtPlayhead: () => splitAtPlayhead(),
     };
     setAgentBridge(bridge);
   });
@@ -1549,7 +1562,7 @@ export default function App() {
   // --- workspace ---------------------------------------------------------------
   return (
     <div
-      className="app"
+      className={`app m-view-${mobileTab}`}
       // Give the dock the extra height the music lane needs, rather than stealing
       // it from the waveform. Only when a bed is attached; no bed, no change.
       style={musicLane ? ({ '--h-dock': '298px' } as React.CSSProperties) : undefined}
@@ -1695,6 +1708,38 @@ export default function App() {
         />
 
         <Splitter className="sp2" variable="--w-rail" min={300} max={560} initial={372} side="right" />
+
+        {/* ---- phone-only: the Script | Tools switcher under the monitor ----
+          * The transcript and the rail cannot share a phone's width, so one is
+          * on screen at a time and this row picks which. Grid placement comes
+          * from the mobile media query; on desktop the bar is display:none. */}
+        <nav className="m-tabs" aria-label="Editor surface">
+          <button
+            className={mobileTab === 'script' ? 'm-tab on' : 'm-tab'}
+            onClick={() => setMobileTab('script')}
+          >
+            Script
+          </button>
+          <button
+            className={mobileTab === 'tools' ? 'm-tab on' : 'm-tab'}
+            onClick={() => setMobileTab('tools')}
+          >
+            Tools
+          </button>
+        </nav>
+
+        {/* ---- phone-only: banners float over the workspace ----
+          * The in-script banners live in a surface a phone may have switched
+          * away from, so a fixed copy shows regardless of the open tab. The
+          * media query hides the in-script pair to keep the message single. */}
+        {(error || notice) && (
+          <div className="m-banners">
+            {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
+            {notice && !error && (
+              <p className="notice" onClick={() => setNotice(null)}>{notice}</p>
+            )}
+          </div>
+        )}
 
         {/* ---- the inspector for whatever is selected: the full-height right column ---- */}
         <Rail

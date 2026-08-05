@@ -2108,3 +2108,168 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: var(--r-1);
   color: var(--warn-fg); font-size: var(--t-small); line-height: 1.5;
 }
+
+/* ===================== mobile ===================== */
+/**
+ * The Android shell loads this same app into a WebView, and a phone browser
+ * loads it straight — either way, below 820px the three-column workspace has
+ * nowhere to exist. The desktop arrangement is columns THE POINTER moves
+ * between; a phone is one column THE THUMB moves through. So the grid
+ * rearranges into a stack:
+ *
+ *   title → monitor → Script|Tools switcher → the chosen surface → dock
+ *
+ * The transcript and the rail cannot share a phone's width, so exactly one is
+ * on screen and the switcher (rendered by App.tsx, dead on desktop) picks
+ * which. The monitor and the dock stay put in both views: the picture and the
+ * transport are the two things that must never leave.
+ *
+ * Everything here lives behind media queries — the desktop layout does not
+ * change by a pixel.
+ */
+
+/* The phone-only elements. They are always in the DOM (App.tsx renders them
+ * unconditionally so no JS media-query mirror is needed); CSS decides. */
+.m-tabs, .m-banners { display: none; }
+
+/* Narrow (a phone, either orientation's portrait) OR short (a landscape
+ * phone — 844×390 is WIDER than the desktop breakpoint but has no height for
+ * three columns; the desktop grid at that size squeezed the monitor to a
+ * sliver). Any viewport failing either axis takes the stack. */
+@media (max-width: 820px), (max-height: 520px) {
+  /* Phone browsers shrink the viewport under their own chrome; dvh tracks it.
+   * In the Android WebView dvh === vh, so this changes nothing there. */
+  body { height: 100dvh; }
+
+  .app {
+    grid-template-columns: 1fr;
+    /* The monitor gets a third of the height — enough to judge a frame by,
+     * small enough that the surface you are working in keeps the majority.
+     * The dock is fixed rather than fr so the timeline cannot be squeezed out
+     * by a long panel. */
+    grid-template-rows: 48px minmax(150px, 32vh) auto minmax(0, 1fr) 232px;
+    grid-template-areas:
+      'title'
+      'center'
+      'mtabs'
+      'content'
+      'dock';
+  }
+
+  /* Column resizing is a desk gesture, and the columns are gone anyway. */
+  .splitter { display: none; }
+
+  /* Script and rail share the one content slot; the m-view-* class App.tsx
+   * puts on .app decides which of the two is the one. */
+  .script { grid-area: content; padding: var(--s-3) var(--s-3) var(--s-6); }
+  .rail { grid-area: content; border-left: none; border-top: none; }
+  .app.m-view-script .rail { display: none; }
+  .app.m-view-tools .script { display: none; }
+
+  /* ---- the switcher ---- */
+  .m-tabs {
+    grid-area: mtabs;
+    display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-1);
+    padding: var(--s-1) var(--s-2);
+    background: var(--chrome);
+    border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .m-tab {
+    padding: 9px;
+    font-size: var(--t-ui); font-weight: 600; color: var(--dim);
+    background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  }
+  /* Solid gold for "this one", same as every selected thing in the app.
+   * The :hover variant is load-bearing, not polish: a tap leaves the button in
+   * :hover, and base.css's `button:hover:not(:disabled)` (0,2,1) would beat a
+   * bare `.m-tab.on` (0,2,0) — the selected tab then wore the grey hover fill
+   * under its gold-expecting dark text and was unreadable. */
+  .m-tabs .m-tab.on,
+  .m-tabs .m-tab.on:hover {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+  }
+
+  /* ---- banners ----
+   * The in-script pair may be on the hidden surface, so the fixed copies from
+   * App.tsx carry the message and the originals go quiet. */
+  .script > .error, .script > .notice { display: none; }
+  .m-banners {
+    display: block;
+    position: fixed; top: 52px; left: var(--s-2); right: var(--s-2);
+    z-index: var(--z-toast);
+  }
+  .m-banners .error, .m-banners .notice { margin-bottom: 0; box-shadow: var(--shadow-3); }
+
+  /* ---- title bar: keep the actions, drop the readouts ----
+   * The output-length stat and the document name are things a phone user can
+   * live without; ☰, home, undo/redo and Export are things they cannot. */
+  .titlebar { padding: 0 var(--s-2); gap: var(--s-2); }
+  .tb-left { gap: var(--s-1); }
+  .tb-sep, .tb-name, .tb-stats { display: none; }
+  .tb-right { gap: var(--s-2); }
+
+  /* Fingers, not cursors: the 28px icon buttons grow to a landable size. */
+  .icon { width: 38px; height: 38px; }
+
+  /* ---- monitor: the padding goes to the picture ---- */
+  .monitor { padding: var(--s-2) var(--s-2) var(--s-1); }
+  .stage-meta { margin-top: var(--s-1); }
+
+  /* ---- dock ----
+   * The transport is allowed to wrap — play/step/clock on the first line, the
+   * view toggles on the second — rather than forcing ten controls into 390px.
+   * The timeline canvas takes whatever height the wrap leaves. */
+  .transport {
+    flex-wrap: wrap; height: auto; min-height: 44px;
+    gap: var(--s-1) var(--s-3);
+    padding: var(--s-1) var(--s-2);
+  }
+  .tp-clock .tc { font-size: var(--t-lg); min-width: 56px; }
+  /* The total is the one number the clock can shed: the edit/source badge
+   * still says which universe the position is quoted in. */
+  .tc-total { display: none; }
+  .tl-bar { padding: var(--s-1) var(--s-2); }
+
+  /* The drawer stops short of the edge so the scrim stays tappable to close. */
+  .library { width: min(320px, 86vw); }
+
+  /* ---- dashboard: two cards across instead of a 228px minimum ---- */
+  .dash-top, .dash-body {
+    padding-left: var(--s-4); padding-right: var(--s-4);
+  }
+  /* The tagline ran under the absolutely-placed Settings button. */
+  .dash-tag { display: none; }
+  .dash-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--s-3); }
+  .dcard-new { min-height: 150px; }
+
+  /* ---- rail panels: the desktop gutters are a tenth of a phone's width ---- */
+  .panel { padding: var(--s-3) var(--s-3) var(--s-6); }
+
+  /* Dialogs already cap at the viewport; just keep them off the very edge. */
+  .dialog { width: calc(100vw - 24px); max-width: 520px; }
+}
+
+/* Short viewport (landscape phone): stacking everything leaves the working
+ * surface ~20px, so the monitor moves BESIDE it instead — picture left, the
+ * script or the tools right, dock under both. The width is there; the height
+ * is not. */
+@media (max-height: 520px) {
+  .app {
+    grid-template-columns: 2fr 3fr;
+    grid-template-rows: 48px auto minmax(0, 1fr) 140px;
+    grid-template-areas:
+      'title  title'
+      'mtabs  mtabs'
+      'center content'
+      'dock   dock';
+  }
+  .m-tab { padding: 5px; }
+}
+
+/* Touch has no hover: anything that reveals itself on hover must simply be
+ * there. The card actions were literally unreachable on a phone. */
+@media (pointer: coarse) {
+  .dc-acts { opacity: 1; }
+  .tl-add { opacity: .9; }
+}

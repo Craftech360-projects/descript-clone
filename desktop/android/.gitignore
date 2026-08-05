@@ -1,0 +1,19 @@
+# Build products — never committed, exactly as desktop/win/resources/ is not.
+# assets/nodejs-project is written by build.mjs; jniLibs and the libnode
+# headers by fetch-libnode.mjs; ffmpeg outputs by its build script.
+app/src/main/assets/nodejs-project/
+app/src/main/jniLibs/
+app/src/main/cpp/libnode/
+third_party/cache/
+third_party/ffmpeg/build/
+third_party/ffmpeg/out/
+
+# Gradle / Android Studio
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.cxx/
+node_modules/

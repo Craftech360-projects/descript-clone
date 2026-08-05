@@ -209,7 +209,7 @@ function callBrowser(conn: Conn, name: string, args: Record<string, unknown>): P
   });
 }
 
-/** Build the 24 in-process MCP tools; each handler bridges to the browser over `conn`. */
+/** Build the in-process MCP tools (one per AGENT_TOOLS entry); each handler bridges to the browser over `conn`. */
 function buildTools(conn: Conn) {
   return AGENT_TOOLS.map((spec) =>
     tool(

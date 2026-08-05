@@ -15,12 +15,20 @@
  */
 
 import {
+  addPunchIn,
   correctText,
+  deletePunchIn,
+  historyState,
+  redoEdit,
   removeFillers,
   removeRetakes,
   restoreAll,
+  setMove,
   setSelection,
   setSelectionDeleted,
+  setSpeaker,
+  tagFillers,
+  undoEdit,
   updateCaptions,
   updateColor,
   updateCut,
@@ -30,6 +38,7 @@ import {
 } from '../store/editor.ts';
 import type { Doc } from '../../../../packages/core/src/doc.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
+import type { FrameMove } from '../../../../packages/core/src/frame-track.ts';
 import { normalizeFrame, type FramePreset } from '../../../../packages/core/src/frame.ts';
 import { presetSettings, type ColorPreset } from '../../../../packages/core/src/color.ts';
 import {
@@ -49,6 +58,9 @@ export interface AgentSnapshot {
   selectionText: string;
   stats: { words: number; kept: number; cuts: number; outputSec: number };
   music: { name: string; volume: number } | null;
+  /** Where the playhead sits (source seconds) and whether playback is running. */
+  playheadSec: number;
+  playing: boolean;
 }
 
 /** The async, App-level actions an executor cannot perform from the store alone. */
@@ -65,6 +77,10 @@ export interface AgentBridge {
   removeMusic(): Promise<void>;
   seek(seconds: number): void;
   playSelection(): void;
+  /** Returns the resulting state, e.g. "Playing." or "Paused." */
+  setPlayback(action: 'play' | 'pause' | 'toggle'): string;
+  /** The razor. Returns what happened (split, or why not). */
+  splitAtPlayhead(): Promise<string>;
 }
 
 let bridge: AgentBridge | null = null;
@@ -125,6 +141,14 @@ export function buildContext(): string {
       ? `Selection: "${trim(s.selectionText, 80)}" (${s.selectedWordIds.length} words)`
       : 'Selection: none',
   );
+  lines.push(`Playhead: ${clock(s.playheadSec)} (${s.playing ? 'playing' : 'paused'})`);
+  const h = historyState();
+  if (h.canUndo || h.canRedo) {
+    lines.push(
+      `History: ${h.canUndo ? `last edit "${h.undoLabel}"` : 'nothing to undo'}` +
+        (h.canRedo ? `, redo available ("${h.redoLabel}")` : ''),
+    );
+  }
   return lines.join('\n');
 }
 
@@ -255,6 +279,134 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
       .join('\n');
   },
 
+  read_transcript: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const includeDeleted = bool(args.include_deleted) ?? true;
+    const includeIds = bool(args.include_ids) ?? false;
+    const all = includeDeleted ? doc.words : doc.words.filter((w) => !w.deleted);
+    if (all.length === 0) return 'The transcript is empty.';
+
+    const offset = Math.max(0, Math.round(numOr(args.offset, 0)));
+    const limit = Math.max(1, Math.min(2000, Math.round(numOr(args.limit, 400))));
+    const slice = all.slice(offset, offset + limit);
+    if (slice.length === 0) return `Offset ${offset} is past the end — the transcript has ${all.length} words.`;
+
+    // One line per stretch of speech: broken on a speaker change, a pause of
+    // 1.5s+, or sheer length, each prefixed with its source timestamp.
+    const lines: string[] = [];
+    let words: string[] = [];
+    let lineStart = slice[0];
+    const flush = () => {
+      if (words.length === 0) return;
+      const who = lineStart.speaker ? ` ${lineStart.speaker}:` : '';
+      lines.push(`[${clock(lineStart.start)}]${who} ${words.join(' ')}`);
+      words = [];
+    };
+    let prev: Word | null = null;
+    for (const w of slice) {
+      if (prev && (w.speaker !== prev.speaker || w.start - prev.end >= 1.5 || words.length >= 60)) {
+        flush();
+        lineStart = w;
+      }
+      let text = w.deleted ? `~~${w.text}~~` : w.text;
+      if (includeIds) text += `[${w.id}]`;
+      words.push(text);
+      prev = w;
+    }
+    flush();
+
+    const more = offset + slice.length < all.length;
+    const head =
+      `Words ${offset + 1}–${offset + slice.length} of ${all.length}${includeDeleted ? '' : ' (kept words only)'}.` +
+      (more ? ` Call read_transcript again with offset=${offset + slice.length} for the rest.` : '') +
+      (includeDeleted ? ' Words shown ~~struck through~~ are currently cut from the output.' : '');
+    return [head, '', ...lines].join('\n');
+  },
+
+  undo: (args) => {
+    requireDoc(requireBridge().snapshot());
+    const steps = Math.max(1, Math.min(50, Math.round(numOr(args.steps, 1))));
+    const labels: string[] = [];
+    for (let i = 0; i < steps; i++) {
+      const label = undoEdit();
+      if (!label) break;
+      labels.push(label);
+    }
+    return labels.length === 0 ? 'Nothing to undo.' : `Undid: ${labels.join('; ')}.`;
+  },
+
+  redo: (args) => {
+    requireDoc(requireBridge().snapshot());
+    const steps = Math.max(1, Math.min(50, Math.round(numOr(args.steps, 1))));
+    const labels: string[] = [];
+    for (let i = 0; i < steps; i++) {
+      const label = redoEdit();
+      if (!label) break;
+      labels.push(label);
+    }
+    return labels.length === 0 ? 'Nothing to redo.' : `Redid: ${labels.join('; ')}.`;
+  },
+
+  select_text: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    if (bool(args.clear)) {
+      setSelection(null);
+      return 'Selection cleared.';
+    }
+    if (args.from_word_id && args.to_word_id) {
+      const from = str(args.from_word_id)!;
+      const to = str(args.to_word_id)!;
+      const a = doc.words.findIndex((w) => w.id === from);
+      const b = doc.words.findIndex((w) => w.id === to);
+      if (a === -1 || b === -1) return 'One of the word ids was not found. Use find_in_transcript to get valid ids.';
+      setSelection({ anchorId: from, focusId: to });
+      const count = Math.abs(b - a) + 1;
+      return `Selected ${count} word${count === 1 ? '' : 's'}.`;
+    }
+    const query = str(args.query);
+    if (!query) return 'Provide a phrase (query), an explicit word-id range, or clear=true.';
+    const runs = matchRuns(doc.words, query, true);
+    if (runs.length === 0) return `No matches for "${query}".`;
+    const run = runs[0];
+    setSelection({ anchorId: run.fromId, focusId: run.toId });
+    return `Selected "${trim(run.text, 80)}" (${run.toIndex - run.fromIndex + 1} words).`;
+  },
+
+  set_speaker: (args) => {
+    const snap = requireBridge().snapshot();
+    const doc = requireDoc(snap);
+    const speaker = str(args.speaker);
+    if (!speaker) return 'Provide speaker.';
+
+    const ids = new Set<string>();
+    if (args.from_word_id && args.to_word_id) {
+      const a = doc.words.findIndex((w) => w.id === args.from_word_id);
+      const b = doc.words.findIndex((w) => w.id === args.to_word_id);
+      if (a === -1 || b === -1) return 'One of the word ids was not found. Use find_in_transcript to get valid ids.';
+      const [lo, hi] = a <= b ? [a, b] : [b, a];
+      for (let i = lo; i <= hi; i++) ids.add(doc.words[i].id);
+    } else if (str(args.query)) {
+      const runs = matchRuns(doc.words, str(args.query)!, true);
+      if (runs.length === 0) return `No matches for "${args.query}".`;
+      const targets = args.occurrence === 'all' ? runs : [runs[0]];
+      for (const run of targets) {
+        for (let i = run.fromIndex; i <= run.toIndex; i++) ids.add(doc.words[i].id);
+      }
+    } else {
+      for (const id of snap.selectedWordIds) ids.add(id);
+      if (ids.size === 0) return 'Nothing to label — pass a query, a word-id range, or select words first.';
+    }
+
+    setSpeaker(ids, speaker);
+    return `Labelled ${ids.size} word${ids.size === 1 ? '' : 's'} as "${speaker}".`;
+  },
+
+  tag_fillers: (args) => {
+    requireDoc(requireBridge().snapshot());
+    const n = tagFillers(str(args.mode) === 'all', []);
+    return n === 0 ? 'No filler words found.' : `Flagged ${n} filler word${n === 1 ? '' : 's'} in the script (nothing was cut).`;
+  },
+
   remove_fillers: (args) => {
     requireDoc(requireBridge().snapshot());
     const all = str(args.mode) === 'all';
@@ -351,6 +503,63 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     return preset === 'none' ? 'Removed the colour grade.' : `Applied the ${preset} look.`;
   },
 
+  add_push_in: (args) => {
+    const snap = requireBridge().snapshot();
+    requireDoc(snap);
+    if (snap.project && !snap.project.hasVideo) return 'This is an audio-only project — there is no picture to push in on.';
+    const start = numOr(args.start_sec, NaN);
+    const end = numOr(args.end_sec, NaN);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return 'Provide start_sec and end_sec with end after start.';
+    }
+    const id = addPunchIn(start, end);
+    if (!id) return 'That range overlaps an existing push-in. Use list_push_ins to see what is there.';
+    const patch: Partial<FrameMove> = { zoom: numOr(args.zoom, 1.5) };
+    if (typeof args.x === 'number') patch.x = args.x;
+    if (typeof args.y === 'number') patch.y = args.y;
+    if (typeof args.ease_sec === 'number') patch.ease = args.ease_sec;
+    setMove(id, patch, 'Set push-in framing');
+    return `Added push-in ${id}: ${clock(start)}–${clock(end)} at ${patch.zoom}x zoom.`;
+  },
+
+  update_push_in: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const id = str(args.id);
+    const move = id ? doc.frame.moves.find((m) => m.id === id) : undefined;
+    if (!id || !move) return 'That push-in id was not found. Use list_push_ins.';
+    const patch: Partial<FrameMove> = {};
+    if (typeof args.start_sec === 'number') patch.start = args.start_sec;
+    if (typeof args.end_sec === 'number') patch.end = args.end_sec;
+    if (typeof args.zoom === 'number') patch.zoom = args.zoom;
+    if (typeof args.x === 'number') patch.x = args.x;
+    if (typeof args.y === 'number') patch.y = args.y;
+    if (typeof args.ease_sec === 'number') patch.ease = args.ease_sec;
+    if (Object.keys(patch).length === 0) return 'Nothing to change — pass at least one field.';
+    setMove(id, patch, 'Adjust push-in');
+    return `Updated push-in ${id}.`;
+  },
+
+  remove_push_in: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const id = str(args.id);
+    if (!id || !doc.frame.moves.some((m) => m.id === id)) return 'That push-in id was not found. Use list_push_ins.';
+    deletePunchIn(id);
+    return 'Push-in removed.';
+  },
+
+  list_push_ins: () => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const moves = doc.frame.moves;
+    if (moves.length === 0) return 'No push-ins on this project.';
+    return moves
+      .map(
+        (m) =>
+          `- ${m.id}: ${clock(m.start)}–${clock(m.end)}, ${m.zoom}x zoom, x ${m.x}, y ${m.y}, ease ${m.ease}s` +
+          (m.path && m.path.length > 0 ? ' (tracking a subject)' : ''),
+      )
+      .join('\n');
+  },
+
   add_music: async (args) => {
     const query = str(args.query);
     if (!query) return 'Provide a query.';
@@ -423,6 +632,21 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     if (snap.selectedWordIds.length === 0) return 'Nothing is selected to play.';
     requireBridge().playSelection();
     return 'Playing the selection.';
+  },
+
+  set_playback: (args) => {
+    const action = str(args.action);
+    if (action !== 'play' && action !== 'pause' && action !== 'toggle') {
+      return 'Provide action: play, pause or toggle.';
+    }
+    const snap = requireBridge().snapshot();
+    if (!snap.project) return 'No project is open.';
+    return requireBridge().setPlayback(action);
+  },
+
+  split_at_playhead: async () => {
+    requireDoc(requireBridge().snapshot());
+    return requireBridge().splitAtPlayhead();
   },
 };
 

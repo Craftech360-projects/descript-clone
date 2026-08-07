@@ -1,6 +1,7 @@
 import { DEFAULT_CAPTIONS, type CaptionSettings } from './caption-style.ts';
 import { DEFAULT_COLOR, type ColorSettings } from './color.ts';
 import { DEFAULT_FRAME, type FrameSettings } from './frame.ts';
+import type { ImageOverlay } from './overlay.ts';
 import type { CompileOptions, Transcript, Word } from './types.ts';
 
 /**
@@ -66,6 +67,18 @@ export interface Doc {
    * is Noir or neutral. See color.ts.
    */
   color: ColorSettings;
+  /**
+   * Images composited over the picture for a stretch of the transcript — the
+   * B-roll track. See overlay.ts.
+   *
+   * A top-level field rather than a member of `frame`, unlike push-ins. A
+   * push-in lives under frame.moves because it IS a framing decision — it
+   * re-crops the delivered rectangle and nothing else. An overlay composites new
+   * pixels from a different file, so filing it under "what shape is the output"
+   * would put two unrelated things behind one patch kind and make every image
+   * edit look like a reframe in the undo history.
+   */
+  overlays: ImageOverlay[];
   /** Bumped on every committed change. The saver uses it to detect staleness. */
   rev: number;
 }
@@ -155,6 +168,7 @@ export type DocPatch =
   | { kind: 'studioSound'; prev: boolean; next: boolean }
   | { kind: 'frame'; prev: FrameSettings; next: FrameSettings }
   | { kind: 'color'; prev: ColorSettings; next: ColorSettings }
+  | { kind: 'overlays'; prev: ImageOverlay[]; next: ImageOverlay[] }
   /** Escape hatch for a wholesale transcript swap (re-transcribe). */
   | { kind: 'replace'; prev: Word[]; next: Word[] }
   /**
@@ -179,8 +193,9 @@ export function docFromTranscript(
   studioSound: boolean = false,
   frame: FrameSettings = DEFAULT_FRAME,
   color: ColorSettings = DEFAULT_COLOR,
+  overlays: ImageOverlay[] = [],
 ): Doc {
-  return { words: transcript.words, cut, captions, speed, studioSound, frame, color, rev: 0 };
+  return { words: transcript.words, cut, captions, speed, studioSound, frame, color, overlays, rev: 0 };
 }
 
 /** The word ids a patch touches. Free — the patch already lists them. */
@@ -215,6 +230,7 @@ export function affectedIds(patch: DocPatch): string[] {
     case 'studioSound':
     case 'frame':
     case 'color':
+    case 'overlays':
       return [];
   }
 }
@@ -241,6 +257,8 @@ export function invertPatch(patch: DocPatch): DocPatch {
       return { kind: 'frame', prev: patch.next, next: patch.prev };
     case 'color':
       return { kind: 'color', prev: patch.next, next: patch.prev };
+    case 'overlays':
+      return { kind: 'overlays', prev: patch.next, next: patch.prev };
     case 'replace':
       return { kind: 'replace', prev: patch.next, next: patch.prev };
     case 'batch':
@@ -282,6 +300,11 @@ export function applyPatch(doc: Doc, patch: DocPatch): Doc {
       return { ...doc, frame: { ...patch.next }, rev: doc.rev + 1 };
     case 'color':
       return { ...doc, color: { ...patch.next }, rev: doc.rev + 1 };
+    case 'overlays':
+      // Copied one level, like every other settings patch: the array is fresh so
+      // a later edit cannot mutate the value this patch holds for undo, while
+      // the overlay objects inside stay referentially equal for React.memo.
+      return { ...doc, overlays: [...patch.next], rev: doc.rev + 1 };
     case 'replace':
       return { ...doc, words: patch.next, rev: doc.rev + 1 };
     case 'batch': {
@@ -384,6 +407,12 @@ export function isEmptyPatch(patch: DocPatch): boolean {
       return (Object.keys(patch.next) as Array<keyof ColorSettings>).every(
         (k) => patch.prev[k] === patch.next[k],
       );
+    case 'overlays':
+      // By value, for the same reason frame's `moves` is: every edit rebuilds
+      // the array, so === would call a drag that ended where it started a real
+      // change and push an undo step that undoes nothing. A project holds a
+      // handful of overlays, each a dozen scalars.
+      return JSON.stringify(patch.prev) === JSON.stringify(patch.next);
     case 'replace':
       return false;
     case 'batch':
@@ -404,6 +433,12 @@ export function patchBytes(patch: DocPatch): number {
     case 'studioSound':
     case 'color':
       return 100;
+    case 'overlays':
+      // Flat per overlay, unlike `frame`: an overlay is a fixed dozen scalars
+      // with no unbounded member (the image's BYTES live on the project, not in
+      // the patch), so there is nothing here that can quietly outgrow the
+      // history budget the way a tracked path can.
+      return 100 + (patch.prev.length + patch.next.length) * 200;
     case 'frame': {
       // Not a flat 100 like its neighbours: a frame patch carries its moves, and
       // a TRACKED move carries a sample per step of the follow. A minute of

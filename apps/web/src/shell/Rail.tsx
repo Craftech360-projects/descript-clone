@@ -9,6 +9,7 @@ import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
 import type { FrameSettings } from '../../../../packages/core/src/frame.ts';
 import type { ColorSettings } from '../../../../packages/core/src/color.ts';
+import type { ImageOverlay } from '../../../../packages/core/src/overlay.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
 import type { CustomFont, MusicProvider, MusicResult, Project } from '../api.ts';
 
@@ -49,6 +50,26 @@ interface Props {
   markingMoveId: string | null;
   following: { id: string; progress: number } | null;
   onSeek: (time: number) => void;
+
+  /** Image inserts. See ProjectPanel's ImagesField — describe a picture and it
+   *  is generated and placed on the words the prompt names. */
+  overlays: ImageOverlay[];
+  imageUrls: Record<string, string>;
+  imageNames: Record<string, string>;
+  onSetOverlay: (id: string, patch: Partial<ImageOverlay>) => void;
+  onRemoveOverlay: (id: string) => void;
+  onOverlayDragStart: () => void;
+  onOverlayDragEnd: (label: string) => void;
+  editingOverlayId: string | null;
+  onEditOverlay: (id: string | null) => void;
+  onGenerateImage: (prompt: string) => void;
+  onImportImage: (file: File) => void;
+  onRetargetOverlayToWord: (id: string, phrase: string) => void;
+  generatingImage: boolean;
+  canGenerateImages: boolean;
+  /** Move the image being framed onto the current selection. See SelectionPanel. */
+  onMoveImageHere?: () => void;
+  moveImageLabel?: string;
 
   color: ColorSettings;
   setColor: (c: ColorSettings) => void;
@@ -153,6 +174,11 @@ export default function Rail(p: Props) {
         // rather than present and permanently disabled.
         onPunchIn={p.project.hasVideo ? p.onPunchIn : undefined}
         punchBlocked={p.punchBlocked}
+        // Absent on audio for the same reason, and absent again when there is
+        // no insert to move — an enabled button with nothing to act on is worse
+        // than no button.
+        onMoveImageHere={p.project.hasVideo ? p.onMoveImageHere : undefined}
+        moveImageLabel={p.moveImageLabel}
       />
     </>
   ) : (
@@ -185,6 +211,20 @@ export default function Rail(p: Props) {
         markingMoveId={p.markingMoveId}
         following={p.following}
         onSeek={p.onSeek}
+        overlays={p.overlays}
+        imageUrls={p.imageUrls}
+        imageNames={p.imageNames}
+        onSetOverlay={p.onSetOverlay}
+        onRemoveOverlay={p.onRemoveOverlay}
+        onOverlayDragStart={p.onOverlayDragStart}
+        onOverlayDragEnd={p.onOverlayDragEnd}
+        editingOverlayId={p.editingOverlayId}
+        onEditOverlay={p.onEditOverlay}
+        onGenerateImage={p.onGenerateImage}
+        onImportImage={p.onImportImage}
+        onRetargetOverlayToWord={p.onRetargetOverlayToWord}
+        generatingImage={p.generatingImage}
+        canGenerateImages={p.canGenerateImages}
         color={p.color}
         setColor={p.setColor}
         onColorDragStart={p.onColorDragStart}

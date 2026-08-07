@@ -61,6 +61,7 @@ Everything else falls out of that:
 | Caption style | One `CaptionSettings` read by both the preview and the burn — see `caption-style.ts` |
 | Filmstrip | One `tile=10x10` ffmpeg pass → sheets the canvas blits from — see `thumbs.ts` |
 | Speaker colours | `Word.speaker` → `--spk-1..8`, by order of first appearance |
+| Show an image on a word | Generate it, match the prompt to the script, composite with one `overlay` filter |
 
 `packages/core` is pure TypeScript with **zero dependencies** — so the *same*
 `compileEdl` runs in the browser for instant preview and on the server for the
@@ -71,6 +72,8 @@ final render. They cannot disagree, because they are the same function.
 ```
 packages/core/     transcript model, EDL compiler, renderer, fillers, retakes
   edl.ts           ← the heart. Read this first.
+  overlay.ts       images over the picture, keyed to words
+  image-prompt.ts  which word a prompt belongs on, and what shape to generate
 apps/server/       ffmpeg ingest + render, ASR adapter
   config.ts        ← every remote model id, in one place
 apps/web/          transcript editor
@@ -144,6 +147,74 @@ aid, not a claim about the frame. It used to fall back to `cues[0]`, so every
 gap flashed the video's *first* line over whatever you were watching — half of
 the flicker above. It now holds the last line you heard, dimmed, and only when
 the picture is not moving.
+
+**An image insert is timed in SOURCE seconds, and its ramps disagree on purpose.**
+An overlay is stored against the same clock every `Word` carries, for the reason
+`FrameMove` is: it is attached to CONTENT. Cut a sentence out ahead of a picture
+and the picture must still land on the word it was aimed at; stored on the output
+clock it would slide backwards by exactly the length of the cut, silently, every
+time. The render maps it over with `overlaysToOutput`, because it composites
+after the cut where the only clock is the output's.
+
+The two ramps are *different curves* and that is not an oversight. Opacity is
+spelt in the render as ffmpeg's `fade` with `alpha=1`, which is linear and has no
+shaping parameter — measured against ffmpeg 8.0, the midpoint of a 0.5s fade
+reads 134/252, a straight line — so `overlayFade` is linear too, or the preview
+would dissolve on a curve the file does not have. Motion (the slide transitions)
+goes through `overlay`'s own per-frame `x`/`y`, which *can* carry a smoothstep:
+measured, a slide sampled mid-ramp put the image's left edge at −145px against a
+predicted −145. So slides get the S-curve, for the reason `frame-track` gives —
+a linear move reads as the image being shoved. A dissolve that eases looks like
+it is hesitating; a move that does not looks broken.
+
+Three ffmpeg facts the graph depends on, all verified rather than assumed:
+`colorchannelmixer`'s `aa` is configuration-time (so it can set a constant
+opacity and cannot animate one — the same trap `crop`'s w/h sets); `overlay`'s
+x/y *are* per-frame, unlike `crop`'s w/h; and `-loop 1` without `-t` is an
+infinite stream, which is how an export hangs. Hence `-loop 1 -framerate F -t D`
+per image, bounded to that image's own length so a 4000px photo is not rescaled
+for every frame of a ten-minute programme.
+
+**The image track composites after the grade and before the burn.** After the
+grade because that is the only ordering the preview can match — in the monitor
+the grade is an SVG filter on the `<video>` and the image is a sibling `<img>`,
+so it is necessarily ungraded. Before the burn so a caption is never hidden by a
+cutaway. Same argument the grade itself makes about captions, one layer further
+out.
+
+**You describe the picture; the app works out where it goes.** There is no
+"select a word, then pick an image" step, because the prompt already names the
+subject: `placeByPrompt` takes the content words of "a friendly robot waving",
+skips the vocabulary of *asking* for a picture ("image of", "wide shot"), and
+puts the insert on the first time the speaker says the thing. First mention,
+because that is where the idea is introduced and because it is the only rule a
+user can predict without reading the code. Ties go to the earliest keyword in the
+PROMPT, not the earliest match in the script — prompts lead with their subject,
+so "a robot in a field" must not land on "field" just because it was said first.
+No synonyms and no embeddings: those are where a wrong answer is confidently
+wrong, and the honest move is to place nothing. When nothing matches, the image
+goes to the selection, then to the playhead, and the panel says so — a picture
+you cannot find is worse than one in the wrong place. Every placement is one
+click from being moved (select the words, then "Move … here" in the selection
+panel), which is what makes guessing safe to do at all.
+
+**Generated, not searched, and at the video's own shape.** A stock library can
+only offer the nearest thing somebody already photographed, and almost everything
+in one is CC BY — a credit obligation the user carries to publication. The other
+half is shape: a 16:9 photograph composited full-frame onto a 9:16 reel loses its
+subject to the crop, so the ratio is `nearestAspectRatio(outputFrame)`, resolved
+SERVER-side from the same values the render uses. Compared in log space, or a
+portrait frame gets pulled towards square by arithmetic. **Unverified against the
+live API** — see the header of `image-gen.ts`: the docs give two spellings for
+the aspect-ratio field, both are sent, and the wrong one alone would silently
+return a 1:1 image that reads as a cropping bug.
+
+**A one-word image is not a one-word insert.** A word is ~0.3s, and a picture on
+screen for 0.3s — a third of it fading in, a third fading out — is a flash, not a
+cutaway. `suggestWindow` starts at the word and extends forward to 2.5s, floored
+at `MIN_OVERLAY_SEC` and capped at 6s. The Insert button and the assistant's
+`add_image_at_words` call the same function, so the UI and the chat cannot
+disagree about how long an image should stay up.
 
 **Word ids are not indices.** They run `w0, w2, w4…` — assigned from the raw ASR
 array before spacing tokens are filtered out. Never parse the number out of an

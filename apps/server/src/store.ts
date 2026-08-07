@@ -10,6 +10,7 @@ import type { CaptionSettings } from '../../../packages/core/src/caption-style.t
 import type { CutSettings } from '../../../packages/core/src/doc.ts';
 import type { ColorSettings } from '../../../packages/core/src/color.ts';
 import type { FrameSettings } from '../../../packages/core/src/frame.ts';
+import type { ImageOverlay } from '../../../packages/core/src/overlay.ts';
 import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
@@ -100,6 +101,53 @@ export interface BgMusic {
   license?: string;
   /** The track's page on the provider, so the credit can link back. */
   sourceLink?: string;
+}
+
+/**
+ * One image imported into a project, ready to be placed over the picture.
+ *
+ * Per-project like the music bed, and for the same reason: a picture chosen to
+ * illustrate a line is a creative choice about THIS piece, not a library the
+ * whole app shares. The file lives in uploads/ alongside the sources and is fed
+ * to the render as its own ffmpeg input — see ImagesRender in render.ts.
+ *
+ * This is the FILE. Where it appears is an ImageOverlay, and the split is
+ * deliberate: see Project.overlays.
+ */
+export interface ImageAsset {
+  id: string;
+  /** Original filename, for display in the panel. */
+  name: string;
+  /** Absolute path to the imported image on disk. Server-only. */
+  sourcePath: string;
+  /** Browser-reachable URL, for the picker's grid and the monitor's <img>. */
+  sourceUrl: string;
+  /**
+   * The image's own pixel size, probed on import. Not the size it will be drawn
+   * at — an overlay's box is a fraction of the DELIVERED frame — but the panel
+   * needs the aspect ratio to lay a thumbnail out without reflowing once it
+   * loads, and 'contain' has to be explicable before it is rendered.
+   */
+  width: number;
+  height: number;
+
+  /**
+   * Where the picture came from, when it was found on the web rather than
+   * imported.
+   *
+   * All three are absent for a file the user supplied — they own that, and owe
+   * nobody a credit. For a searched image they are not decoration: Openverse's
+   * image catalogue is overwhelmingly CC BY / BY-SA, so publishing a video that
+   * shows one REQUIRES the credit line. Storing it with the project is what
+   * keeps it available at export time, long after the picker was closed. Same
+   * contract, field for field, as BgMusic's.
+   */
+  attribution?: string;
+  /** Short licence code — 'by', 'by-sa', 'cc0'. Drives the badge in the panel. */
+  license?: string;
+  /** The image's page on the provider, so the credit can link back. */
+  sourceLink?: string;
+  createdAt: string;
 }
 
 /**
@@ -207,6 +255,32 @@ export interface Project {
    */
   music?: BgMusic;
   /**
+   * The images imported into this project — the B-roll library, the FILES.
+   *
+   * Separate from `overlays` because the two have different cardinality: one
+   * picture placed at four different words is one file on disk and four
+   * placements. Folding them together would mean four copies of the bytes, four
+   * downloads, and four inputs handed to ffmpeg for what the compositor can
+   * satisfy from one — which is exactly why ImagesRender takes a `paths` lookup
+   * keyed by asset id rather than a path per overlay.
+   *
+   * Absent on projects with no images (all of them, until asked for).
+   */
+  images?: ImageAsset[];
+  /**
+   * Where those images appear — the PLACEMENTS, in source time.
+   *
+   * Kept on the project rather than inside `images` for the reason above, and
+   * kept at the top level rather than under `frame` because an overlay is not a
+   * framing decision: it composites new pixels rather than re-framing existing
+   * ones, and a project can place a picture without ever opening the Frame
+   * panel. See overlay.ts, which argues the same split for the types.
+   *
+   * Absent on projects saved before the feature; everything reading it goes
+   * through normalizeOverlays, which maps undefined to an empty track.
+   */
+  overlays?: ImageOverlay[];
+  /**
    * The saved assistant conversation. Absent until the user chats. Written by the
    * dedicated PUT /api/projects/:id/chat endpoint and stripped from the listing.
    */
@@ -266,10 +340,11 @@ export async function remove(id: string): Promise<boolean> {
   if (!project) return false;
 
   // Two clips split from one file share a sourcePath, so unlink the set, not the
-  // list. Music rides along; renders deliberately do not.
+  // list. Music and the B-roll images ride along; renders deliberately do not.
   const files = new Set<string>(clipsOf(project).map((c) => c.sourcePath));
   files.add(project.sourcePath);
   if (project.music) files.add(project.music.sourcePath);
+  for (const image of project.images ?? []) files.add(image.sourcePath);
   for (const file of files) await unlinkInMedia(file);
 
   await unlinkInMedia(join(poster.posterDir(), `${id}.jpg`));

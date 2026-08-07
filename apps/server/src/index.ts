@@ -11,7 +11,7 @@ import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { ASR_MODELS, CONFIG, EDIT_DEFAULTS } from './config.ts';
-import { probe, extractAudioForAsr, renderEdl, computePeaks, checkTools } from './ffmpeg.ts';
+import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools } from './ffmpeg.ts';
 import { transcribe, ASR_DEFAULTS, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
@@ -19,6 +19,7 @@ import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
 import { registerClaudeAgent } from './agent-claude.ts';
+import { registerSummon } from './summon.ts';
 import * as settings from './settings.ts';
 import {
   availableProviders,
@@ -27,6 +28,8 @@ import {
   searchMusic,
   type MusicProviderId,
 } from './music-search.ts';
+import { canGenerateImages, extensionFor, generateImage } from './image-gen.ts';
+import { nearestAspectRatio } from '../../../packages/core/src/image-prompt.ts';
 
 import {
   normalizeCaptions,
@@ -39,6 +42,7 @@ import {
   sourceToOutput,
 } from '../../../packages/core/src/edl.ts';
 import { movesToOutput } from '../../../packages/core/src/frame-track.ts';
+import { normalizeOverlays, overlaysToOutput } from '../../../packages/core/src/overlay.ts';
 import { detectFillers, removeFillers } from '../../../packages/core/src/fillers.ts';
 import { removeRetakes } from '../../../packages/core/src/retakes.ts';
 import { scaleCues, toCues, toSrt, toVtt, toAss } from '../../../packages/core/src/captions.ts';
@@ -120,6 +124,13 @@ app.get('/api/capabilities', (c) =>
      */
     musicProviders: availableProviders(),
     /**
+     * Image inserts. `generate` gates the prompt box in the Images panel — it is
+     * off until GEMINI_API_KEY is set, exactly as `hasAsr` gates transcription.
+     * Importing a file is always available, so the panel degrades to that rather
+     * than disappearing; this is the flag that lets it say which it is.
+     */
+    images: { generate: canGenerateImages() },
+    /**
      * The AI assistant. `enabled` gates the chat panel exactly as `hasAsr` gates
      * transcription; `defaultModel` is the pre-selected entry in the model picker.
      */
@@ -140,6 +151,10 @@ app.get('/api/capabilities', (c) =>
 // static catch-all below, like every other /api route.
 registerAgent(app);
 registerClaudeAgent(app, upgradeWebSocket);
+// The assistant's escape hatch: fetch a file off the open web, run a media
+// operation no panel exists for. Its own module because neither backs a feature
+// of the app — see summon.ts on why an assistant needs both.
+registerSummon(app);
 // Runtime API-key management from the dashboard (see settings.ts).
 settings.registerSettings(app);
 
@@ -788,12 +803,181 @@ app.delete('/api/projects/:id/music', async (c) => {
   return c.json(project);
 });
 
+/**
+ * B-roll images, per project.
+ *
+ * Modelled on the music routes above, because the two are the same job: land a
+ * media file in uploads/, probe it as validation, attach a record to the project.
+ * Where they diverge is cardinality — a project has ONE bed and MANY images, and
+ * each image can be placed at several words — so the asset list and the
+ * placements are separate fields. See Project.images / Project.overlays.
+ *
+ * The placements themselves are written by the transcript PATCH, alongside the
+ * frame and the grade, because they ARE the edit and belong on its undo stack.
+ * These routes only manage the files.
+ */
+app.post('/api/projects/:id/images', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  const declared = Number(c.req.header('content-length') ?? 0);
+  if (declared > CONFIG.maxUploadBytes) {
+    return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
+  }
+
+  const body = await c.req.parseBody();
+  const file = body['file'];
+  if (!(file instanceof File)) return c.json({ error: 'Attach an image file as the "file" field.' }, 400);
+  if (file.size > CONFIG.maxUploadBytes) {
+    return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
+  }
+
+  const imageId = randomUUID();
+  const ext = extname(file.name) || '.jpg';
+  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${imageId}${ext}`);
+  await writeFile(sourcePath, Buffer.from(await file.arrayBuffer()));
+
+  // probeImage doubles as validation, exactly as probe does for the bed — but it
+  // is stricter than "can ffmpeg open this". An overlay is held on screen with
+  // `-loop 1`, which only the still-image demuxers accept, so a video or an
+  // animated GIF has to be refused HERE. Let one in and it does not render badly,
+  // it makes every subsequent export of this project fail. See probeImage.
+  let size: { width: number; height: number };
+  try {
+    size = await probeImage(sourcePath);
+  } catch (e) {
+    // Unlike the music route, the rejected file is removed: it is unreachable
+    // from the project record, and one of the things that gets rejected here is
+    // an SVG, which has no business sitting in a directory we serve.
+    await unlink(sourcePath).catch(() => {});
+    return c.json({ error: e instanceof Error ? e.message : 'That file is not an image.' }, 400);
+  }
+
+  const image: store.ImageAsset = {
+    id: imageId,
+    name: file.name,
+    sourcePath,
+    sourceUrl: `/media/uploads/${imageId}${ext}`,
+    width: size.width,
+    height: size.height,
+    createdAt: new Date().toISOString(),
+  };
+  project.images = [...(project.images ?? []), image];
+  await store.save(project);
+  return c.json(project);
+});
+
+/**
+ * Generate a picture for this project, at the shape the video will ship in.
+ *
+ * This replaced a web image search, and the two differences are the point. A
+ * generated image is MADE for the sentence being spoken rather than being the
+ * nearest thing somebody already photographed, and it owes nobody a credit — a
+ * searched one is almost always CC BY, which is an obligation the user carries
+ * all the way to publication.
+ *
+ * The aspect ratio is decided HERE and never accepted from the client. It is a
+ * fact about the project (the delivered frame, after any reframe), not a
+ * preference, and the client asking for one would be a second place that can be
+ * wrong — the same reason the render resolves its own frame rather than trusting
+ * whatever the panel last drew. See nearestAspectRatio.
+ */
+app.post('/api/projects/:id/images/generate', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!canGenerateImages()) {
+    // 503, not 500: nothing is broken, a key is missing. Mirrors how the agent
+    // routes report an absent XAI_API_KEY.
+    return c.json({ error: 'Image generation needs GEMINI_API_KEY on the server.' }, 503);
+  }
+
+  const body = await c.req.json<{ prompt?: string }>().catch(() => ({}) as { prompt?: string });
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+  if (!prompt) return c.json({ error: 'Describe the image you want.' }, 400);
+
+  // The frame this project actually delivers, resolved the same way the render
+  // resolves it — so the picture is generated at the shape it will be composited
+  // into and  has nothing to crop.
+  const frameSettings = normalizeFrame(project.frame);
+  const source = { width: project.width ?? 0, height: project.height ?? 0 };
+  const out = frameSize(frameSettings, source);
+  const aspectRatio = nearestAspectRatio(out.width, out.height);
+
+  const imageId = randomUUID();
+  let sourcePath: string;
+  let sourceUrl: string;
+  try {
+    const { bytes, mime } = await generateImage({ prompt, aspectRatio });
+    const ext = extensionFor(mime);
+    sourcePath = join(CONFIG.mediaDir, 'uploads', `${imageId}${ext}`);
+    await writeFile(sourcePath, bytes);
+    sourceUrl = `/media/uploads/${imageId}${ext}`;
+  } catch (e) {
+    // 502: the failure is upstream. The message carries the model’s own words
+    // when it refused, which is the only thing that explains a refusal.
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+  }
+
+  // Probed rather than assumed, exactly as on the upload path: what the model
+  // returned is what the panel has to show and what `-loop 1` has to accept, and
+  // the requested ratio is a request rather than a guarantee.
+  let size: { width: number; height: number };
+  try {
+    size = await probeImage(sourcePath);
+  } catch (e) {
+    await unlink(sourcePath).catch(() => {});
+    return c.json({ error: e instanceof Error ? e.message : 'The model returned something that is not an image.' }, 502);
+  }
+
+  const image: store.ImageAsset = {
+    id: imageId,
+    // The prompt names it. A generated file has no filename worth showing, and
+    // the prompt is exactly what the user will recognise it by in the list.
+    name: prompt.length > 60 ? `${prompt.slice(0, 59)}…` : prompt,
+    sourcePath,
+    sourceUrl,
+    width: size.width,
+    height: size.height,
+    createdAt: new Date().toISOString(),
+  };
+  project.images = [...(project.images ?? []), image];
+  await store.save(project);
+  return c.json(project);
+});
+
+/**
+ * Remove an image from a project's library, and every placement of it.
+ *
+ * The placements go too, and that is not tidiness: an overlay whose asset is
+ * gone is a placement that can never draw. The render already skips one (see
+ * ImagesRender.paths, which is deliberately forgiving so a missing file cannot
+ * make a project un-exportable), but leaving them on the record would show the
+ * user a track full of rows that do nothing and cannot be explained.
+ *
+ * The file is left on disk, the same as a removed clip or a detached bed — a
+ * past render may still point at it.
+ */
+app.delete('/api/projects/:id/images/:imageId', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+
+  const imageId = c.req.param('imageId');
+  const images = project.images ?? [];
+  const next = images.filter((img) => img.id !== imageId);
+  if (next.length === images.length) return c.json({ error: 'No such image' }, 404);
+
+  project.images = next;
+  if (project.overlays) project.overlays = project.overlays.filter((o) => o.assetId !== imageId);
+  await store.save(project);
+  return c.json(project);
+});
+
 /** The editor sends the whole edit state: what is cut, and how it plays out. */
 app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions, speed, cut, studioSound, frame, color } = await c.req.json<{
+  const { deletedIds, captions, speed, cut, studioSound, frame, color, overlays } = await c.req.json<{
     deletedIds: string[];
     captions?: CaptionSettings;
     speed?: number;
@@ -801,6 +985,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
     studioSound?: boolean;
     frame?: Partial<FrameSettings>;
     color?: Partial<ColorSettings>;
+    overlays?: unknown;
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
@@ -819,6 +1004,13 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   // Same rule again: a NaN exposure or an invented preset off the wire is coerced
   // here rather than reaching the filtergraph on the next render.
   if (color !== undefined) project.color = normalizeColor(color);
+  // And again for the image track. normalizeOverlays is doing more work than its
+  // siblings — it also sorts, drops a placement with no asset, and caps the list
+  // at MAX_OVERLAYS — but the contract here is the same one: whatever the wire
+  // says is coerced at this boundary, so nothing downstream has to re-check it.
+  // The empty array is a real value and must be stored: it is what clearing the
+  // last image looks like.
+  if (overlays !== undefined) project.overlays = normalizeOverlays(overlays);
 
   await store.save(project);
   return c.json({ ok: true });
@@ -1004,6 +1196,29 @@ app.post('/api/projects/:id/render', async (c) => {
     ? (resolveColor(normalizeColor({ ...project.color, ...(options.color ?? {}) })) ?? undefined)
     : undefined;
 
+  /**
+   * Walk inwards from a cut end until something survived, on the output clock.
+   *
+   * sourceToOutput returns null for a moment the edit removed, which is what
+   * happens whenever a timed region's own ends were trimmed. Both timed tracks —
+   * push-ins and images — want the same answer there (shorten the region, do not
+   * delete it), so they share one implementation rather than each carrying a
+   * copy that can drift from the other.
+   *
+   * 20 steps is plenty: the caller only needs SOME surviving instant near the
+   * end it lost, and the ease is rescaled to whatever is left anyway. A finer
+   * walk would be spending precision on a boundary the cut has already made
+   * approximate.
+   */
+  const inward = (from: number, to: number): number | null => {
+    const step = (to - from) / 20;
+    for (let i = 1; i <= 20; i++) {
+      const at = sourceToOutput(edl, from + step * i);
+      if (at !== null) return at;
+    }
+    return null;
+  };
+
   // The push-ins, moved from the SOURCE clock they are marked on to the OUTPUT
   // clock the filter runs on.
   //
@@ -1011,28 +1226,42 @@ app.post('/api/projects/:id/render', async (c) => {
   // attached to the words it was aimed at, so cutting a sentence ahead of it has
   // to carry it earlier rather than leave it pointing at whatever now happens to
   // occupy that second. sourceToOutput answers that exactly, and returns null for
-  // a moment the edit removed — hence the probe, which walks inwards to find the
-  // first instant of the move that survived, so trimming a push-in's ends
-  // shortens it instead of deleting it.
+  // a moment the edit removed — hence `inward`, which finds the first instant of
+  // the move that survived, so trimming a push-in's ends shortens it instead of
+  // deleting it.
   const punch =
     project.hasVideo && frameSettings.moves.length > 0
       ? {
-          moves: movesToOutput(
-            frameSettings.moves,
-            (t) => sourceToOutput(edl, t),
-            (from, to) => {
-              // 20 steps is plenty: the caller only needs SOME surviving instant
-              // near the end it lost, and the ease is rescaled to whatever is
-              // left anyway. A finer walk would be spending precision on a
-              // boundary the cut has already made approximate.
-              const step = (to - from) / 20;
-              for (let i = 1; i <= 20; i++) {
-                const at = sourceToOutput(edl, from + step * i);
-                if (at !== null) return at;
-              }
-              return null;
-            },
-          ),
+          moves: movesToOutput(frameSettings.moves, (t) => sourceToOutput(edl, t), inward),
+          width: outSize.width,
+          height: outSize.height,
+        }
+      : undefined;
+
+  // The image track, mapped over identically — same clock, same probe, same
+  // reason. An overlay is aimed at a word, so it has to travel with that word
+  // when the cut moves it, and an insert whose ends were trimmed should get
+  // shorter rather than vanish.
+  //
+  // Live overlays win over the record for the reason the frame, the grade and
+  // the caption style all do above: an Export fired mid-debounce has to use what
+  // is on screen, not what the last save happened to catch. Coerced through
+  // normalizeOverlays either way, because the request half of that is off the
+  // wire.
+  const overlays = normalizeOverlays(options.overlays ?? project.overlays);
+  // Skipped entirely with no picture to composite onto, or nothing to composite:
+  // then no extra input and no filter is emitted at all, and the export is the
+  // same file it was before the feature existed.
+  const images =
+    project.hasVideo && overlays.length > 0
+      ? {
+          overlays: overlaysToOutput(overlays, (t) => sourceToOutput(edl, t), inward),
+          // Keyed by asset id, not one path per overlay: the same picture placed
+          // at four words is one file. See ImagesRender.paths.
+          paths: Object.fromEntries((project.images ?? []).map((img) => [img.id, img.sourcePath])),
+          // The DELIVERED frame, the same values the push-in gets — an overlay's
+          // box is a fraction of the frame that ships, so the two must resolve
+          // their fractions against exactly the same rectangle.
           width: outSize.width,
           height: outSize.height,
         }
@@ -1121,6 +1350,10 @@ app.post('/api/projects/:id/render', async (c) => {
         // The animated push-ins, on the output clock. renderEdl fills in the
         // frame rate from the same probe the cut's renumber uses.
         punch,
+        // The B-roll images, on the output clock, composited between the grade
+        // and the caption burn. renderEdl fills in the frame rate the same way it
+        // does for the punch. Absent = no extra inputs, no overlay filters.
+        images,
         // The colour grade, applied after the crop and before the caption burn
         // so it never tints a caption. Absent = the picture's values are untouched.
         color,

@@ -738,3 +738,119 @@ test('a sequence keeps crop before grade before burn before speed', () => {
   assert.ok(chain.indexOf('colorchannelmixer=') < chain.indexOf('subtitles='), chain);
   assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
 });
+
+// ── the image track ───────────────────────────────────────────────────────────
+//
+// An overlay is the only thing in this graph that needs a second VIDEO input, so
+// it is the only thing that cannot live inside the comma-joined chain every
+// other stage shares. These pin where it lands in that chain, that it takes the
+// last input indices (so nothing else's index moves), and — the one that matters
+// most — that a project placing no image emits the graph it always did.
+
+const IMAGES = (overlays: Array<Partial<import('./overlay.ts').ImageOverlay>>) => ({
+  overlays: overlays.map((o, i) => ({
+    id: `o${i}`,
+    assetId: `a${i}`,
+    start: 1,
+    end: 4,
+    transition: 'fade' as const,
+    ease: 0.35,
+    box: { x: 0, y: 0, width: 1, height: 1 },
+    fit: 'cover' as const,
+    opacity: 1,
+    ...o,
+  })),
+  paths: Object.fromEntries(overlays.map((_, i) => [`a${i}`, `/img/${i}.png`])),
+  width: 1920,
+  height: 1080,
+  fps: 30,
+});
+
+test('no images leaves the graph byte-identical to before they existed', () => {
+  const bare = plan(edl([[0, 5], [10, 20]]), { frame: REEL, color: WARM, speed: 1.5 });
+  const empty = plan(edl([[0, 5], [10, 20]]), {
+    frame: REEL,
+    color: WARM,
+    speed: 1.5,
+    images: { overlays: [], paths: {}, width: 1920, height: 1080, fps: 30 },
+  });
+  assert.equal(empty.filterScript, bare.filterScript);
+  assert.deepEqual(empty.args, bare.args);
+});
+
+test('each image is its own input, taking the indices after the source', () => {
+  const { args, filterScript } = plan(edl([[0, 10]]), { images: IMAGES([{}, { start: 5, end: 8 }]) });
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['in.mp4', '/img/0.png', '/img/1.png']);
+  assert.ok(filterScript.includes('[1:v]'), filterScript);
+  assert.ok(filterScript.includes('[2:v]'), filterScript);
+});
+
+test('music keeps input 1 when images are present, or the mix reads the wrong pad', () => {
+  const { args, filterScript } = plan(edl([[0, 10]]), {
+    bgMusic: { input: 'song.mp3', volume: 0.4, durationSec: 10 },
+    images: IMAGES([{}]),
+  });
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['in.mp4', 'song.mp3', '/img/0.png']);
+  assert.ok(filterScript.includes('[1:a]volume=0.400'), 'the bed still rides on input 1');
+  assert.ok(filterScript.includes('[2:v]'), 'and the image took the next index');
+});
+
+test('an image composites after the grade and before the burn', () => {
+  // Both sides are load-bearing: after the grade because the preview paints an
+  // ungraded <img> over a filtered <video>, and before the burn so a caption is
+  // never hidden by a cutaway.
+  const { filterScript } = plan(edl([[0, 10]]), {
+    color: WARM,
+    subtitlePath: '/tmp/c.ass',
+    speed: 1.5,
+    images: IMAGES([{}]),
+  });
+  const pre = filterScript.split('\n').find((l) => l.startsWith('[vcut]'))!;
+  assert.ok(pre.includes('colorchannelmixer='), 'the grade runs before the composite');
+  assert.ok(!pre.includes('subtitles='), 'the burn does not');
+  const post = filterScript.split('\n').find((l) => l.includes('subtitles='))!;
+  assert.ok(post.startsWith('[ov0]'), post);
+  assert.ok(post.indexOf('subtitles=') < post.indexOf('setpts=PTS/'), post);
+});
+
+test('images with nothing before them composite straight onto the cut', () => {
+  const { filterScript } = plan(edl([[0, 10]]), { images: IMAGES([{}]) });
+  assert.ok(!filterScript.includes('[vpre]'), 'no empty pre-stage hop');
+  assert.ok(filterScript.includes('[vcut][img0]overlay='), filterScript);
+  // Nothing follows the composite, so the last overlay still has to be carried
+  // to [outv] — a graph cannot rename a pad by writing [a][b].
+  assert.ok(/\[ov0\]null\[outv\]/.test(filterScript), filterScript);
+  assert.equal(filterScript.match(/\[outv\]/g)?.length, 1, 'exactly one producer of [outv]');
+});
+
+test('an image whose asset has gone is skipped, not fatal', () => {
+  // Deleting a picture from the library must not make every project that ever
+  // used it un-exportable.
+  const images = IMAGES([{}, {}]);
+  delete images.paths.a0;
+  const { args, filterScript } = plan(edl([[0, 10]]), { images });
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['in.mp4', '/img/1.png']);
+  assert.equal(filterScript.match(/overlay=/g)?.length, 1, filterScript);
+});
+
+test('every image is skipped outright on an audio-only project', () => {
+  const { args, filterScript } = plan(edl([[0, 10]]), { hasVideo: false, images: IMAGES([{}]) });
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['in.mp4']);
+  assert.ok(!filterScript.includes('overlay='), filterScript);
+});
+
+test('a sequence composites images once, after the join', () => {
+  const { filterScript, args } = seqPlan(seqEdl, { color: WARM, images: IMAGES([{}]) });
+  // The image takes the index after every clip.
+  assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['a.mp4', 'b.mp4', '/img/0.png']);
+  assert.ok(filterScript.includes('[2:v]'), filterScript);
+  assert.equal(filterScript.match(/overlay=/g)?.length, 1, 'once, on the joined stream');
+  const pre = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
+  assert.ok(pre.includes('colorchannelmixer='), pre);
+});
+
+test('a sequence with images but no other video work still opens its stage', () => {
+  const { filterScript } = seqPlan(seqEdl, { images: IMAGES([{}]) });
+  assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(filterScript), filterScript);
+  assert.ok(filterScript.includes('[vc][img0]overlay='), filterScript);
+});

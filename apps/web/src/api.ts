@@ -1,6 +1,7 @@
 import type { CaptionSettings } from '../../../packages/core/src/caption-style.ts';
 import type { ColorSettings } from '../../../packages/core/src/color.ts';
 import type { FrameSettings } from '../../../packages/core/src/frame.ts';
+import type { ImageOverlay } from '../../../packages/core/src/overlay.ts';
 import type { Transcript } from '../../../packages/core/src/types.ts';
 
 /** Filmstrip sheets. Mirrors the server's `Thumbs` — see apps/server/src/thumbs.ts. */
@@ -62,6 +63,19 @@ export interface Project {
   /** The background-music bed, if one has been imported. Absent otherwise. */
   music?: ProjectMusic;
   /**
+   * The images available to place over this project's picture. Absent until one
+   * is imported. These are the BYTES; where each one appears is a separate list
+   * — see `overlays` — so the same picture placed at four words is one file and
+   * four placements.
+   */
+  images?: ImageAsset[];
+  /**
+   * Where each image appears, on the SOURCE clock. Absent on projects saved
+   * before image inserts existed; the client falls back through
+   * normalizeOverlays, which maps undefined to [].
+   */
+  overlays?: ImageOverlay[];
+  /**
    * The saved assistant conversation. Absent on projects with no chat yet, and
    * stripped from the library listing (it can grow) — a full `api.get` carries it,
    * which is what opening a project uses. See ProjectChat.
@@ -102,6 +116,28 @@ export interface ProjectMusic {
   attribution?: string;
   license?: string;
   sourceLink?: string;
+}
+
+/**
+ * A picture available to place over this project. Mirrors the server's
+ * `ImageAsset` (store.ts), minus the server-only disk path.
+ *
+ * `width`/`height` are the file's own pixel size, probed on import — the panel
+ * shows them, and they are what makes "this is a 400px thumbnail on a 1080p
+ * frame" something the UI can warn about rather than something you discover in
+ * the export.
+ */
+export interface ImageAsset {
+  id: string;
+  name: string;
+  sourceUrl: string;
+  width: number;
+  height: number;
+  /** Provenance, present only on an image found through the picker — see ProjectMusic. */
+  attribution?: string;
+  license?: string;
+  sourceLink?: string;
+  createdAt: string;
 }
 
 /** Which catalogue the music picker is searching. See server music-search.ts. */
@@ -259,6 +295,13 @@ export interface Capabilities {
   editDefaults: CutSettings;
   /** Catalogues the music picker can search. Never empty — Openverse needs no key. */
   musicProviders: MusicProvider[];
+  /**
+   * Image inserts. `generate` is false until GEMINI_API_KEY is set on the
+   * server; importing a file works regardless, so the panel degrades to that
+   * rather than vanishing. Optional so a client talking to an older server
+   * simply sees generation as unavailable instead of throwing.
+   */
+  images?: { generate: boolean };
   /** The AI assistant. `enabled` is false until XAI_API_KEY is set on the server. */
   agent: { enabled: boolean; defaultModel: string };
 }
@@ -336,6 +379,9 @@ export interface RenderSettings extends CutSettings {
    * `durationSec: null` means "play for the whole program".
    */
   music?: { volume?: number; durationSec?: number | null; loop?: boolean };
+  /** Live image placements, sent for the same reason as `frame` above — an
+   *  Export fired mid-debounce must composite what is on screen. */
+  overlays?: ImageOverlay[];
 }
 
 export type JobKind = 'transcribe' | 'render' | 'thumbs';
@@ -489,6 +535,7 @@ export const api = {
       studioSound?: boolean;
       frame?: FrameSettings;
       color?: ColorSettings;
+      overlays?: ImageOverlay[];
     },
   ) =>
     fetch(`/api/projects/${id}/transcript`, {
@@ -598,6 +645,36 @@ export const api = {
   },
 
   /**
+   * Per-project images. Every call returns the updated project, so the caller
+   * just swaps it into state — same contract as `music` above.
+   */
+  images: {
+    upload: (id: string, file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+      return fetch(`/api/projects/${id}/images`, { method: 'POST', body: form }).then(json<Project>);
+    },
+    remove: (id: string, imageId: string) =>
+      fetch(`/api/projects/${id}/images/${imageId}`, { method: 'DELETE' }).then(json<Project>),
+
+    /**
+     * Generate a picture from a description.
+     *
+     * No aspect-ratio parameter, deliberately. The shape is a fact about the
+     * PROJECT — the frame it will actually ship in, after any reframe — so the
+     * server resolves it from the same values the render uses. A client that
+     * could ask for a ratio would be a second place that can be wrong, and a
+     * mismatch shows up as a cropped subject rather than as an error.
+     *
+     * Slow (seconds, not milliseconds) and not a job: unlike a render there is
+     * nothing to report progress on and nothing to cancel into, so the caller
+     * simply awaits it with the button disabled.
+     */
+    generate: (id: string, prompt: string) =>
+      post(`/api/projects/${id}/images/generate`, { prompt }).then(json<Project>),
+  },
+
+  /**
    * The AI assistant. `models` populates the picker; `chat` is one turn of the
    * loop — the client sends its running history plus a fresh state snapshot, and
    * gets back the assistant's next message (which may ask to call tools).
@@ -607,6 +684,20 @@ export const api = {
       fetch('/api/agent/models').then(json<{ models: string[]; default: string; enabled: boolean }>),
     chat: (body: { model: string; context: string; messages: AgentWireMessage[] }) =>
       post('/api/agent', body).then(json<{ message: AgentAssistantMessage }>),
+  },
+
+  /**
+   * The assistant's escape hatch — the two things the app itself cannot do:
+   * fetch a file off the open web, and run a media operation no panel exists for.
+   *
+   * Neither touches the project. Both land a file in the media directory and
+   * return its URL, which the caller then attaches through the ordinary import
+   * routes (a clip, the bed, an image) or simply saves. See server summon.ts.
+   */
+  summon: {
+    fetch: (id: string, url: string, accept?: 'image' | 'audio' | 'video') =>
+      post(`/api/projects/${id}/summon/fetch`, { url, accept }).then(json<SummonedFile>),
+    op: (id: string, req: SummonOp) => post(`/api/projects/${id}/summon/op`, req).then(json<SummonedFile>),
   },
 
   /**
@@ -620,6 +711,34 @@ export const api = {
       post('/api/settings/keys', patch).then(json<KeysResponse>),
   },
 };
+
+/** A file the assistant summoned — fetched from the web, or made by an operation. */
+export interface SummonedFile {
+  /** Under /media/uploads/. Re-fetchable as a blob, so it can be attached or saved. */
+  url: string;
+  name: string;
+  kind: 'image' | 'audio' | 'video';
+  bytes: number;
+  durationSec: number;
+  hasVideo?: boolean;
+  hasAudio?: boolean;
+  width?: number;
+  height?: number;
+}
+
+/** One ffmpeg operation. The server owns the paths and codecs; see summon.ts. */
+export interface SummonOp {
+  source?: 'clip' | 'music' | 'url' | 'file';
+  clipId?: string;
+  url?: string;
+  file?: string;
+  startSec?: number;
+  endSec?: number;
+  videoFilters?: string;
+  audioFilters?: string;
+  format?: string;
+  stillDurationSec?: number;
+}
 
 /** One managed key's masked status, as the server reports it. */
 export interface KeyStatus {

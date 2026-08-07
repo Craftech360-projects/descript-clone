@@ -18,6 +18,20 @@ interface Props {
    * this selection. Stated rather than left as a dead button.
    */
   punchBlocked?: string | null;
+  /**
+   * Move an existing image insert onto exactly these words.
+   *
+   * The escape hatch from an automatic placement, and it lives HERE rather than
+   * in the Images panel for a mechanical reason: the rail swaps that panel out
+   * for this one the moment anything is selected, so a retarget button over
+   * there could never be pressed with a selection to act on. This is the only
+   * surface that has both the words and a reason to talk about them.
+   *
+   * Absent when there is no image to move, or on an audio-only project.
+   */
+  onMoveImageHere?: () => void;
+  /** What would move — the prompt it was generated from, for the button's label. */
+  moveImageLabel?: string;
 }
 
 /** What the rail shows when words are selected: facts, and what you can do. */
@@ -28,6 +42,8 @@ export default function SelectionPanel({
   onPlaySelection,
   onPunchIn,
   punchBlocked,
+  onMoveImageHere,
+  moveImageLabel,
 }: Props) {
   const first = words[0];
   const last = words[words.length - 1];
@@ -77,6 +93,31 @@ export default function SelectionPanel({
           </button>
           {punchBlocked ? <Hint>{punchBlocked}</Hint> : (
             <Hint>Then drag a box around what to follow.</Hint>
+          )}
+          {/* Correcting where an image landed.
+            *
+            * Placement is guessed from the prompt — it goes on the first time
+            * you say what you asked for — and a guess the user cannot override
+            * is a guess they have to live with. This is the override, and it
+            * reuses the same suggestWindow the generator did, so a moved insert
+            * cannot end up with a duration the generator would never have
+            * produced.
+            *
+            * Nothing to block on, unlike the push-in above: overlapping images
+            * are a legitimate edit (that is a cross-dissolve), and the length
+            * comes from suggestWindow rather than from the selection, so even a
+            * single short word is a valid target. */}
+          {onMoveImageHere && (
+            <>
+              <button onClick={onMoveImageHere}>
+                Move {moveImageLabel ? `“${moveImageLabel}”` : 'the image'} here
+              </button>
+              <Hint>
+                {words.length === 1
+                  ? `It will appear as "${first.text}" is said, and hold long enough to read.`
+                  : 'It will appear with these words and hold long enough to read.'}
+              </Hint>
+            </>
           )}
         </Field>
       )}

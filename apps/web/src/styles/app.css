@@ -654,6 +654,44 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * in the same place, or the preview is lying about the one case it most needs to
  * warn you about. */
 .cap-layer { position: absolute; pointer-events: none; overflow: hidden; }
+
+/* ── image inserts ───────────────────────────────────────────────────────────
+ *
+ * The B-roll layer, between the picture and the captions. DOM order is z-order
+ * and it mirrors the render exactly: ffmpeg composites the image over the graded
+ * frame and THEN burns the caption on top, so an insert must never cover a
+ * caption here either.
+ *
+ * inset:0 rather than a measured box: this is a child of .frame, which IS the
+ * output rectangle, so the layer is the frame and every overlay inside it is
+ * positioned in plain percentages of exactly the rectangle its 0..1 box
+ * fractions are fractions of.
+ *
+ * Clipped, because the frame clips. An image slid halfway in from the left has
+ * to disappear at the frame's edge and not over the app's chrome — that edge is
+ * where the render's `overlay` stops drawing too. */
+.img-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.img-overlay {
+  position: absolute;
+  /* Written imperatively at 60Hz by ImageOverlayLayer — declared here only so
+   * the property exists before the first animation frame lands. NO transition:
+   * a CSS ease on top of the rAF ramp would be a second, unshared opinion about
+   * the dissolve, and the render would match neither. */
+  opacity: 0;
+  will-change: opacity, transform;
+}
+/* The one being framed. Drawn outside its own window at full strength so it can
+ * be placed from anywhere on the timeline, and outlined so that state is
+ * legible rather than looking like a stuck frame. */
+.img-overlay.editing {
+  outline: 2px dashed var(--accent, #6ea8fe);
+  outline-offset: -2px;
+}
 /* The caption BOX: the rectangle the text is wrapped into, sized in JS from
  * boxWidth/boxHeight. It is a coordinate space and nothing else — no pointer, no
  * paint — because a rectangle this large swallowing clicks would take the frame
@@ -2272,4 +2310,105 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 @media (pointer: coarse) {
   .dc-acts { opacity: 1; }
   .tl-add { opacity: .9; }
+}
+
+/* ── the image picker ─────────────────────────────────────────────────────────
+ *
+ * A grid of thumbnails, used for both the project's own library and web search
+ * results — the two are the same decision ("which picture"), so they get the
+ * same shape rather than two layouts to learn. */
+.img-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.img-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+  text-align: left;
+  border: 1px solid var(--line, #333);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.img-card:hover:not(:disabled) { border-color: var(--accent, #6ea8fe); }
+.img-card:disabled { opacity: 0.5; cursor: default; }
+.img-card img {
+  width: 100%;
+  /* A fixed box so a portrait and a landscape thumbnail do not make the grid
+   * jump; cover rather than contain because a letterboxed thumbnail reads as a
+   * broken image at this size. */
+  height: 72px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg-2, #222);
+}
+.img-card span {
+  font-size: 11px;
+  line-height: 1.3;
+  /* Two lines then ellipsis: a title is useful, a paragraph is not, and a card
+   * that grows with its caption breaks the grid's rhythm. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.img-card em { font-size: 10px; opacity: 0.7; font-style: normal; }
+
+/* The three sources in the picker. */
+.tabs { display: flex; gap: 4px; }
+.tabs button { flex: 1; }
+.tabs button.on { border-color: var(--accent, #6ea8fe); }
+
+/* ── the image insert rows ────────────────────────────────────────────────────
+ *
+ * These reuse .move / .move-when from the push-in list, because they are the
+ * same object: a row about a MOMENT, with a time you can click to jump to. Only
+ * the two things a push-in has no equivalent of are new. */
+.ov-thumb {
+  width: 40px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  background: var(--bg-2, #222);
+}
+/* The six transitions, as one row. See the note in ImagesField for why this is
+ * not a <select>: it is the choice people open this section to make, and the
+ * difference between a dissolve and a hard cut should cost one click. */
+.ov-transitions {
+  display: flex;
+  gap: 3px;
+}
+.ov-transitions button {
+  flex: 1;
+  padding: 3px 2px;
+  font-size: 11px;
+  min-width: 0;
+}
+.ov-transitions button.on {
+  border-color: var(--accent, #6ea8fe);
+  color: var(--accent, #6ea8fe);
+}
+
+/* The word an insert plays on, editable in place. A label rather than a bare
+ * input: "robot" alone in a row of controls does not say what it does, and this
+ * is the control most likely to be reached for when a placement guessed wrong. */
+.ov-word {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.ov-word input {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  padding: 2px 6px;
 }

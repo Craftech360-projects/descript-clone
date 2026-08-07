@@ -8,6 +8,7 @@ import {
   buildRenderPlan,
   buildSequenceRenderPlan,
   type BgMusicRender,
+  type ImagesRender,
   type SequenceRenderClip,
 } from '../../../packages/core/src/render.ts';
 import type { Grade } from '../../../packages/core/src/color.ts';
@@ -82,6 +83,60 @@ export async function probe(path: string): Promise<MediaInfo> {
     // to r_frame_rate only when avg is unusable ("0/0").
     fps: parseFps(video?.avg_frame_rate) ?? parseFps(video?.r_frame_rate),
   };
+}
+
+/**
+ * A still image's pixel size, and the gate that decides whether it may become an
+ * ImageAsset at all.
+ *
+ * It cannot be `probe`: that one THROWS when a file carries no audio track,
+ * which is the one thing every picture is guaranteed to be — so the media probe
+ * rejects every valid image before it can report a width.
+ *
+ * The test is the DEMUXER, not "does it have a video stream", and the difference
+ * is the whole reason this is strict. An overlay input is spelt
+ * `-loop 1 -framerate F -t D -i file` (see overlayFilterLines), and `loop` is an
+ * option of the image2 demuxer family — nothing else has it. Measured against
+ * ffmpeg 8.0: an .mp4 and an animated .gif each carry a video stream and each
+ * report a width and a height, and each makes the whole command die with
+ * "Option loop not found." (exit 8). Accepting one would not produce a bad
+ * overlay, it would make EVERY export of the project that holds it fail, long
+ * after the import that let it in. Stills open as `<codec>_pipe` — jpeg_pipe,
+ * png_pipe, webp_pipe, bmp_pipe, tiff_pipe — or as `image2`; that is the list.
+ */
+export async function probeImage(path: string): Promise<{ width: number; height: number }> {
+  let out: string;
+  try {
+    out = await run(CONFIG.ffprobePath, [
+      '-v', 'error',
+      '-print_format', 'json',
+      '-show_format',
+      '-show_streams',
+      path,
+    ]);
+  } catch {
+    // ffprobe exits non-zero on anything it cannot demux at all. That is the
+    // "user attached a PDF" case, and it is a 400 rather than a 500.
+    throw new Error('That file could not be read as an image.');
+  }
+
+  const data = JSON.parse(out);
+  const video = data.streams?.find((s: any) => s.codec_type === 'video');
+  if (!video?.width || !video?.height) {
+    throw new Error('That file has no picture in it to use as an overlay.');
+  }
+
+  // format_name is a comma-joined list of every format the probe matched
+  // ("mov,mp4,m4a,3gp,3g2,mj2"), so this asks whether ANY of them is a still
+  // demuxer rather than comparing the whole string.
+  const formats = String(data.format?.format_name ?? '').split(',');
+  if (!formats.some((f) => f === 'image2' || f.endsWith('_pipe'))) {
+    throw new Error(
+      `That is a ${formats[0] || 'media'} file, and an overlay needs a still image: it holds one frame for the whole time it is on screen, which ffmpeg can only do for a still. Use a JPEG, PNG, WebP, BMP or TIFF.`,
+    );
+  }
+
+  return { width: video.width, height: video.height };
 }
 
 /**
@@ -203,6 +258,23 @@ export interface RenderJob {
    * on. This is the same class of bug the `frame` field's comment records.
    */
   punch?: { moves: OutputMove[]; width: number; height: number };
+  /**
+   * The B-roll track — overlays already mapped onto the OUTPUT clock by the
+   * caller (overlaysToOutput), paired with a path per asset id.
+   *
+   * `fps` is spelt out of the type for exactly the reason `punch` omits it: the
+   * still is generated at that rate, and the correct value is the one resolved
+   * below — the fresh probe on the single-input path, the canonical rate on a
+   * stitch — not whatever the project record happens to remember.
+   *
+   * Unlike `punch`, though, a rate that could not be resolved does NOT withdraw
+   * the track. zoompan generates its own timestamps, so a wrong rate there is a
+   * video of the wrong length; the image branch is bounded by `-t` instead, so a
+   * wrong rate costs a dissolve that steps rather than ramps. overlayFilterLines
+   * already falls back to 30 for a non-positive rate, and losing a picture the
+   * user placed is the worse of the two failures.
+   */
+  images?: Omit<ImagesRender, 'fps'>;
 }
 
 export async function renderEdl(
@@ -274,6 +346,9 @@ export async function renderEdl(
       // The canonical rate every clip was resampled to — not any one clip's, or
       // zoompan would re-time the join to a rate the join does not have.
       punch: job.punch ? { ...job.punch, fps: canonFps } : undefined,
+      // Same rate, for the same reason: the stills are generated into the joined
+      // stream, so they have to step at the rate that stream actually runs at.
+      images: job.images ? { ...job.images, fps: canonFps } : undefined,
     });
   } else {
     plan = buildRenderPlan(edl, {
@@ -292,6 +367,11 @@ export async function renderEdl(
       // probe could not say, and punchFilterStage then emits nothing rather than
       // guessing — losing the move is recoverable, a mistimed export is not.
       punch: job.punch && fps ? { ...job.punch, fps } : undefined,
+      // The same rate, but NOT the same guard — see RenderJob.images. 0 is passed
+      // through deliberately when the probe could not say, because
+      // overlayFilterLines reads a non-positive rate as "fall back to 30" rather
+      // than emitting `-framerate 0`.
+      images: job.images ? { ...job.images, fps: fps ?? 0 } : undefined,
     });
   }
   await writeFile(scriptPath, plan.filterScript, 'utf8');

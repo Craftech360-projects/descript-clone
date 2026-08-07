@@ -34,6 +34,15 @@ import {
   undoLabel,
   type History,
 } from '../../../../packages/core/src/history.ts';
+import {
+  addOverlay,
+  createOverlay,
+  normalizeOverlays,
+  overlayLabel,
+  removeOverlay,
+  updateOverlay,
+  type ImageOverlay,
+} from '../../../../packages/core/src/overlay.ts';
 import { detectFillers } from '../../../../packages/core/src/fillers.ts';
 import { detectRetakes } from '../../../../packages/core/src/retakes.ts';
 import type { Transcript, Word } from '../../../../packages/core/src/types.ts';
@@ -131,6 +140,7 @@ export function loadDoc(
   studioSound?: boolean,
   frame?: Partial<FrameSettings> | null,
   color?: Partial<ColorSettings> | null,
+  overlays?: unknown,
 ): void {
   savedRev = 0;
   set({
@@ -142,6 +152,10 @@ export function loadDoc(
       Boolean(studioSound),
       normalizeFrame(frame),
       normalizeColor(color),
+      // Coerced on the way in for the same reason frame and colour are: this is
+      // whatever the server had on disk, including a project saved before image
+      // overlays existed (undefined → []).
+      normalizeOverlays(overlays),
     ),
     history: emptyHistory(),
     selection: null,
@@ -513,6 +527,134 @@ let moveSeq = 0;
 function newMoveId(): string {
   moveSeq++;
   return globalThis.crypto?.randomUUID?.() ?? `mv-${Date.now()}-${moveSeq}`;
+}
+
+// ── image overlays: show a picture while a word is said ──────────────────────
+//
+// The same transient/commit split as the frame and colour gestures above, for
+// the same reason: dragging an overlay's box around the monitor is continuous,
+// and one history entry per pointermove would bury every real edit. Dropping an
+// image or changing its transition is one-shot and commits immediately.
+//
+// These are patches of their own kind rather than rides on the frame patch that
+// push-ins take. A push-in IS a framing decision; an overlay composites pixels
+// from another file, so filing it under `frame` would make every image edit read
+// as "Set frame to Reel" in the undo history.
+
+let transientOverlays: ImageOverlay[] | null = null;
+
+export function beginOverlayDrag(): void {
+  if (state.doc) transientOverlays = state.doc.overlays;
+}
+
+export function updateOverlays(overlays: ImageOverlay[], label = 'Change images'): void {
+  const { doc } = state;
+  if (!doc) return;
+  if (transientOverlays) {
+    set({ doc: { ...doc, overlays, rev: doc.rev + 1 } });
+    return;
+  }
+  apply({ kind: 'overlays', prev: doc.overlays, next: overlays }, { label });
+}
+
+export function endOverlayDrag(label: string): void {
+  const { doc } = state;
+  const prev = transientOverlays;
+  transientOverlays = null;
+  if (!doc || !prev) return;
+  const next = doc.overlays;
+  if (isEmptyPatch({ kind: 'overlays', prev, next })) return;
+
+  // Rewind, then commit once, so the single entry's inverse is the pre-drag value.
+  set({ doc: { ...doc, overlays: prev } });
+  apply({ kind: 'overlays', prev, next }, { label });
+}
+
+/**
+ * Place an image over [start, end). Returns its id, or null when the project is
+ * already at MAX_OVERLAYS — addOverlay returns the original array in that case,
+ * so the refusal costs no special case here.
+ */
+export function addImageOverlay(
+  assetId: string,
+  start: number,
+  end: number,
+  patch: Partial<ImageOverlay> = {},
+): string | null {
+  const { doc } = state;
+  if (!doc) return null;
+
+  const id = newOverlayId();
+  const overlay = createOverlay(id, assetId, start, end, patch);
+  const overlays = addOverlay(doc.overlays, overlay);
+  if (overlays === doc.overlays) return null;
+
+  apply(
+    { kind: 'overlays', prev: doc.overlays, next: overlays },
+    { label: overlayLabel(overlay, 'Add') },
+  );
+  return id;
+}
+
+/**
+ * Change one overlay.
+ *
+ * `label` matters here the way it does for setMove: a slider is bracketed by
+ * beginOverlayDrag/endOverlayDrag and its label arrives with the drag's end, but
+ * a one-shot change like picking a transition has no gesture around it and would
+ * otherwise fall through to updateOverlays' generic label.
+ */
+export function setOverlay(id: string, patch: Partial<ImageOverlay>, label?: string): void {
+  const { doc } = state;
+  if (!doc) return;
+  const overlay = doc.overlays.find((o) => o.id === id);
+  if (!overlay) return;
+
+  const next = updateOverlay(doc.overlays, id, patch);
+  // Mid-gesture, updateOverlays writes through to the live doc and records
+  // nothing; the single entry lands on endOverlayDrag with the drag's own label.
+  if (transientOverlays) return updateOverlays(next);
+  apply(
+    { kind: 'overlays', prev: doc.overlays, next },
+    { label: label ?? overlayLabel(overlay, 'Adjust') },
+  );
+}
+
+export function deleteImageOverlay(id: string): void {
+  const { doc } = state;
+  if (!doc) return;
+  const overlay = doc.overlays.find((o) => o.id === id);
+  if (!overlay) return;
+  apply(
+    { kind: 'overlays', prev: doc.overlays, next: removeOverlay(doc.overlays, id) },
+    { label: overlayLabel(overlay, 'Remove') },
+  );
+}
+
+/**
+ * Drop every overlay that pointed at an image the library no longer has.
+ *
+ * Called after deleting an asset. One history entry, because deleting the
+ * picture is one decision — and the placements have to go with it: an overlay
+ * with no asset is a placement that can never draw, and the render already skips
+ * it silently. Leaving them would make the panel list images that are gone.
+ */
+export function dropOverlaysForAsset(assetId: string): number {
+  const { doc } = state;
+  if (!doc) return 0;
+  const next = doc.overlays.filter((o) => o.assetId !== assetId);
+  const removed = doc.overlays.length - next.length;
+  if (removed === 0) return 0;
+  apply({ kind: 'overlays', prev: doc.overlays, next }, { label: 'Remove image' });
+  return removed;
+}
+
+let overlaySeq = 0;
+/** See newMoveId — randomUUID is restricted to secure contexts, and this app is
+ *  routinely opened over plain http on a LAN address to check a render on a phone. */
+function newOverlayId(): string {
+  overlaySeq++;
+  return globalThis.crypto?.randomUUID?.() ?? `ov-${Date.now()}-${overlaySeq}`;
 }
 
 // ── bulk actions, client-side ─────────────────────────────────────────────────

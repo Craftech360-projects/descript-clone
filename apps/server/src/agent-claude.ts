@@ -36,8 +36,8 @@ import {
  * re-posting a growing history every turn — the expensive habit of the Grok path.
  * On top of that: a static custom `systemPrompt` (NOT the claude_code preset, which
  * is huge), `tools: []` to strip every built-in file/bash/web tool from context,
- * and `settingSources: []` so no CLAUDE.md or user settings are loaded. Only the 24
- * JumpCut tools reach the model.
+ * and `settingSources: []` so no CLAUDE.md or user settings are loaded. Only the
+ * JumpCut tools (AGENT_TOOLS) reach the model.
  */
 
 /**
@@ -141,6 +141,13 @@ function zodForProperty(spec: Record<string, unknown>): ZodTypeAny {
       break;
     case 'boolean':
       t = z.boolean();
+      break;
+    case 'array':
+      // Arrays are always arrays of a scalar here (clip ids, filler words), so
+      // the item type recurses through this same function. Without this branch
+      // they fell through to z.unknown(), which reaches the model as "any" — and
+      // an argument the model cannot see the shape of is one it gets wrong.
+      t = z.array(zodForProperty((spec.items as Record<string, unknown>) ?? { type: 'string' }));
       break;
     default:
       t = z.unknown();

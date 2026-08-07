@@ -4,6 +4,7 @@ import { bedFadeOut } from './music.ts';
 import { colorFilterStages, type Grade } from './color.ts';
 import { frameFilterStages, type FrameRender } from './frame.ts';
 import { punchFilterStage, type OutputMove } from './frame-track.ts';
+import { overlayFilterLines, type OutputOverlay, type OverlayRenderInput } from './overlay.ts';
 
 export interface RenderPlan {
   /**
@@ -92,6 +93,97 @@ export interface RenderOptions {
    * Omit, or pass no moves, and no zoompan is emitted at all.
    */
   punch?: PunchRender;
+  /**
+   * Images composited over the finished frame — the B-roll track. As with
+   * `punch`, the caller has already moved these onto the OUTPUT clock, because
+   * the filters that apply them run after the cut and there is no other clock
+   * there. Omit, or pass no overlays, and no extra input or filter is emitted.
+   */
+  images?: ImagesRender;
+}
+
+/**
+ * The image track, ready to emit: overlays on the output clock, the file behind
+ * each one, and the three facts about the delivered stream that `overlay` and
+ * `scale` cannot work out for themselves.
+ *
+ * The size is here rather than read off `frame` for exactly the reason
+ * PunchRender carries its own: the two are independent. A project can place an
+ * image without ever touching the Frame panel, and then resolveFrame returns
+ * null (nothing to crop) while the compositor still has to be told what
+ * rectangle those 0..1 box fractions are fractions OF.
+ */
+export interface ImagesRender {
+  /** Overlays already mapped onto the output clock — see overlaysToOutput. */
+  overlays: OutputOverlay[];
+  /**
+   * Absolute path on disk for each overlay's `assetId`.
+   *
+   * A lookup rather than a path per overlay, because the same picture placed at
+   * four words is one file and one entry. An overlay whose asset is missing from
+   * this map is SKIPPED rather than failing the render: the alternative is that
+   * deleting an image from the library makes every project that ever used it
+   * un-exportable.
+   */
+  paths: Record<string, string>;
+  /** The delivered frame. Box fractions resolve against exactly this. */
+  width: number;
+  height: number;
+  /**
+   * The output frame rate. The still is generated at this rate, and a wrong
+   * value shows up as a dissolve that steps rather than ramps. Probed, never
+   * guessed — see overlayFilterLines.
+   */
+  fps: number;
+}
+
+/**
+ * Pair each overlay with its file, dropping any whose asset has gone.
+ *
+ * Shared by both render plans so the "a missing image is skipped, not fatal"
+ * rule has one implementation rather than two that can disagree.
+ */
+/**
+ * The video lines for a chain that has images in the middle of it: the stages
+ * before the composite, the composite, and the stages after.
+ *
+ * Shared by both render plans, which reach this point with the same three
+ * pieces in hand and would otherwise each spell the label plumbing out.
+ *
+ * The `null` at the end is a RELABEL, not a no-op left in by accident. A
+ * filtergraph cannot rename a pad by writing `[a][b]`; when nothing follows the
+ * composite, the last overlay's output still has to be carried to `[outv]`, and
+ * `null` is the video passthrough that does it for the cost of a copy that
+ * ffmpeg elides anyway.
+ */
+function imageChainLines(
+  images: OverlayRenderInput[],
+  head: string,
+  before: string[],
+  after: string[],
+  render: ImagesRender,
+  firstInputIndex: number,
+): { lines: string[]; inputArgs: string[] } {
+  const lines: string[] = [];
+
+  let base = head;
+  if (before.length > 0) {
+    lines.push(`${head}${before.join(',')}[vpre];`);
+    base = '[vpre]';
+  }
+
+  const plan = overlayFilterLines(images, base, render, firstInputIndex);
+  lines.push(...plan.lines);
+  lines.push(after.length > 0 ? `${plan.outLabel}${after.join(',')}[outv];` : `${plan.outLabel}null[outv];`);
+  return { lines, inputArgs: plan.inputArgs };
+}
+
+function overlayInputs(images: ImagesRender | undefined, hasVideo: boolean): OverlayRenderInput[] {
+  if (!hasVideo || !images) return [];
+  return images.overlays.flatMap((overlay) => {
+    const input = images.paths[overlay.assetId];
+    return input ? [{ overlay, input }] : [];
+  });
 }
 
 /**
@@ -374,7 +466,12 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // — would double-apply: scaled cues burned onto frames that then get scaled
   // again. Sidecar caption files get no such ride and do need scaling; that is
   // what scaleCues is for.
+  // Split in two by where the images go, rather than one list: an overlay needs
+  // a second INPUT, so it cannot live inside a comma-joined chain the way every
+  // other stage can. With no images the two halves are concatenated back into
+  // exactly the chain this emitted before overlays existed — see `flatStages`.
   const videoStages: string[] = [];
+  const postImageStages: string[] = [];
   if (hasVideo) {
     // Reframing comes FIRST, and specifically before burn-in. Captions are placed
     // as a fraction of the OUTPUT frame and libass rasterises them at its size, so
@@ -406,16 +503,37 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
     // burning first here would show the user a caption that comes out a
     // different colour in the file.
     if (color) videoStages.push(...colorFilterStages(color));
+    // ── everything from here composites ON TOP of the graded frame ───────────
+    //
+    // The image track sits between the grade and the burn, and both sides of
+    // that are deliberate — the same argument the grade itself makes one line
+    // above, pointed one layer further out.
+    //
+    // AFTER the grade, because that is the only ordering the preview can match.
+    // In the monitor the grade is an SVG filter on the <video> and the image is
+    // a sibling element painted over it, so an <img> is necessarily ungraded;
+    // compositing before the grade here would tint every insert in the file and
+    // leave it untinted on screen.
+    //
+    // BEFORE the burn, so captions stay legible on top of a cutaway rather than
+    // being hidden by it. A caption belongs to the delivered frame, and a
+    // full-frame image is content within that frame, not a replacement for it.
     if (burnIn) {
       // fontsdir is a second value in the same single-quoted filter-arg context
       // as filename, so it takes the identical escaping. Appended only when set,
       // to keep a project that uses no imported font byte-identical to before.
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
-      videoStages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
+      postImageStages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
     }
     // No `-r`: setpts rewrites timestamps rather than resampling, and forcing a
     // frame rate here would make the encoder duplicate or drop frames to hit it.
-    if (retime) videoStages.push(`setpts=PTS/${f(speed)}`);
+    //
+    // After the images for the same reason it is after the burn: the compositor
+    // paints pixels onto frames at their 1x timestamps and setpts then rescales
+    // those frames, so an insert stays welded to its word at any speed with no
+    // re-timing anywhere. Retiming the overlay windows instead would
+    // double-apply.
+    if (retime) postImageStages.push(`setpts=PTS/${f(speed)}`);
   }
 
   // atempo, not asetpts: asetpts would resample the audio and pitch it up like a
@@ -435,14 +553,35 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   if (options.studioSound) audioStages.push(...studioSoundStages());
   if (retime) audioStages.push(`atempo=${f(speed)}`);
 
+  // With no images the halves rejoin into one chain, in the order they were in
+  // before the split — so a project that places no image emits the identical
+  // graph it always did.
+  const imageInputs = overlayInputs(options.images, hasVideo);
+  const flatStages = [...videoStages, ...postImageStages];
+  // Images take the LAST input indices — after the source and after any music —
+  // so adding them shifts nothing that already existed. bgMusicMixLines is still
+  // handed a hard 1 below, and that stays true only because of this ordering.
+  const imageInputIndex = 1 + (bgMusic ? 1 : 0);
+
   // Each chain writes straight to the final label when nothing follows it, so a
-  // plain 1x render carries no relabel hops it does not need.
-  const vHead = videoStages.length > 0 ? '[vcut]' : '[outv]';
+  // plain 1x render carries no relabel hops it does not need. Images need a base
+  // to composite onto even when no stage precedes them, which is the one case
+  // where the cut cannot write to [outv] despite `flatStages` being empty.
+  const vHead = imageInputs.length > 0 || flatStages.length > 0 ? '[vcut]' : '[outv]';
   const aHead = audioStages.length > 0 ? '[acut]' : programLabel;
+
+  const imageChain =
+    imageInputs.length > 0
+      ? imageChainLines(imageInputs, '[vcut]', videoStages, postImageStages, options.images!, imageInputIndex)
+      : null;
 
   if (hasVideo) lines.push(`${videoCut}${vHead};`);
   lines.push(`${audioCut}${aHead};`);
-  if (videoStages.length > 0) lines.push(`[vcut]${videoStages.join(',')}[outv];`);
+  if (imageChain) {
+    lines.push(...imageChain.lines);
+  } else if (flatStages.length > 0) {
+    lines.push(`[vcut]${flatStages.join(',')}[outv];`);
+  }
   if (audioStages.length > 0) lines.push(`[acut]${audioStages.join(',')}${programLabel};`);
   // The music bed rides on top of the finished program: input index 1, since the
   // single source is input 0. The program length is filled in here rather than
@@ -464,6 +603,10 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
     // loops forever; the atrim in the mix caps it at durationSec, so "forever"
     // only ever means "until the bed's end".
     ...(bgMusic ? [...(bgMusic.loop ? ['-stream_loop', '-1'] : []), '-i', bgMusic.input] : []),
+    // Last, so every index above keeps the number it already had. Each image
+    // carries its own -loop/-framerate/-t, which are INPUT options and must sit
+    // immediately before their own -i — the same rule -stream_loop follows.
+    ...(imageChain?.inputArgs ?? []),
     '-filter_complex_script', '{SCRIPT}',
     ...(hasVideo ? ['-map', '[outv]'] : []),
     '-map', '[outa]',
@@ -537,6 +680,13 @@ export interface SequenceRenderOptions {
    * any one clip's.
    */
   punch?: PunchRender;
+  /**
+   * Images composited over the joined stream — once, after the concat, for the
+   * same reason the grade is applied once: the overlay windows are addressed
+   * against the project's global timeline, and after concat that is the only
+   * timeline there is. See RenderOptions.images.
+   */
+  images?: ImagesRender;
 }
 
 /**
@@ -640,8 +790,20 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
   const punchStage = hasVideo && options.punch
     ? punchFilterStage(options.punch.moves, options.punch, options.punch.fps)
     : null;
+  const imageInputs = overlayInputs(options.images, hasVideo);
+  // Images take the LAST input indices — after every clip and after any music —
+  // so the clip indices above and bgMusicMixLines' `clips.length` below both
+  // keep the numbers they already had.
+  const imageInputIndex = clips.length + (bgMusic ? 1 : 0);
+  let imageChain: { lines: string[]; inputArgs: string[] } | null = null;
   const wantsVideoStage =
-    hasVideo && (burnIn || retime || Boolean(options.frame) || Boolean(options.color) || Boolean(punchStage));
+    hasVideo &&
+    (burnIn ||
+      retime ||
+      Boolean(options.frame) ||
+      Boolean(options.color) ||
+      Boolean(punchStage) ||
+      imageInputs.length > 0);
   const vJoin = hasVideo ? (wantsVideoStage ? '[vc]' : '[outv]') : '';
   const wantsAudioStage = retime || options.studioSound;
   const aJoin = wantsAudioStage ? '[ac]' : programLabel;
@@ -653,6 +815,7 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
   // ride the frames the speed change rescales.
   if (wantsVideoStage) {
     const stages: string[] = [];
+    const postImageStages: string[] = [];
     // Reframing before burn-in, exactly as on the single-input path. Note it runs
     // AFTER the per-clip normalise above, so a stitch of mismatched sources is one
     // known rectangle by the time it is cropped — the clips never have to agree
@@ -662,16 +825,31 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     // project's global timeline, and after concat that is the only timeline
     // there is. Same position in the chain as on the single-input path.
     if (punchStage) stages.push(punchStage);
-    // Crop, then grade, then burn — identical ordering and reasoning to
-    // buildRenderPlan. Once, here, on the joined stream: grading each clip
-    // separately would cost the conversion N times and still produce one look.
+    // Crop, then grade, then composite images, then burn — identical ordering
+    // and reasoning to buildRenderPlan. Once, here, on the joined stream:
+    // grading each clip separately would cost the conversion N times and still
+    // produce one look, and an image window addressed against the global
+    // timeline has no meaning on any single clip's clock.
     if (options.color) stages.push(...colorFilterStages(options.color));
     if (burnIn) {
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
-      stages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
+      postImageStages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
     }
-    if (retime) stages.push(`setpts=PTS/${f(speed)}`);
-    lines.push(`[vc]${stages.join(',')}[outv];`);
+    if (retime) postImageStages.push(`setpts=PTS/${f(speed)}`);
+
+    if (imageInputs.length > 0) {
+      imageChain = imageChainLines(
+        imageInputs,
+        '[vc]',
+        stages,
+        postImageStages,
+        options.images!,
+        imageInputIndex,
+      );
+      lines.push(...imageChain.lines);
+    } else {
+      lines.push(`[vc]${[...stages, ...postImageStages].join(',')}[outv];`);
+    }
   }
   if (wantsAudioStage) {
     const aStages: string[] = [];
@@ -698,6 +876,9 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     // loops forever; the atrim in the mix caps it at durationSec, so "forever"
     // only ever means "until the bed's end".
     ...(bgMusic ? [...(bgMusic.loop ? ['-stream_loop', '-1'] : []), '-i', bgMusic.input] : []),
+    // Last, so every index above keeps the number it already had — see
+    // imageInputIndex.
+    ...(imageChain?.inputArgs ?? []),
     '-filter_complex_script', '{SCRIPT}',
     ...(hasVideo ? ['-map', '[outv]'] : []),
     '-map', '[outa]',

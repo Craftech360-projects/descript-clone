@@ -14,6 +14,12 @@ import { timecode } from '../../../../packages/core/src/timeline.ts';
 import { bedLoops } from '../../../../packages/core/src/music.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import {
+  MIN_OVERLAY_SEC,
+  OVERLAY_TRANSITIONS,
+  type ImageOverlay,
+  type OverlayTransition,
+} from '../../../../packages/core/src/overlay.ts';
+import {
   CAPTION_FONTS,
   MIN_CAPTION_BOX,
   strokeRole,
@@ -90,6 +96,37 @@ interface Props {
   following: { id: string; progress: number } | null;
   /** Jump the playhead — used to preview a move from its own start. */
   onSeek: (time: number) => void;
+
+  /**
+   * Image inserts: a picture over the video for a stretch of the transcript.
+   *
+   * Unlike push-ins these are NOT part of `frame` — an overlay composites pixels
+   * from another file rather than re-cropping this one — so they arrive as their
+   * own list with their own edit callbacks. See core/overlay.ts.
+   */
+  overlays: ImageOverlay[];
+  /** assetId → URL, for the thumbnail on each row. */
+  imageUrls: Record<string, string>;
+  /** assetId → filename, so a row can name its picture. */
+  imageNames: Record<string, string>;
+  onSetOverlay: (id: string, patch: Partial<ImageOverlay>) => void;
+  onRemoveOverlay: (id: string) => void;
+  /** Bracket a slider drag into one undo step — see beginOverlayDrag. */
+  onOverlayDragStart: () => void;
+  onOverlayDragEnd: (label: string) => void;
+  /** The overlay being framed on the monitor, held visible outside its window. */
+  editingOverlayId: string | null;
+  onEditOverlay: (id: string | null) => void;
+  /** Describe a picture; it is generated and placed where the prompt points. */
+  onGenerateImage: (prompt: string) => void;
+  /** Import one from disk instead. Placed at the selection, else the playhead. */
+  onImportImage: (file: File) => void;
+  /** Move an insert onto a word the user typed, rather than one they selected. */
+  onRetargetOverlayToWord: (id: string, phrase: string) => void;
+  /** True while a generation is in flight — it takes seconds, not milliseconds. */
+  generatingImage: boolean;
+  /** False when the server has no GEMINI_API_KEY; import still works. */
+  canGenerateImages: boolean;
 
   /** The colour grade — which look, and where its six knobs sit. */
   color: ColorSettings;
@@ -246,6 +283,7 @@ export default function ProjectPanel(p: Props) {
       <SectionGroup label="Output">
         <FrameField {...p} />
         <MovesField {...p} />
+        <ImagesField {...p} />
         <ColorField {...p} />
         <StudioSoundField {...p} />
         <MusicField {...p} />
@@ -713,6 +751,310 @@ function MovesField(p: Props) {
     </Section>
   );
 }
+
+/**
+ * Image inserts: a picture over the video while a word is said.
+ *
+ * A sibling of Push-ins and shaped the same way, for the same reason: this is a
+ * list of decisions about MOMENTS, not one decision about the whole video.
+ *
+ * Nothing here PLACES an insert either. Choosing when is a judgement about the
+ * words, so it happens in the script (select, then “Show an image here”); this
+ * panel owns what is left — which is exactly the two things the picture cannot
+ * tell you on its own: how it arrives, and how long it stays.
+ *
+ * ── why the transition is a row of buttons and not a dropdown ────────────────
+ *
+ * There are six of them and they are the reason most people open this section.
+ * A <select> hides five of the six behind a click and gives the one on show no
+ * more weight than the others; the difference between a dissolve and a hard cut
+ * is the single most visible choice here, so it costs one click and no reading.
+ */
+function ImagesField(p: Props) {
+  const hasVideo = Boolean(p.project.hasVideo);
+  const overlays = p.overlays;
+  const [prompt, setPrompt] = useState('');
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  const submit = () => {
+    const text = prompt.trim();
+    if (!text || p.generatingImage) return;
+    p.onGenerateImage(text);
+    // Cleared on submit rather than on success: the picture is already on its
+    // way and the next thing the user wants to type is the next one.
+    setPrompt('');
+  };
+
+  return (
+    <Section
+      icon="image"
+      label="Images"
+      value={overlays.length === 0 ? 'None' : `${overlays.length}`}
+    >
+      {!hasVideo ? (
+        <Hint>This project is audio only, so there is no picture to show an image over.</Hint>
+      ) : (
+        <>
+          {/* Describe it, and it lands where the words are.
+            *
+            * The prompt is the whole input: `placeByPrompt` looks for the
+            * prompt's subject in the script and puts the picture on the first
+            * time it is said, so there is nothing to select first. Every row
+            * below can be retargeted afterwards, which is what makes an
+            * automatic placement safe to make at all. */}
+          <Field label="Describe an image">
+            <textarea
+              rows={2}
+              value={prompt}
+              placeholder="a friendly robot waving"
+              disabled={p.generatingImage || !p.canGenerateImages}
+              onChange={(e) => setPrompt(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                // Enter submits; Shift+Enter is a newline. A prompt is a
+                // sentence, not a document.
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+            />
+            <button onClick={submit} disabled={p.generatingImage || !prompt.trim() || !p.canGenerateImages}>
+              {p.generatingImage ? 'Generating…' : 'Generate and place'}
+            </button>
+            {p.canGenerateImages ? (
+              <Hint>
+                It is made at this video’s own shape, and placed on the first time you say what you
+                asked for. Move it afterwards if it guessed wrong.
+              </Hint>
+            ) : (
+              <Hint>
+                Image generation needs a Gemini API key on the server. You can still import a file.
+              </Hint>
+            )}
+            <input
+              ref={fileInput}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                const file = e.currentTarget.files?.[0];
+                // Cleared at once so picking the SAME file twice still fires a
+                // change event — otherwise a failed import cannot be retried.
+                e.currentTarget.value = '';
+                if (file) p.onImportImage(file);
+              }}
+            />
+            <button
+              type="button"
+              className="link"
+              disabled={p.generatingImage}
+              onClick={() => fileInput.current?.click()}
+            >
+              Import a file instead
+            </button>
+          </Field>
+
+          {overlays.length === 0 ? (
+            <Hint>No images on this video yet.</Hint>
+          ) : (
+        <ul className="moves">
+          {overlays.map((o) => {
+            const url = p.imageUrls[o.assetId];
+            const span = o.end - o.start;
+            const full = o.box.width > 0.95 && o.box.height > 0.95;
+            return (
+              <li key={o.id} className={`move${p.editingOverlayId === o.id ? ' marking' : ''}`}>
+                <button
+                  type="button"
+                  className="move-when"
+                  onClick={() => p.onSeek(o.start)}
+                  title="Jump to the start of this image"
+                >
+                  {/* The picture names the row. A filename is what the file
+                    * system calls it; the thumbnail is what the user calls it. */}
+                  {url && <img className="ov-thumb" src={url} alt="" />}
+                  <span>
+                    {o.wordText ? `“${o.wordText}”` : timecode(o.start)}
+                    <small>
+                      {timecode(o.start)} – {timecode(o.end)} · {span.toFixed(1)}s ·{' '}
+                      {p.imageNames[o.assetId] ?? 'missing picture'}
+                    </small>
+                  </span>
+                </button>
+
+                {/* Which word it plays on, as an editable field.
+                  *
+                  * The cheap half of correcting an automatic placement: the user
+                  * can already NAME the word, so making them find it in the
+                  * script and drag over it is asking for a scroll to fix a typo.
+                  * Selecting words still works (SelectionPanel's "Move … here")
+                  * and is the right tool for a phrase or an exact moment; this
+                  * is the one for "no, the OTHER robot". */}
+                <OverlayWordField
+                  value={o.wordText ?? ''}
+                  onSubmit={(text) => p.onRetargetOverlayToWord(o.id, text)}
+                />
+
+                <div className="ov-transitions">
+                  {OVERLAY_TRANSITIONS.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      className={o.transition === t ? 'on' : ''}
+                      onClick={() => p.onSetOverlay(o.id, { transition: t })}
+                      title={TRANSITION_HELP[t]}
+                    >
+                      {TRANSITION_LABEL[t]}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Meaningless on a hard cut, so it is not offered there — a
+                  * slider that cannot change anything is worse than no slider. */}
+                {o.transition !== 'cut' && (
+                  <Slider
+                    value={Math.min(o.ease, span / 2)}
+                    min={0}
+                    max={Math.max(0.1, span / 2)}
+                    step={0.05}
+                    onChange={(ease) => p.onSetOverlay(o.id, { ease })}
+                    onPointerDown={p.onOverlayDragStart}
+                    onPointerUp={() => p.onOverlayDragEnd('Set image transition')}
+                    format={(v) => (v < 0.03 ? 'Instant' : `${v.toFixed(2)}s in and out`)}
+                  />
+                )}
+
+                <Slider
+                  value={span}
+                  min={MIN_OVERLAY_SEC}
+                  max={Math.max(MIN_OVERLAY_SEC + 0.1, 15)}
+                  step={0.1}
+                  onChange={(len) => p.onSetOverlay(o.id, { end: o.start + len })}
+                  onPointerDown={p.onOverlayDragStart}
+                  onPointerUp={() => p.onOverlayDragEnd('Set image duration')}
+                  format={(v) => `${v.toFixed(1)}s on screen`}
+                />
+
+                <div className="move-actions">
+                  {/* No "move to selection" here, deliberately.
+                    *
+                    * The rail swaps this whole panel out for SelectionPanel the
+                    * moment anything is selected, so a retarget button in this
+                    * list could never be pressed with a selection to act on —
+                    * it would be permanently disabled furniture. The escape
+                    * hatch from an automatic placement lives in SelectionPanel
+                    * instead, where the words you are pointing at are on screen. */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      p.onSetOverlay(o.id, {
+                        box: full
+                          ? { x: 0.6, y: 0.58, width: 0.34, height: 0.34 }
+                          : { x: 0, y: 0, width: 1, height: 1 },
+                      })
+                    }
+                  >
+                    {full ? 'Make it a corner card' : 'Fill the frame'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => p.onEditOverlay(p.editingOverlayId === o.id ? null : o.id)}
+                  >
+                    {p.editingOverlayId === o.id ? 'Done framing' : 'Show while framing'}
+                  </button>
+                  <button
+                    type="button"
+                    className="link danger"
+                    onClick={() => p.onRemoveOverlay(o.id)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+            </ul>
+          )}
+        </>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * The word an insert plays on, editable in place.
+ *
+ * Local state rather than a controlled field driven by the overlay, because the
+ * two disagree ON PURPOSE while you are typing: half of "robot" is not a word to
+ * go looking for, and re-placing the image on every keystroke would move it four
+ * times and push four undo steps. It commits on Enter or on blur, and Escape
+ * puts back whatever the overlay actually says.
+ *
+ * `key`ed on the incoming value by the caller's list, so an overlay retargeted
+ * from somewhere else (the selection button, the assistant) refreshes the field
+ * rather than showing a stale word.
+ */
+function OverlayWordField({ value, onSubmit }: { value: string; onSubmit: (text: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  // The overlay moved under us — adopt the new word, unless the user is
+  // mid-edit, in which case their text is the more recent intention.
+  const [dirty, setDirty] = useState(false);
+  if (!dirty && draft !== value) setDraft(value);
+
+  const commit = () => {
+    const text = draft.trim();
+    setDirty(false);
+    if (!text || text === value) return setDraft(value);
+    onSubmit(text);
+  };
+
+  return (
+    <label className="ov-word">
+      <span>on the word</span>
+      <input
+        type="text"
+        value={draft}
+        placeholder="robot"
+        onChange={(e) => {
+          setDraft(e.currentTarget.value);
+          setDirty(true);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.currentTarget.blur(); // blur commits, so Enter and click-away agree
+          }
+          if (e.key === 'Escape') {
+            setDraft(value);
+            setDirty(false);
+            e.currentTarget.blur();
+          }
+        }}
+        onBlur={commit}
+      />
+    </label>
+  );
+}
+
+/** Short enough to sit in a row of six without wrapping. */
+const TRANSITION_LABEL: Record<OverlayTransition, string> = {
+  cut: 'Cut',
+  fade: 'Fade',
+  'slide-left': '←',
+  'slide-right': '→',
+  'slide-up': '↑',
+  'slide-down': '↓',
+};
+
+/** The arrows say WHERE IT COMES FROM, which an arrow alone cannot. */
+const TRANSITION_HELP: Record<OverlayTransition, string> = {
+  cut: 'Appears and disappears instantly',
+  fade: 'Dissolves in and out',
+  'slide-left': 'Slides in from the left, and leaves the way it came',
+  'slide-right': 'Slides in from the right, and leaves the way it came',
+  'slide-up': 'Slides in from the top, and leaves the way it came',
+  'slide-down': 'Slides in from the bottom, and leaves the way it came',
+};
 
 /**
  * The colour grade: how the picture looks.

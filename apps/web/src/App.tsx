@@ -4,16 +4,19 @@ import {
   clipsOf,
   clipGlobalTime,
   clipLocalTime,
+  projectDuration,
   waitForJob,
   type Capabilities,
   type Clip,
   type CustomFont,
+  type ImageAsset,
   type JobKind,
   type MediaItem,
   type MusicResult,
   type Project,
   type RenderResult,
   type AsrOptions,
+  type SummonedFile,
   type Thumbs,
 } from './api.ts';
 import { renderFilename, saveAs, saveTextAs } from './download.ts';
@@ -67,10 +70,16 @@ import {
   endColorDrag,
   beginCaptionDrag,
   endCaptionDrag,
+  addImageOverlay,
+  setOverlay,
+  deleteImageOverlay,
+  dropOverlaysForAsset,
+  beginOverlayDrag,
+  endOverlayDrag,
   useEditor,
   flushSave,
 } from './store/editor.ts';
-import { DEFAULT_CAPTIONS, normalizeCaptions } from '../../../packages/core/src/caption-style.ts';
+import { CAPTION_FONTS, DEFAULT_CAPTIONS, normalizeCaptions } from '../../../packages/core/src/caption-style.ts';
 import CaptionOverlay from './shell/CaptionOverlay.tsx';
 import { lastStartingAtOrBefore } from '../../../packages/core/src/paragraphs.ts';
 import { speakers, colorMap } from './speakers.ts';
@@ -93,14 +102,27 @@ import {
 } from '../../../packages/core/src/frame-track.ts';
 import { FollowAborted, followObject } from './track/follow.ts';
 import { DEFAULT_COLOR } from '../../../packages/core/src/color.ts';
+import ImageOverlayLayer from './shell/ImageOverlayLayer.tsx';
+import { MAX_OVERLAYS, suggestWindow, type ImageOverlay } from '../../../packages/core/src/overlay.ts';
+import { placeByPrompt } from '../../../packages/core/src/image-prompt.ts';
 import { bedFadeOut, bedLength, bedLoops } from '../../../packages/core/src/music.ts';
 import { clipAt, compileEdl, compileSequenceEdl, outputDuration, outputToSource } from '../../../packages/core/src/edl.ts';
-import type { Edl, Transcript } from '../../../packages/core/src/types.ts';
+import type { Edl, Transcript, Word } from '../../../packages/core/src/types.ts';
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
 import { setAgentBridge, type AgentBridge } from './agent/tools.ts';
 import { setChatProject } from './store/agent.ts';
 
 const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
+
+/**
+ * One frozen empty array for every project with no image inserts.
+ *
+ * A fresh `[]` in the render body would be a new reference each pass, which is
+ * enough to tear down and rebuild ImageOverlayLayer's rAF loop on every one of
+ * App's ~4Hz playback re-renders — the same trap Monitor documents around its
+ * `geometry` ref.
+ */
+const EMPTY_OVERLAYS: ImageOverlay[] = [];
 
 /**
  * The output(1x) time at a source moment: the kept duration lying before it.
@@ -233,6 +255,22 @@ export default function App() {
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
   const frame = doc?.frame ?? DEFAULT_FRAME;
   const color = doc?.color ?? DEFAULT_COLOR;
+  const overlays = doc?.overlays ?? EMPTY_OVERLAYS;
+  /**
+   * assetId → URL, for the preview layer and the panel.
+   *
+   * Rebuilt from the project rather than stored on the overlay, so deleting an
+   * image and re-adding it under a new id cannot leave a stale URL welded to a
+   * placement — and so the document stays free of anything server-shaped.
+   */
+  const imageUrls = useMemo(
+    () => Object.fromEntries((project?.images ?? []).map((img) => [img.id, img.sourceUrl])),
+    [project?.images],
+  );
+  const imageNames = useMemo(
+    () => Object.fromEntries((project?.images ?? []).map((img) => [img.id, img.name])),
+    [project?.images],
+  );
   const speed = doc?.speed ?? DEFAULT_SPEED;
   const history = historyState();
 
@@ -309,6 +347,7 @@ export default function App() {
           studioSound: d.studioSound,
           frame: d.frame,
           color: d.color,
+          overlays: d.overlays,
           // Infinity ("keep every pause") does not survive JSON — cutToWire maps
           // it to the 0 the server and disk speak.
           cut: cutToWire(d.cut),
@@ -457,6 +496,7 @@ export default function App() {
         p.studioSound,
         p.frame,
         p.color,
+        p.overlays,
       );
     } else clearDoc();
   };
@@ -646,14 +686,13 @@ export default function App() {
    * non-destructive: the halves share the one source file. Refused at the very
    * edge of a clip, where there is nothing to cut off.
    */
-  const splitAtPlayhead = async (): Promise<string> => {
-    const t = getCurrentTime();
+  const splitAt = async (t: number): Promise<string> => {
     const clip = clips.find((c) => t >= c.offset && t < c.offset + c.duration) ?? activeClip;
-    if (!clip) return 'No clip is under the playhead.';
+    if (!clip) return 'No clip is under that time.';
     const at = t - clip.offset;
     if (at <= 0.2 || at >= clip.duration - 0.2) {
       setNotice('Move the playhead into a clip, away from its edges, to split it.');
-      return 'The playhead is at a clip edge — move it into the clip first.';
+      return 'That time is at a clip edge — there is nothing to cut off there.';
     }
     const fresh = await run('splitClip', async () => {
       flushSave();
@@ -667,6 +706,9 @@ export default function App() {
     });
     return fresh ? 'Clip split. The two pieces are now separate clips.' : 'The split did not complete.';
   };
+
+  /** The razor, on the keyboard and in the transport: split wherever we are now. */
+  const splitAtPlayhead = (): Promise<string> => splitAt(getCurrentTime());
   // The global keydown effect below subscribes on a small dep set, so it would
   // otherwise close over a stale splitAtPlayhead (which reads clips/project). A
   // ref keeps the shortcut calling the current one without re-subscribing.
@@ -930,9 +972,14 @@ export default function App() {
   }, [project?.id, project?.hasVideo, project?.thumbs]);
 
   // --- stages ------------------------------------------------------------------
-  const doTranscribe = () =>
+  //
+  // `override` is for the assistant: the dialog's options live in React state, so
+  // a tool that sets them and transcribes in one turn would otherwise send the
+  // state as it was when this closure was built. Merging here makes "transcribe
+  // it verbatim" one call instead of two and a re-render.
+  const doTranscribe = (override?: Partial<AsrOptions>) =>
     run('transcribe', async () => {
-      const { jobId } = await api.transcribe(project!.id, asr!);
+      const { jobId } = await api.transcribe(project!.id, { ...asr!, ...(override ?? {}) });
       setJob({ id: jobId, progress: -1, stage: 'Starting', kind: 'transcribe' });
 
       await waitForJob(jobId, (j) =>
@@ -1150,6 +1197,194 @@ export default function App() {
     setMarkingMoveId(id);
   }, [selectionRange, punchBlocked, seek]);
 
+  // ── image inserts ──────────────────────────────────────────────────────────
+  //
+  // The sibling of the push-in above, and deliberately shaped the same way: the
+  // decision the selection makes is WHEN, and when is a range of words. What
+  // picture, and where it sits on the frame, are decided afterwards in the panel
+  // — so this is one click that lands an image on the words you have, not a
+  // dialog that asks four questions first.
+
+  const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+
+  /**
+   * Place an asset over a range of words, and reveal it.
+   *
+   * The window comes from `suggestWindow` rather than from the words directly,
+   * and that is the whole "for how long" question answered in ONE place: a
+   * single word is ~0.3s, and an image on screen for 0.3s is a flash rather than
+   * a cutaway. Generation, the retarget button and the assistant all come
+   * through here, so none of them can disagree about how long an insert lasts.
+   */
+  const placeAsset = useCallback(
+    (assetId: string, words: Word[], existingOverlayId?: string) => {
+      const limit = project ? projectDuration(project) : Infinity;
+      const window = suggestWindow(words, limit);
+      const first = words[0];
+      const patch = {
+        start: window.start,
+        end: window.end,
+        wordId: first?.id,
+        wordText: first?.text,
+      };
+
+      if (existingOverlayId) {
+        setOverlay(existingOverlayId, patch, 'Move image');
+        seek(window.start);
+        return existingOverlayId;
+      }
+
+      const id = addImageOverlay(assetId, window.start, window.end, {
+        wordId: patch.wordId,
+        wordText: patch.wordText,
+      });
+      if (!id) {
+        setError(`This project is already at the limit of ${MAX_OVERLAYS} images.`);
+        return null;
+      }
+      // Seek, but do NOT enter framing mode. Holding a new insert on screen
+      // regardless of the playhead made every image anyone added look like it
+      // was stuck there permanently — the hold is a placement aid, and it has to
+      // be asked for. The seek is enough to show the user what they just made.
+      seek(window.start);
+      return id;
+    },
+    [project, seek],
+  );
+
+  /**
+   * Describe a picture, get one, and have it land where it belongs.
+   *
+   * The placement is DERIVED rather than asked for — `placeByPrompt` looks for
+   * the prompt's subject in the script and puts the image on the first time it
+   * is said. That is the whole flow: no selecting a word first, because the
+   * prompt already names the thing.
+   *
+   * When nothing in the prompt is anywhere in the script it falls back to the
+   * selection, then to the playhead. Refusing to place it at all would leave the
+   * user with a picture and no way to see it; putting it somewhere concrete and
+   * saying where is recoverable in one click ("Place on selection").
+   */
+  const generateImageForPrompt = useCallback(
+    async (prompt: string) => {
+      if (!project) return;
+      setGenerating(true);
+      setError(null);
+      try {
+        const fresh = await api.images.generate(project.id, prompt);
+        setProject(fresh);
+        const asset = (fresh.images ?? []).at(-1);
+        if (!asset) throw new Error('The image was generated but not saved.');
+
+        const words = doc?.words ?? [];
+        const at = placeByPrompt(words, prompt);
+        let target: Word[];
+        if (at) {
+          target = words.filter((w) => w.id === at.wordId);
+        } else if (selectedWords.length > 0) {
+          target = selectedWords;
+        } else {
+          // The playhead: somewhere the user is already looking.
+          const t = getCurrentTime();
+          const near = words.find((w) => !w.deleted && w.end >= t) ?? words.find((w) => !w.deleted);
+          target = near ? [near] : [];
+        }
+        if (target.length === 0) {
+          setError('There is no transcript to place the image on yet.');
+          return;
+        }
+        placeAsset(asset.id, target);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setGenerating(false);
+      }
+    },
+    [project, doc?.words, selectedWords, getCurrentTime, placeAsset],
+  );
+
+  /** Import a picture from disk, placed the same way a generated one is. */
+  const importImageFile = useCallback(
+    async (file: File) => {
+      if (!project) return;
+      setGenerating(true);
+      setError(null);
+      try {
+        const fresh = await api.images.upload(project.id, file);
+        setProject(fresh);
+        const asset = (fresh.images ?? []).at(-1);
+        if (!asset) throw new Error('That file could not be imported.');
+        // No prompt to match on, so an imported file goes where the user is
+        // pointing: the selection, else the playhead.
+        const words = doc?.words ?? [];
+        const t = getCurrentTime();
+        const near = words.find((w) => !w.deleted && w.end >= t) ?? words.find((w) => !w.deleted);
+        const target = selectedWords.length > 0 ? selectedWords : near ? [near] : [];
+        if (target.length === 0) {
+          setError('There is no transcript to place the image on yet.');
+          return;
+        }
+        placeAsset(asset.id, target);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setGenerating(false);
+      }
+    },
+    [project, doc?.words, selectedWords, getCurrentTime, placeAsset],
+  );
+
+  /**
+   * Which insert "Move the image here" would move.
+   *
+   * The one being framed, else the most recent — and the most recent is the
+   * right fallback because the whole flow is generate-then-correct: the image
+   * you have just been given is the one whose placement you are judging.
+   */
+  const movableOverlay = useMemo(() => {
+    if (overlays.length === 0) return null;
+    return overlays.find((o) => o.id === editingOverlayId) ?? overlays[overlays.length - 1];
+  }, [overlays, editingOverlayId]);
+
+  /** Move that insert onto the words currently selected in the script. */
+  const moveImageHere = useCallback(() => {
+    if (!movableOverlay || selectedWords.length === 0) return;
+    placeAsset(movableOverlay.assetId, selectedWords, movableOverlay.id);
+  }, [movableOverlay, selectedWords, placeAsset]);
+
+  /**
+   * Retarget an insert by TYPING the word it should play on.
+   *
+   * The other half of correcting an automatic placement, and the one that costs
+   * nothing: selecting the words means finding them in the script first, which
+   * is a scroll and a drag to fix something the user can already name. Typing
+   * "robot" is the same sentence they used to ask for the picture.
+   *
+   * It goes through the SAME `placeByPrompt` that chose the spot in the first
+   * place, so "where it landed" and "where I sent it" obey one rule — including
+   * the plural fold and skipping words the edit has already cut.
+   */
+  const retargetOverlayToWord = useCallback(
+    (overlayId: string, phrase: string) => {
+      const words = doc?.words ?? [];
+      const overlay = overlays.find((o) => o.id === overlayId);
+      if (!overlay) return;
+
+      const at = placeByPrompt(words, phrase);
+      if (!at) {
+        setError(
+          `Nothing in the edit says “${phrase.trim()}”. Check the spelling, or select the words and use “Move … here”.`,
+        );
+        return;
+      }
+      const word = words.find((w) => w.id === at.wordId);
+      if (!word) return;
+      placeAsset(overlay.assetId, [word], overlayId);
+    },
+    [doc?.words, overlays, placeAsset],
+  );
+
   const markMove = useCallback(
     (id: string) => {
       const move = frame.moves.find((m) => m.id === id);
@@ -1181,14 +1416,16 @@ export default function App() {
       const video = videoRef.current;
       const move = frame.moves.find((m) => m.id === id);
       const clip = activeClipRef.current;
-      if (!video || !move || !project) return;
+      // The string returns are for the assistant, which calls this as a tool and
+      // has to report what happened; the panel's own button ignores them.
+      if (!video || !move || !project) return 'That push-in could not be tracked.';
 
       // The follow reads one file. A move that spans a seam would need the app's
       // clip-swap coordinator inside the sample loop, which is a real feature and
       // not this one — say so rather than tracking the wrong footage.
       if (clip && (move.start < clip.offset || move.end > clip.offset + clip.duration)) {
         setNotice('That push-in crosses a clip boundary, which tracking cannot follow yet.');
-        return;
+        return 'That push-in crosses a clip boundary, which tracking cannot follow yet.';
       }
 
       const source = {
@@ -1221,15 +1458,17 @@ export default function App() {
         // The quality of a follow is how often it had nothing to go on, and that
         // is worth saying: a follow that held half its samples is pointing at
         // whatever was last recognised, which the user can see but not diagnose.
-        setNotice(
+        const said =
           result.lost === 0
             ? `Following — ${result.samples} points.`
-            : `Following, but lost the subject on ${result.lost} of ${result.samples} points. Mark it again on a clearer frame if it drifts.`,
-        );
+            : `Following, but lost the subject on ${result.lost} of ${result.samples} points. Mark it again on a clearer frame if it drifts.`;
+        setNotice(said);
+        return said;
       } catch (err) {
-        if (!(err instanceof FollowAborted)) {
-          setNotice(err instanceof Error ? err.message : String(err));
-        }
+        if (err instanceof FollowAborted) return 'Tracking was cancelled.';
+        const said = err instanceof Error ? err.message : String(err);
+        setNotice(said);
+        return said;
       } finally {
         followAbort.current = null;
         setFollowing(null);
@@ -1451,6 +1690,61 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [togglePlay, libOpen]);
 
+  /**
+   * What becomes of a file the assistant summoned — fetched from the web, or made
+   * by a media operation the app has no feature for.
+   *
+   * Deliberately the ORDINARY import paths. The server could attach these itself
+   * and save a round trip, but then a summoned clip would arrive by a route no
+   * imported clip ever takes: no transcription of the newcomer, no stitching, no
+   * filmstrip, and a second copy of all three to maintain. Fetching the bytes
+   * back as a File and posting them where the drop target posts costs one hop and
+   * buys "indistinguishable from an import" for free.
+   */
+  const attachSummoned = async (
+    file: SummonedFile,
+    attachAs: 'clip' | 'music' | 'image' | 'download' | 'keep',
+    name?: string,
+  ): Promise<string> => {
+    if (!project) return 'No project is open.';
+    if (attachAs === 'keep') return `Kept as ${file.url}.`;
+    if (attachAs === 'download') {
+      saveAs(file.url, name ?? file.name);
+      return `Saved ${name ?? file.name} (${fmtBytes(file.bytes)}) — choose where to put it.`;
+    }
+
+    // Every remaining path needs the bytes as a File, because that is what the
+    // import routes take. The upload route specifically: a summoned file is
+    // already on our own disk, so it needs importing rather than generating.
+    const blob = await fetch(file.url).then((r) => r.blob());
+    const asFile = new File([blob], name ?? file.name, { type: blob.type });
+
+    if (attachAs === 'image') {
+      if (file.kind !== 'image') return `That file is ${file.kind}, not a picture, so it cannot go in the image library.`;
+      const fresh = await api.images.upload(project.id, asFile);
+      setProject(fresh);
+      const added = (fresh.images ?? []).at(-1);
+      return added
+        ? `Added "${added.name}" to the project's pictures — place it with add_image_at_words.`
+        : 'The picture could not be imported.';
+    }
+
+    if (attachAs === 'music') {
+      if (file.kind === 'image') return 'A picture cannot be background music.';
+      const fresh = await api.music.upload(project.id, asFile);
+      setProject(fresh);
+      return `"${fresh.music?.name ?? asFile.name}" is now the background music.`;
+    }
+
+    if (file.kind === 'image') {
+      return 'A still picture cannot be a clip on its own — run it through run_media_op with a still_duration_sec first, then attach that.';
+    }
+    const fresh = await addClip(asFile);
+    return fresh
+      ? `Added "${asFile.name}" to the timeline as a new clip${doc ? ', transcribed and stitched into the script' : ''}.`
+      : 'The clip could not be added.';
+  };
+
   // ── the AI assistant's bridge ────────────────────────────────────────────
   //
   // The chat runtime executes most tools by calling store/editor.ts directly, but
@@ -1472,6 +1766,22 @@ export default function App() {
         selectionText: selectedWords.map((w) => w.text).join(' '),
         stats: { words: stats.words, kept: stats.kept, cuts: stats.cuts, outputSec: stats.outputSec },
         music: project?.music ? { name: project.music.name, volume: project.music.volume } : null,
+        images: (project?.images ?? []).map((i) => ({
+          id: i.id,
+          name: i.name,
+          width: i.width,
+          height: i.height,
+        })),
+        clips: clips.map((c, i) => ({
+          id: c.id,
+          name: clips.length === 1 ? (project?.name ?? 'clip') : `Clip ${i + 1}`,
+          startSec: c.offset,
+          durationSec: c.duration,
+          hasVideo: c.hasVideo,
+        })),
+        customFillers,
+        fonts: [...CAPTION_FONTS.map((f) => f.id), ...customFonts.map((f) => f.family)],
+        job: job ? { kind: job.kind, stage: job.stage, progress: job.progress } : null,
         playheadSec: getCurrentTime(),
         playing,
       }),
@@ -1488,12 +1798,28 @@ export default function App() {
       deleteProject: async (id) => {
         await deleteProject(id);
       },
-      transcribe: async () => {
-        await doTranscribe();
+      transcribe: async (options) => {
+        // The dialog's options are React state, and doTranscribe reads them from
+        // the closure it was built in — so a change made here would not be seen
+        // by the call we are about to make. Passing them through explicitly is
+        // what lets "transcribe this verbatim" work in one turn.
+        if (options) setAsr((prev) => (prev ? { ...prev, ...options } : prev));
+        await doTranscribe(options);
       },
+      asrModels: () => caps?.asrModels?.map((m) => ({ id: m.id, label: m.label, hint: m.hint })) ?? [],
       exportVideo: async () => {
         const r = await doRender();
         return r ? `Exported ${fmtShort(r.outputDuration)} of finished video.` : 'The export did not complete.';
+      },
+      exportCaptions: async (format) => {
+        const r = await doCaptions(format);
+        return r ? `Saved ${r.cues} caption cues as .${format}, timed to the edit.` : 'The caption export did not complete.';
+      },
+      cancelJob: async () => {
+        if (!job) return 'Nothing is running.';
+        const was = job.kind;
+        cancelJob();
+        return `Asked the server to stop the ${was} job.`;
       },
       addMusic: async (query, instrumental) => {
         if (!project) return 'No project is open.';
@@ -1505,8 +1831,35 @@ export default function App() {
         await pickMusic(results[0]);
         return `Added "${results[0].title}" by ${results[0].artist} as background music.`;
       },
+      generateImage: async (prompt) => {
+        if (!project) throw new Error('No project is open.');
+        const fresh = await api.images.generate(project.id, prompt);
+        setProject(fresh);
+        const added = (fresh.images ?? []).at(-1);
+        if (!added) throw new Error('the picture was generated but not saved.');
+        return { id: added.id, name: added.name };
+      },
       setMusicVolume: async (volume) => {
         updateMusic({ volume });
+      },
+      setMusicOptions: async ({ loop, durationSec, fit }) => {
+        if (fit) {
+          // The same gesture the panel's "duplicate to fill" makes: loop it and
+          // clear the length cap, so the bed runs the whole program however the
+          // edit changes length afterwards.
+          fillMusic();
+          return 'The bed now loops for exactly the length of the finished video.';
+        }
+        const patch: { loop?: boolean; durationSec?: number | null } = {};
+        if (loop !== undefined) patch.loop = loop;
+        if (durationSec !== undefined) patch.durationSec = durationSec;
+        updateMusic(patch);
+        const said: string[] = [];
+        if (loop !== undefined) said.push(loop ? 'looping on' : 'looping off');
+        if (durationSec !== undefined) {
+          said.push(durationSec === null ? 'playing for the whole program' : `playing for ${fmtShort(durationSec)}`);
+        }
+        return `Music: ${said.join(', ')}.`;
       },
       removeMusic: async () => {
         await removeMusic();
@@ -1521,6 +1874,77 @@ export default function App() {
         return video.paused ? 'Paused.' : 'Playing.';
       },
       splitAtPlayhead: () => splitAtPlayhead(),
+
+      // ── clips ────────────────────────────────────────────────────────────
+      splitClipAt: (atSec) => splitAt(atSec),
+      moveClip: async (clipId, direction) => {
+        const fresh = await moveClip(clipId, direction === 'earlier' ? -1 : 1);
+        return fresh ? `Moved that clip ${direction}.` : 'The clip could not be moved.';
+      },
+      reorderClips: async (ids) => {
+        const fresh = await run('reorderClip', async () => {
+          flushSave();
+          await api.reorderClips(project!.id, ids);
+          const fresh = await api.get(project!.id);
+          setProject(fresh);
+          openTranscript(fresh, editDefaults(caps));
+          setResult(null);
+          return fresh;
+        });
+        return fresh ? `Clips reordered — ${ids.length} in the new order.` : 'The reorder did not complete.';
+      },
+      removeClip: async (clipId) => {
+        const fresh = await removeClip(clipId);
+        return fresh ? 'Clip removed, along with its words.' : 'The clip could not be removed.';
+      },
+
+      customFillers: (patch) => {
+        if (!patch) return customFillers;
+        // Computed here rather than read back after setState, because the tool
+        // has to report the resulting list in the same turn it changes it.
+        const lower = new Set(customFillers.map((w) => w.toLowerCase()));
+        const next = [...customFillers];
+        for (const word of patch.add ?? []) {
+          const clean = word.trim().toLowerCase();
+          if (clean && !lower.has(clean)) {
+            lower.add(clean);
+            next.push(clean);
+          }
+        }
+        const drop = new Set((patch.remove ?? []).map((w) => w.trim().toLowerCase()));
+        const result = next.filter((w) => !drop.has(w.toLowerCase()));
+        setCustomFillers(result);
+        return result;
+      },
+      trackSubject: async (id, enable) => {
+        if (!enable) {
+          setMovePath(id, []);
+          return 'Tracking cleared — the push-in holds its framing again.';
+        }
+        return (await followMove(id)) ?? 'Tracking finished.';
+      },
+
+      // ── improvising ──────────────────────────────────────────────────────
+      //
+      // Both of these come back as a FILE. Attaching it is deliberately the
+      // ordinary import path — the same routes the picker and the drop target
+      // use — so a summoned clip is indistinguishable from an imported one by
+      // the time it lands, and none of the stitching logic exists twice.
+      summonMedia: async (url, attachAs, name) => {
+        if (!project) return 'No project is open.';
+        const file = await api.summon.fetch(project.id, url);
+        return attachSummoned(file, attachAs, name);
+      },
+      runMediaOp: async ({ purpose, attachAs = 'keep', ...op }) => {
+        if (!project) return 'No project is open.';
+        setNotice(purpose);
+        const file = await api.summon.op(project.id, op);
+        const made = `${purpose} — made ${file.name} (${fmtBytes(file.bytes)}${file.durationSec ? `, ${fmtShort(file.durationSec)}` : ''}).`;
+        if (attachAs === 'keep') {
+          return `${made} It is not attached to anything yet; pass its url back as source "file" to build on it, or attach_as to place it.\nfile: ${file.url}`;
+        }
+        return `${made} ${await attachSummoned(file, attachAs)}`;
+      },
     };
     setAgentBridge(bridge);
   });
@@ -1676,6 +2100,17 @@ export default function App() {
           onMarkCancel={() => setMarkingMoveId(null)}
           overlay={
             project?.hasVideo ? (
+              <>
+              {/* Images first, captions second — DOM order is z-order, and it
+                * has to mirror the render, which composites the picture and
+                * THEN burns the caption on top of it. */}
+              <ImageOverlayLayer
+                overlays={overlays}
+                urls={imageUrls}
+                getCurrentTime={getCurrentTime}
+                editingId={editingOverlayId}
+                playing={playing}
+              />
               <CaptionOverlay
                 videoRef={videoRef}
                 frameRef={frameRef}
@@ -1692,6 +2127,7 @@ export default function App() {
                 }
                 onDragEnd={endCaptionDrag}
               />
+              </>
             ) : null
           }
         />
@@ -1773,6 +2209,22 @@ export default function App() {
             markingMoveId={markingMoveId}
             following={following}
             onSeek={seek}
+            overlays={overlays}
+            imageUrls={imageUrls}
+            imageNames={imageNames}
+            onSetOverlay={setOverlay}
+            onRemoveOverlay={deleteImageOverlay}
+            onOverlayDragStart={beginOverlayDrag}
+            onOverlayDragEnd={endOverlayDrag}
+            editingOverlayId={editingOverlayId}
+            onEditOverlay={setEditingOverlayId}
+            onGenerateImage={generateImageForPrompt}
+            onImportImage={importImageFile}
+            onRetargetOverlayToWord={retargetOverlayToWord}
+            generatingImage={generating}
+            canGenerateImages={Boolean(caps?.images?.generate)}
+            onMoveImageHere={movableOverlay ? moveImageHere : undefined}
+            moveImageLabel={movableOverlay ? imageNames[movableOverlay.assetId] : undefined}
             color={color}
             setColor={updateColor}
             onColorDragStart={beginColorDrag}
@@ -1880,6 +2332,7 @@ export default function App() {
       />
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
+
     </div>
   );
 }
@@ -1908,4 +2361,11 @@ function clock(seconds: number): string {
 
 function fmtShort(seconds: number): string {
   return seconds >= 60 ? clock(seconds) : `${seconds.toFixed(1)}s`;
+}
+
+/** File size for the assistant's reports — a summoned file's cost, in one glance. */
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
 }

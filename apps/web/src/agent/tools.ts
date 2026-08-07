@@ -15,9 +15,14 @@
  */
 
 import {
+  addImageOverlay,
   addPunchIn,
   correctText,
+  countFillers,
+  countRetakes,
+  deleteImageOverlay,
   deletePunchIn,
+  setOverlay,
   historyState,
   redoEdit,
   removeFillers,
@@ -40,7 +45,12 @@ import type { Doc } from '../../../../packages/core/src/doc.ts';
 import type { Word } from '../../../../packages/core/src/types.ts';
 import type { FrameMove } from '../../../../packages/core/src/frame-track.ts';
 import { normalizeFrame, type FramePreset } from '../../../../packages/core/src/frame.ts';
-import { presetSettings, type ColorPreset } from '../../../../packages/core/src/color.ts';
+import {
+  MAX_OVERLAYS,
+  suggestWindow,
+  type ImageOverlay,
+} from '../../../../packages/core/src/overlay.ts';
+import { normalizeColor, presetSettings, type ColorPreset } from '../../../../packages/core/src/color.ts';
 import {
   normalizeCaptions,
   type CaptionSettings,
@@ -58,6 +68,22 @@ export interface AgentSnapshot {
   selectionText: string;
   stats: { words: number; kept: number; cuts: number; outputSec: number };
   music: { name: string; volume: number } | null;
+  /** The pictures imported into this project. Where each APPEARS is doc.overlays. */
+  images: Array<{ id: string; name: string; width: number; height: number }>;
+  /** The source files behind the timeline, in play order. */
+  clips: Array<{ id: string; name: string; startSec: number; durationSec: number; hasVideo: boolean }>;
+  /**
+   * The user's own filler words, on top of the built-in list.
+   *
+   * Here rather than passed per call because the filler executors were quietly
+   * ignoring them — they passed [] where the UI passes this — so an assistant
+   * cleanup skipped exactly the words the user had gone to the trouble of adding.
+   */
+  customFillers: string[];
+  /** Caption families available: the built-ins plus anything imported. */
+  fonts: string[];
+  /** What the server is doing right now, if anything. */
+  job: { kind: string; stage: string; progress: number } | null;
   /** Where the playhead sits (source seconds) and whether playback is running. */
   playheadSec: number;
   playing: boolean;
@@ -70,9 +96,26 @@ export interface AgentBridge {
   openProject(id: string): Promise<void>;
   renameProject(id: string, name: string): Promise<void>;
   deleteProject(id: string): Promise<void>;
-  transcribe(): Promise<void>;
+  transcribe(options?: AsrPatch): Promise<void>;
+  /** The transcription models this server offers, for list_asr_models. */
+  asrModels(): Array<{ id: string; label: string; hint?: string }>;
   exportVideo(): Promise<string>;
+  /** A subtitle sidecar timed to the current edit, saved to the user's machine. */
+  exportCaptions(format: string): Promise<string>;
+  cancelJob(): Promise<string>;
   addMusic(query: string, instrumental: boolean): Promise<string>;
+  /** Loop, length, or "as long as the finished video". Returns what changed. */
+  setMusicOptions(opts: { loop?: boolean; durationSec?: number | null; fit?: boolean }): Promise<string>;
+  /**
+   * Generate a picture from a description and return the asset.
+   *
+   * Generation rather than search, so the picture is made FOR the sentence being
+   * spoken and comes back at the shape the video ships in — the server resolves
+   * that ratio itself, which is why there is no parameter for it here. Rejects
+   * rather than returning null so the executor can report why (a missing key and
+   * a refused prompt are different problems and need different answers).
+   */
+  generateImage(prompt: string): Promise<{ id: string; name: string }>;
   setMusicVolume(volume: number): Promise<void>;
   removeMusic(): Promise<void>;
   seek(seconds: number): void;
@@ -81,6 +124,52 @@ export interface AgentBridge {
   setPlayback(action: 'play' | 'pause' | 'toggle'): string;
   /** The razor. Returns what happened (split, or why not). */
   splitAtPlayhead(): Promise<string>;
+
+  // ── clips ──────────────────────────────────────────────────────────────────
+  splitClipAt(atSec: number): Promise<string>;
+  moveClip(clipId: string, direction: 'earlier' | 'later'): Promise<string>;
+  reorderClips(clipIds: string[]): Promise<string>;
+  removeClip(clipId: string): Promise<string>;
+
+  /** Read (no argument) or edit the user's own filler-word list. Returns the list. */
+  customFillers(patch?: { add?: string[]; remove?: string[] }): string[];
+  /** Run or clear the "follow the subject" tracker on one push-in. */
+  trackSubject(id: string, enable: boolean): Promise<string>;
+
+  // ── improvising: the two that are not features of the app ───────────────────
+  //
+  // Both go through the server (summon.ts) and both hand back a FILE rather than
+  // changing the project; `attachAs` is what happens to it afterwards, and that
+  // step deliberately reuses the ordinary import routes — a summoned clip is
+  // indistinguishable from an imported one by the time it lands.
+  summonMedia(url: string, attachAs: SummonAttach, name?: string): Promise<string>;
+  runMediaOp(op: SummonOpRequest): Promise<string>;
+}
+
+/** Transcription options the model may set. Mirrors the server's AsrOptions. */
+export interface AsrPatch {
+  model?: string;
+  language?: string;
+  diarize?: boolean;
+  speakers?: number;
+  verbatim?: boolean;
+}
+
+export type SummonAttach = 'clip' | 'music' | 'image' | 'download' | 'keep';
+
+export interface SummonOpRequest {
+  purpose: string;
+  source?: 'clip' | 'music' | 'url' | 'file';
+  clipId?: string;
+  url?: string;
+  file?: string;
+  startSec?: number;
+  endSec?: number;
+  videoFilters?: string;
+  audioFilters?: string;
+  format?: string;
+  stillDurationSec?: number;
+  attachAs?: SummonAttach;
 }
 
 let bridge: AgentBridge | null = null;
@@ -136,6 +225,21 @@ export function buildContext(): string {
     );
   }
   lines.push(s.music ? `Music: "${s.music.name}" at ${Math.round(s.music.volume * 100)}% volume` : 'Music: none');
+  // Placed images, not imported ones: what the model needs to know unprompted is
+  // whether the picture is already covered, and by what. The library behind them
+  // is a list_images call away.
+  if (s.doc && s.doc.overlays.length > 0) {
+    const shown = s.doc.overlays
+      .slice(0, 8)
+      .map((o) => (o.wordText ? `"${trim(o.wordText, 24)}"` : clock(o.start)))
+      .join(', ');
+    lines.push(
+      `Images: ${s.doc.overlays.length} placed — on ${shown}` +
+        (s.doc.overlays.length > 8 ? ', …' : ''),
+    );
+  } else {
+    lines.push('Images: none placed');
+  }
   lines.push(
     s.selectionText
       ? `Selection: "${trim(s.selectionText, 80)}" (${s.selectedWordIds.length} words)`
@@ -251,6 +355,9 @@ type Args = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 const numOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
 const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+/** A string array off the wire, with the non-strings and the blanks dropped. */
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : [];
 
 const executors: Record<string, (args: Args) => string | Promise<string>> = {
   get_project_context: () => buildContext(),
@@ -401,16 +508,21 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     return `Labelled ${ids.size} word${ids.size === 1 ? '' : 's'} as "${speaker}".`;
   },
 
+  // The user's own filler words ride along with both of these. They used to pass
+  // [] where the panel passes the custom list, so "cut the fillers" in chat
+  // skipped exactly the words the user had gone out of their way to add.
   tag_fillers: (args) => {
-    requireDoc(requireBridge().snapshot());
-    const n = tagFillers(str(args.mode) === 'all', []);
+    const snap = requireBridge().snapshot();
+    requireDoc(snap);
+    const n = tagFillers(str(args.mode) === 'all', snap.customFillers);
     return n === 0 ? 'No filler words found.' : `Flagged ${n} filler word${n === 1 ? '' : 's'} in the script (nothing was cut).`;
   },
 
   remove_fillers: (args) => {
-    requireDoc(requireBridge().snapshot());
+    const snap = requireBridge().snapshot();
+    requireDoc(snap);
     const all = str(args.mode) === 'all';
-    const n = removeFillers(all, []);
+    const n = removeFillers(all, snap.customFillers);
     return n === 0 ? 'No filler words to cut.' : `Cut ${n} filler word${n === 1 ? '' : 's'}.`;
   },
 
@@ -475,9 +587,24 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     if (bool(args.enabled) !== undefined) patch.enabled = bool(args.enabled)!;
     if (bool(args.karaoke) !== undefined) patch.karaoke = bool(args.karaoke)!;
     if (bool(args.all_caps) !== undefined) patch.allCaps = bool(args.all_caps)!;
-    if (str(args.font)) patch.font = str(args.font)!;
     if (str(args.color)) patch.color = str(args.color)!;
     if (typeof args.font_size === 'number') patch.fontSize = args.font_size;
+    if (str(args.highlight_color)) patch.highlightColor = str(args.highlight_color)!;
+    if (str(args.stroke_color)) patch.strokeColor = str(args.stroke_color)!;
+    if (typeof args.stroke_width === 'number') patch.strokeWidth = args.stroke_width;
+    if (str(args.backdrop)) patch.backdrop = str(args.backdrop) as CaptionSettings['backdrop'];
+    if (typeof args.max_chars === 'number') patch.maxChars = args.max_chars;
+
+    // A family libass cannot resolve burns as the fallback face, which looks like
+    // the setting was ignored rather than refused — so it is checked against what
+    // is actually installed instead of being taken on trust.
+    const font = str(args.font);
+    if (font) {
+      const known = snap.fonts.find((f) => f.toLowerCase() === font.toLowerCase());
+      if (!known) return `There is no font called "${font}". Available: ${snap.fonts.join(', ')}.`;
+      patch.font = known;
+    }
+
     if (Object.keys(patch).length === 0) return 'Nothing to change — pass enabled and/or a style field.';
     updateCaptions(normalizeCaptions({ ...doc.captions, ...patch }));
     return `Captions updated${patch.enabled !== undefined ? ` (${patch.enabled ? 'on' : 'off'})` : ''}.`;
@@ -486,12 +613,27 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
   set_frame: (args) => {
     const doc = requireDoc(requireBridge().snapshot());
     const preset = str(args.preset) as FramePreset | undefined;
-    if (!preset || !['source', 'reel', 'youtube', 'square'].includes(preset)) {
-      return 'Provide preset: source, reel, youtube or square.';
+    if (!preset || !['source', 'reel', 'youtube', 'square', 'custom'].includes(preset)) {
+      return 'Provide preset: source, reel, youtube, square or custom.';
     }
-    const zoom = typeof args.zoom === 'number' ? args.zoom : doc.frame.zoom;
-    updateFrame(normalizeFrame({ ...doc.frame, preset, zoom }));
-    return `Frame set to ${preset}${typeof args.zoom === 'number' ? ` at ${zoom}x zoom` : ''}.`;
+    const next = {
+      ...doc.frame,
+      preset,
+      zoom: typeof args.zoom === 'number' ? args.zoom : doc.frame.zoom,
+      x: typeof args.x === 'number' ? args.x : doc.frame.x,
+      y: typeof args.y === 'number' ? args.y : doc.frame.y,
+      width: typeof args.width === 'number' ? args.width : doc.frame.width,
+      height: typeof args.height === 'number' ? args.height : doc.frame.height,
+    };
+    // normalizeFrame owns the clamps (and the preset's own size), so report what
+    // it settled on rather than what was asked for.
+    const frame = normalizeFrame(next);
+    updateFrame(frame);
+    const bits = [`Frame set to ${preset}`];
+    if (preset === 'custom') bits.push(`${frame.width}×${frame.height}`);
+    if (typeof args.zoom === 'number') bits.push(`${frame.zoom}x zoom`);
+    if (typeof args.x === 'number' || typeof args.y === 'number') bits.push(`crop at x ${frame.x}, y ${frame.y}`);
+    return `${bits.join(', ')}.`;
   },
 
   set_color: (args) => {
@@ -501,6 +643,31 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     if (!preset || !known.includes(preset)) return `Provide preset: ${known.join(', ')}.`;
     updateColor(presetSettings(preset));
     return preset === 'none' ? 'Removed the colour grade.' : `Applied the ${preset} look.`;
+  },
+
+  set_color_knobs: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const keys = ['exposure', 'temperature', 'tint', 'saturation', 'contrast', 'shadows'] as const;
+    const patch: Record<string, number> = {};
+    for (const key of keys) if (typeof args[key] === 'number') patch[key] = args[key] as number;
+    if (Object.keys(patch).length === 0) return `Pass at least one of: ${keys.join(', ')}.`;
+    // Grading by hand leaves the preset behind — the knobs no longer describe it,
+    // and the panel shows 'custom' for exactly this state.
+    updateColor(normalizeColor({ ...doc.color, ...patch, preset: 'custom' }));
+    return `Grade adjusted: ${Object.entries(patch).map(([k, v]) => `${k} ${v}`).join(', ')}.`;
+  },
+
+  set_cut_settings: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const next = { ...doc.cut };
+    if (typeof args.pad_ms === 'number') next.padMs = Math.max(0, args.pad_ms);
+    if (typeof args.fade_ms === 'number') next.fadeMs = Math.max(0, args.fade_ms);
+    if (typeof args.merge_within_ms === 'number') next.mergeWithinMs = Math.max(0, args.merge_within_ms);
+    if (next.padMs === doc.cut.padMs && next.fadeMs === doc.cut.fadeMs && next.mergeWithinMs === doc.cut.mergeWithinMs) {
+      return 'Nothing to change — pass pad_ms, fade_ms or merge_within_ms.';
+    }
+    updateCut(next);
+    return `Cuts: ${next.padMs}ms padding, ${next.fadeMs}ms fades, merging within ${next.mergeWithinMs}ms.`;
   },
 
   add_push_in: (args) => {
@@ -560,6 +727,135 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
       .join('\n');
   },
 
+  // ── images over the picture ─────────────────────────────────────────────────
+
+  add_image_at_words: async (args) => {
+    const snap = requireBridge().snapshot();
+    const doc = requireDoc(snap);
+    if (snap.project && !snap.project.hasVideo) {
+      return 'This is an audio-only project — there is no picture to show an image over.';
+    }
+
+    const phrase = str(args.phrase);
+    if (!phrase) return 'Provide the phrase to place the image on.';
+    const query = str(args.query);
+    const imageId = str(args.image_id);
+    if (!query && !imageId) return 'Provide either a query to search for a picture, or an image_id from list_images.';
+
+    const runs = matchRuns(doc.words, phrase, /* includeDeleted */ false);
+    if (runs.length === 0) {
+      return `No words matching "${phrase}" are in the edit. (Deleted words are not shown, so an image cannot be placed on one.)`;
+    }
+    const targets = args.occurrence === 'all' ? runs : [runs[0]];
+
+    // Resolve the picture ONCE, however many places it is going. The same file
+    // at four words is one download and one asset — see ImageOverlay.assetId.
+    let assetId: string;
+    let assetNote = '';
+    if (imageId) {
+      if (!snap.images.some((i) => i.id === imageId)) {
+        return 'That image id is not in this project. Use list_images to see what is available.';
+      }
+      assetId = imageId;
+    } else {
+      try {
+        const made = await requireBridge().generateImage(query!);
+        assetId = made.id;
+        assetNote = ` Generated from "${made.name}".`;
+      } catch (e) {
+        return `Could not generate a picture for "${query}": ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+
+    const transition = str(args.transition) as ImageOverlay['transition'] | undefined;
+    // "corner" is a picture-in-picture card in the lower right, inset by a
+    // margin rather than flush to the edge — a card touching two edges of the
+    // frame reads as a rendering error rather than as a choice.
+    const corner = str(args.size) === 'corner';
+    const box = corner ? { x: 0.6, y: 0.58, width: 0.34, height: 0.34 } : undefined;
+
+    const placed: string[] = [];
+    for (const run of targets) {
+      const covered = doc.words.slice(run.fromIndex, run.toIndex + 1);
+      // The SAME function the Insert button calls, so the assistant and the UI
+      // cannot disagree about how long an image should stay up.
+      // undefined, not a fallback constant: suggestWindow's own default IS the
+      // rule, and re-stating it here would be a second copy to drift.
+      const want = typeof args.duration_sec === 'number' ? args.duration_sec : undefined;
+      const window = suggestWindow(covered, snap.project?.durationSec ?? Infinity, want);
+      const id = addImageOverlay(assetId, window.start, window.end, {
+        wordId: covered[0]?.id,
+        wordText: run.text,
+        ...(transition ? { transition } : {}),
+        ...(box ? { box } : {}),
+      });
+      if (!id) return `Placed ${placed.length}, then hit the limit of ${MAX_OVERLAYS} images on one project.`;
+      placed.push(`${clock(window.start)}–${clock(window.end)}`);
+    }
+
+    return (
+      `Showing an image on "${trim(targets[0].text, 40)}"${
+        placed.length > 1 ? ` and ${placed.length - 1} other match${placed.length === 2 ? '' : 'es'}` : ''
+      } (${placed.join(', ')}), ${transition ?? 'fade'} transition.${assetNote}`
+    );
+  },
+
+  list_images: () => {
+    const snap = requireBridge().snapshot();
+    const doc = requireDoc(snap);
+    const lines: string[] = [];
+
+    if (doc.overlays.length === 0) lines.push('No images are placed on this project.');
+    else {
+      lines.push('Placed:');
+      for (const o of doc.overlays) {
+        const name = snap.images.find((i) => i.id === o.assetId)?.name ?? '(missing image)';
+        const where = o.wordText ? ` on "${o.wordText}"` : '';
+        const full = o.box.width > 0.95 && o.box.height > 0.95;
+        lines.push(
+          `- ${o.id}: ${name}${where}, ${clock(o.start)}–${clock(o.end)} ` +
+            `(${(o.end - o.start).toFixed(1)}s), ${o.transition}, ${full ? 'full frame' : 'corner'}` +
+            (o.opacity < 1 ? `, ${Math.round(o.opacity * 100)}% opacity` : ''),
+        );
+      }
+    }
+
+    const unplaced = snap.images.filter((i) => !doc.overlays.some((o) => o.assetId === i.id));
+    if (unplaced.length > 0) {
+      lines.push('', 'Imported but not placed (use image_id with add_image_at_words):');
+      for (const i of unplaced) lines.push(`- ${i.id}: ${i.name} (${i.width}x${i.height})`);
+    }
+    return lines.join('\n');
+  },
+
+  update_image: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const id = str(args.id);
+    const overlay = id ? doc.overlays.find((o) => o.id === id) : undefined;
+    if (!id || !overlay) return 'That image id was not found. Use list_images.';
+
+    const patch: Partial<ImageOverlay> = {};
+    if (typeof args.start_sec === 'number') patch.start = args.start_sec;
+    if (typeof args.end_sec === 'number') patch.end = args.end_sec;
+    if (str(args.transition)) patch.transition = str(args.transition) as ImageOverlay['transition'];
+    if (typeof args.ease_sec === 'number') patch.ease = args.ease_sec;
+    if (typeof args.opacity === 'number') patch.opacity = Math.min(1, Math.max(0, args.opacity));
+    if (str(args.size) === 'full') patch.box = { x: 0, y: 0, width: 1, height: 1 };
+    if (str(args.size) === 'corner') patch.box = { x: 0.6, y: 0.58, width: 0.34, height: 0.34 };
+    if (Object.keys(patch).length === 0) return 'Nothing to change — pass at least one field.';
+
+    setOverlay(id, patch, 'Adjust image');
+    return `Updated image ${id}.`;
+  },
+
+  remove_image: (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const id = str(args.id);
+    if (!id || !doc.overlays.some((o) => o.id === id)) return 'That image id was not found. Use list_images.';
+    deleteImageOverlay(id);
+    return 'Image removed from the video.';
+  },
+
   add_music: async (args) => {
     const query = str(args.query);
     if (!query) return 'Provide a query.';
@@ -578,13 +874,124 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     return 'Removed the background music.';
   },
 
-  transcribe: async () => {
+  set_music_options: async (args) => {
+    const snap = requireBridge().snapshot();
+    if (!snap.music) return 'This project has no background music yet — add some with add_music.';
+    const opts: { loop?: boolean; durationSec?: number | null; fit?: boolean } = {};
+    if (bool(args.loop) !== undefined) opts.loop = bool(args.loop)!;
+    if (args.duration_sec === null) opts.durationSec = null;
+    else if (typeof args.duration_sec === 'number') opts.durationSec = args.duration_sec;
+    if (bool(args.fit_to_video)) opts.fit = true;
+    if (Object.keys(opts).length === 0) return 'Nothing to change — pass loop, duration_sec or fit_to_video.';
+    return requireBridge().setMusicOptions(opts);
+  },
+
+  transcribe: async (args) => {
     const snap = requireBridge().snapshot();
     if (!snap.project) return 'No project is open.';
-    if (snap.transcribed) return 'This project is already transcribed.';
     if (!snap.asrAvailable) return 'No ASR provider is configured on the server, so transcription is unavailable.';
-    await requireBridge().transcribe();
-    return 'Transcription finished — the script is ready to edit.';
+
+    const options: AsrPatch = {};
+    if (str(args.model)) options.model = str(args.model);
+    if (str(args.language)) options.language = str(args.language);
+    if (bool(args.diarize) !== undefined) options.diarize = bool(args.diarize);
+    if (bool(args.verbatim) !== undefined) options.verbatim = bool(args.verbatim);
+    if (typeof args.speakers === 'number') options.speakers = Math.max(1, Math.round(args.speakers));
+
+    // Re-transcribing REPLACES the script, and with it every word id the current
+    // edit is expressed in. Asking again with different options is a real request
+    // ("keep the ums this time"), so it is allowed — but never as a silent
+    // consequence of a bare `transcribe` on a project that already has a script.
+    if (snap.transcribed && Object.keys(options).length === 0) {
+      return 'This project is already transcribed. To redo it, say what should change (e.g. verbatim to keep the fillers) — a re-transcribe replaces the current script and its edits.';
+    }
+    await requireBridge().transcribe(Object.keys(options).length ? options : undefined);
+    return snap.transcribed
+      ? 'Re-transcribed — the script has been replaced.'
+      : 'Transcription finished — the script is ready to edit.';
+  },
+
+  list_asr_models: () => {
+    const models = requireBridge().asrModels();
+    if (models.length === 0) return 'No transcription models are configured on this server.';
+    return models.map((m) => `- ${m.id}: ${m.label}${m.hint ? ` — ${m.hint}` : ''}`).join('\n');
+  },
+
+  job_status: () => {
+    const job = requireBridge().snapshot().job;
+    if (!job) return 'Nothing is running.';
+    const pct = job.progress >= 0 ? ` (${Math.round(job.progress * 100)}%)` : '';
+    return `${job.kind}: ${job.stage}${pct}.`;
+  },
+
+  cancel_job: async () => requireBridge().cancelJob(),
+
+  export_captions: async (args) => {
+    requireDoc(requireBridge().snapshot());
+    const format = str(args.format) ?? 'srt';
+    if (!['srt', 'vtt', 'ass'].includes(format)) return 'Provide format: srt, vtt or ass.';
+    return requireBridge().exportCaptions(format);
+  },
+
+  list_fonts: () => {
+    const fonts = requireBridge().snapshot().fonts;
+    return `Caption fonts available: ${fonts.join(', ')}.`;
+  },
+
+  custom_filler_words: (args) => {
+    const add = strings(args.add);
+    const remove = strings(args.remove);
+    const list = requireBridge().customFillers(add.length || remove.length ? { add, remove } : undefined);
+    const head = add.length || remove.length ? 'Custom filler words are now' : 'Custom filler words';
+    return list.length === 0
+      ? `${head}: none — only the built-in list (um, uh, er…) applies.`
+      : `${head}: ${list.join(', ')}.`;
+  },
+
+  count_cleanup: (args) => {
+    const snap = requireBridge().snapshot();
+    requireDoc(snap);
+    const fillers = countFillers(str(args.mode) === 'all', snap.customFillers);
+    const retakes = countRetakes(Math.max(1, Math.round(numOr(args.min_words, 2))));
+    return `${fillers} filler word${fillers === 1 ? '' : 's'} and ${retakes} word${retakes === 1 ? '' : 's'} of retakes could be cut. Nothing has been cut.`;
+  },
+
+  track_subject: async (args) => {
+    const doc = requireDoc(requireBridge().snapshot());
+    const id = str(args.id);
+    if (!id || !doc.frame.moves.some((m) => m.id === id)) return 'That push-in id was not found. Use list_push_ins.';
+    return requireBridge().trackSubject(id, bool(args.enable) ?? true);
+  },
+
+  // ── improvising ────────────────────────────────────────────────────────────
+
+  summon_media: async (args) => {
+    const url = str(args.url);
+    if (!url) return 'Provide a direct url to the file.';
+    const attach = (str(args.attach_as) ?? 'clip') as SummonAttach;
+    if (!['clip', 'music', 'image', 'download'].includes(attach)) {
+      return 'attach_as must be clip, music, image or download.';
+    }
+    return requireBridge().summonMedia(url, attach, str(args.name));
+  },
+
+  run_media_op: async (args) => {
+    const purpose = str(args.purpose);
+    if (!purpose) return 'Say what this operation is for (purpose) — the user sees it.';
+    return requireBridge().runMediaOp({
+      purpose,
+      source: (str(args.source) ?? 'clip') as SummonOpRequest['source'],
+      clipId: str(args.clip_id),
+      url: str(args.url),
+      file: str(args.file),
+      startSec: typeof args.start_sec === 'number' ? args.start_sec : undefined,
+      endSec: typeof args.end_sec === 'number' ? args.end_sec : undefined,
+      videoFilters: str(args.video_filters),
+      audioFilters: str(args.audio_filters),
+      format: str(args.format) ?? 'mp4',
+      stillDurationSec: typeof args.still_duration_sec === 'number' ? args.still_duration_sec : undefined,
+      attachAs: (str(args.attach_as) ?? 'keep') as SummonAttach,
+    });
   },
 
   open_project: async (args) => {
@@ -647,6 +1054,62 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
   split_at_playhead: async () => {
     requireDoc(requireBridge().snapshot());
     return requireBridge().splitAtPlayhead();
+  },
+
+  // ── clips ──────────────────────────────────────────────────────────────────
+
+  list_clips: () => {
+    const snap = requireBridge().snapshot();
+    if (!snap.project) return 'No project is open.';
+    const { clips } = snap;
+    if (clips.length <= 1) {
+      return `One clip: "${clips[0]?.name ?? snap.project.name}" (${clock(snap.project.durationSec)}). Splitting it or adding footage makes more.`;
+    }
+    return clips
+      .map(
+        (c, i) =>
+          `${i + 1}. ${c.name} (id: ${c.id}) — starts ${clock(c.startSec)}, runs ${clock(c.durationSec)}${c.hasVideo ? '' : ', audio only'}`,
+      )
+      .join('\n');
+  },
+
+  split_clip: async (args) => {
+    requireDoc(requireBridge().snapshot());
+    const at = numOr(args.at_sec, NaN);
+    if (!Number.isFinite(at)) return 'Provide at_sec — timeline seconds.';
+    return requireBridge().splitClipAt(Math.max(0, at));
+  },
+
+  move_clip: async (args) => {
+    const snap = requireBridge().snapshot();
+    const id = str(args.clip_id);
+    const direction = str(args.direction);
+    if (!id || !snap.clips.some((c) => c.id === id)) return 'That clip id was not found. Use list_clips.';
+    if (direction !== 'earlier' && direction !== 'later') return 'Provide direction: earlier or later.';
+    return requireBridge().moveClip(id, direction);
+  },
+
+  reorder_clips: async (args) => {
+    const snap = requireBridge().snapshot();
+    const ids = strings(args.clip_ids);
+    const known = new Set(snap.clips.map((c) => c.id));
+    // A partial order would silently drop whatever was left out, so the whole
+    // list is required — the id set has to match, not merely overlap.
+    if (ids.length !== known.size || ids.some((id) => !known.has(id)) || new Set(ids).size !== ids.length) {
+      return `Pass every clip id exactly once, in the order you want: ${[...known].join(', ')}.`;
+    }
+    return requireBridge().reorderClips(ids);
+  },
+
+  remove_clip: async (args) => {
+    const snap = requireBridge().snapshot();
+    const id = str(args.clip_id);
+    if (!id || !snap.clips.some((c) => c.id === id)) return 'That clip id was not found. Use list_clips.';
+    if (snap.clips.length <= 1) return 'This is the only clip — a project cannot be left with none.';
+    if (bool(args.confirm) !== true) {
+      return 'Removing a clip takes its words out of the project and cannot be undone with Ctrl+Z. Ask the user to confirm, then call again with confirm=true.';
+    }
+    return requireBridge().removeClip(id);
   },
 };
 

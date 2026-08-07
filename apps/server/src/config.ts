@@ -98,6 +98,19 @@ export const CONFIG = {
   xaiModel: process.env.XAI_MODEL || 'grok-4',
 
   /**
+   * Image generation (Gemini). Unset means the Images panel offers file import
+   * only — the same graceful degradation ASR has without ELEVENLABS_API_KEY,
+   * rather than a button that fails when pressed.
+   *
+   * A getter, not a captured value, for the reason the ElevenLabs key is one:
+   * the dashboard writes process.env at runtime, and a key set there has to win
+   * over what was in the environment at boot.
+   */
+  get geminiApiKey() {
+    return process.env.GEMINI_API_KEY ?? '';
+  },
+
+  /**
    * The AI assistant, Claude branch — served through the Claude Agent SDK, not a
    * plain HTTP proxy like Grok. It authenticates two ways, in this order:
    *
@@ -175,6 +188,19 @@ export const CONFIG = {
   maxUploadBytes: process.env.MAX_UPLOAD_MB
     ? Number(process.env.MAX_UPLOAD_MB) * 1024 * 1024
     : Infinity,
+
+  /**
+   * The assistant's licence to improvise — fetch media off the open web and run
+   * ffmpeg operations the app has no feature for. See summon.ts, which argues
+   * for why those two powers are worth having and how they are bounded.
+   *
+   * On by default: an assistant that answers "the app can't do that" to every
+   * request outside its tool list is the thing this feature exists to avoid.
+   * SUMMON=off removes the routes for anyone who would rather it could not.
+   */
+  summonEnabled: (process.env.SUMMON ?? 'on').toLowerCase() !== 'off',
+  /** Cap on ONE fetched file. Separate from maxUploadBytes — see fetchToUploads. */
+  summonMaxBytes: (Number(process.env.SUMMON_MAX_MB) || 256) * 1024 * 1024,
 };
 
 /** Defaults for the Cuts panel. The user can change every one of these. */

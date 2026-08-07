@@ -47,6 +47,7 @@ export type IconName =
   | 'target'
   | 'sparkle'
   | 'music'
+  | 'image'
   | 'captions'
   | 'contrast'
   | 'sliders'
@@ -215,6 +216,17 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <path d="M17.5 17.5V4l3.5 2.2" />
       <circle cx="14" cy="17.5" r="3.5" />
+    </>
+  ),
+  /* A frame with a horizon and a sun in it. The horizon is what separates this
+   * from `captions`, which is the same rounded rectangle at this size — a bare
+   * card would make the two section marks indistinguishable in the rail, which
+   * is the one job they have. */
+  image: (
+    <>
+      <rect x="2.5" y="4" width="19" height="16" rx="2.75" />
+      <circle cx="8.5" cy="9.5" r="1.75" />
+      <path d="M3 16.5 8.5 12l4 3.25L16 12.5l5 4.5" />
     </>
   ),
   /* The caption box, with a long line over a short one — the ragged-right shape

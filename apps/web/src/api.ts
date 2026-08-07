@@ -724,6 +724,13 @@ export interface SummonedFile {
   hasAudio?: boolean;
   width?: number;
   height?: number;
+  /**
+   * Set when the container asked for is not the one this machine's ffmpeg can
+   * write, and a working one was used instead — the phone build has no mp3 or
+   * VP9 encoder, so "as an mp3" comes back as .m4a. The assistant repeats this
+   * to the user rather than letting the extension disagree with the request.
+   */
+  substituted?: string;
 }
 
 /** One ffmpeg operation. The server owns the paths and codecs; see summon.ts. */
@@ -750,7 +757,7 @@ export interface KeyStatus {
 }
 export interface KeysResponse {
   keys: Record<string, KeyStatus>;
-  backends: { grok: boolean; claude: boolean; asr: boolean };
+  backends: { grok: boolean; claude: boolean; asr: boolean; images: boolean };
 }
 
 /**

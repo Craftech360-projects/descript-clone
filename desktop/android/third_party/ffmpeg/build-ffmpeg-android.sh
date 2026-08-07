@@ -23,7 +23,19 @@
 #   libass + fontconfig/freetype/fribidi/harfbuzz  burned captions ('subtitles' filter)
 #   loudnorm, alimiter, atempo, aresample          Studio Sound / speed chains
 #   pcm_s16le       ASR extract + waveform peaks
+#   zlib            PNG decode — see the image inserts below
 # Decoders are left ON (a phone import can be almost anything).
+#
+# IMAGE INSERTS (packages/core/src/overlay.ts) add a second kind of input: a
+# still, read with `-loop 1 -framerate F -t D -i pic.png`, then
+# scale/crop/format=rgba/colorchannelmixer/fade and composited with `overlay`.
+# Every filter in that chain is built in and needs no configure flag — but the
+# DECODE does. Generated images come back from Gemini as PNG, and ffmpeg's PNG
+# decoder is useless without zlib, so `--enable-zlib` is passed EXPLICITLY
+# below. It is autodetected and would almost certainly be found anyway; the
+# point of naming it is that configure then FAILS if it is not, instead of
+# quietly producing an ffmpeg that renders every other feature perfectly and
+# dies only when someone inserts a picture.
 #
 # GPL NOTICE: --enable-gpl + libx264 makes the produced binaries — and any APK
 # embedding them — GPL-encumbered. Same posture as the desktop builds'
@@ -173,6 +185,7 @@ fi
     --enable-gpl --enable-libx264 \
     --enable-libass --enable-libfreetype --enable-libfribidi --enable-libharfbuzz \
     --enable-libfontconfig \
+    --enable-zlib \
     --extra-cflags="-fPIC" --extra-ldflags="-pie" \
     --extra-libs="-lm"
   make -j"$JOBS"

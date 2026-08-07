@@ -21,14 +21,42 @@ at `http://127.0.0.1:<port>`.
 | resources copied by electron-builder | `assets/nodejs-project/` copied to `filesDir` on first run / version change (Hono's `serveStatic` needs real files; APK assets aren't a filesystem) |
 | health-poll `/api/health`, then `loadURL` | same poll, then `WebView.loadUrl` |
 | `will-download` → native Save dialog | `window.JumpCutAndroid` JS bridge → MediaStore Downloads (see `DownloadBridge.kt`; the web side prefers it in `apps/web/src/download.ts`) |
+| `<input type=file>` → OS dialog | `WebChromeClient.onShowFileChooser` → `ACTION_GET_CONTENT`; results read with `FileChooserParams.parseResult` (Android 13+ sends an `image/*` pick to the photo picker, which answers in `clipData`, not `getData`) |
 
 Android-only env additions: `TMPDIR` (bionic has no `/tmp`, and the render
 writes filter scripts to `os.tmpdir()`), `HOME`/`XDG_CACHE_HOME` (fontconfig's
 cache, for burned captions).
 
-The Claude assistant is **stubbed out** of the Android bundle (its SDK spawns a
-native CLI that has no Android build) — `stubs/agent-claude.ts`, swapped in by
-`build.mjs`. The Grok assistant is plain HTTP and works when a key is set.
+## The assistant on a phone
+
+The Grok backend is plain HTTP and works when a key is set, and it carries the
+**whole** tool contract — all of `packages/core/src/agent-tools.ts`, the same
+list the desktop build serves, verified present in the bundle after every
+`prepare-assets`. Nothing in the tool surface is desktop-only.
+
+The **Claude** backend is stubbed out (`stubs/agent-claude.ts`, swapped in by
+`build.mjs`): its SDK locates and spawns a native CLI, and there is no Android
+build of that binary. `CONFIG.hasClaude()` is env-gated and no Claude token is
+ever set here, so the picker never offers it. Reaching Claude on-device would
+mean a second transport that speaks the Messages API over plain HTTP, the way
+the Grok loop already does — a real piece of work, not a packaging change.
+
+Two capabilities need the phone's own limits taken into account, and
+`NodeRuntime.kt` sets both:
+
+| | why |
+| --- | --- |
+| `SUMMON_OP_TIMEOUT_S=420` | the assistant's improvised ffmpeg operations (`run_media_op`) run under a wall-clock cap whose default, two minutes, is a laptop number. Software x264 on arm64 is an order of magnitude slower; the default would kill work that is progressing. |
+| `SUMMON_MAX_MB=96` | the cap on one file fetched from a URL **the model chose**. 256 MB is defensible on a workstation and not on a phone. |
+
+Codecs are negotiated rather than assumed. `summon.ts` asks the binary what it
+can encode and substitutes when it must, because the ffmpeg built here has
+libx264 and libass and no libmp3lame, libvpx or libopus: "just the audio as an
+mp3" comes back as `.m4a`, a `webm` comes back as `.mp4`, and the substitution
+is reported so the assistant says what it actually made. Everything else — mp4,
+gif, wav, png, jpg — is byte-identical to the desktop path. Adding the three
+libraries to `third_party/ffmpeg/build-ffmpeg-android.sh` would remove even
+that difference; see its README for the cost.
 
 ## Build
 
@@ -61,12 +89,26 @@ adb logcat -s jumpcut-node jumpcut-shell
 `server.mjs`), piped to logcat by the JNI bridge. `jumpcut-shell` is the
 Kotlin side.
 
-## The ElevenLabs key
+## Keys
 
-Baked at build time exactly as on desktop: `ELEVENLABS_API_KEY` env var wins,
-else the repo-root `.env`, else the app ships on mock ASR (everything works,
-transcription is fake, nothing billed). **A built APK containing a key is
-private** — anyone who has it can extract the key and spend the credit.
+Two are baked at build time exactly as on desktop — the env var wins, else the
+repo-root `.env`, else nothing:
+
+| | Baked from | Missing means |
+| --- | --- | --- |
+| Transcription | `ELEVENLABS_API_KEY` | mock ASR: everything works, transcription is fake, nothing billed |
+| Image generation | `GEMINI_API_KEY` | the Images panel imports files but cannot generate them |
+
+**A built APK containing a key is private** — anyone who has it can extract the
+key and spend the credit.
+
+Baking is a convenience; the app's own **API keys dialog** is the real path, and
+on a phone it is the ONLY one. There is no `.env` to edit and no shell to export
+from, so a credential that is not in `MANAGED_KEYS`
+(`apps/server/src/settings.ts`) cannot be set on the device at all. Keys entered
+there persist to `SETTINGS_PATH` (`filesDir/.jumpcut-secrets.json`) and always
+win over a baked value — the bake targets `__BAKED_*` fallbacks, never the live
+variable, so it can never freeze a getter (see `apps/server/src/config.ts`).
 
 ## Known constraints
 
@@ -79,6 +121,11 @@ private** — anyone who has it can extract the key and spend the credit.
   change to `packages/core/src/render.ts`, reviewed cross-platform.
 - **Some codecs won't preview** in the WebView `<video>` even though the render
   handles them — WebView's codec set is narrower than desktop Chromium's.
+- **Generating an image is the one feature that needs the network.** Everything
+  else — cutting, framing, grading, captions, the render — runs offline on the
+  phone; a picture is made by Gemini and cannot be. Importing one from the
+  gallery works on a plane. Compositing it needs a PNG decoder, so keep
+  `--enable-zlib` in the ffmpeg build (`third_party/ffmpeg/README.md`).
 - **GPL**: the bundled ffmpeg includes x264 — see `third_party/ffmpeg/README.md`
   before distributing beyond private use.
 - **Esbuild targets node18** because that is nodejs-mobile's core. If you bump

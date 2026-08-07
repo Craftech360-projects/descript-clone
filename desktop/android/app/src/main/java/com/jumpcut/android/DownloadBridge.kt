@@ -98,10 +98,28 @@ class DownloadBridge(private val context: Context, private val origin: String) {
         context.contentResolver.update(uri, values, null, null)
     }
 
-    private fun guessMime(filename: String): String = when {
-        filename.endsWith(".mp4") -> "video/mp4"
-        filename.endsWith(".m4a") -> "audio/mp4"
-        filename.endsWith(".srt") || filename.endsWith(".vtt") || filename.endsWith(".ass") -> "text/plain"
+    /**
+     * Only a fallback — the server's own content-type wins. It covers renders
+     * and caption sidecars, plus everything the assistant can summon: a gif of
+     * the punchline, a still frame, an audio-only extract (see summon.ts's
+     * format table, and note that a build without libmp3lame hands back .m4a
+     * where .mp3 was asked for). A file that reaches Downloads with
+     * application/octet-stream opens in nothing.
+     */
+    private fun guessMime(filename: String): String = when (filename.substringAfterLast('.', "").lowercase()) {
+        "mp4" -> "video/mp4"
+        "webm" -> "video/webm"
+        "mov" -> "video/quicktime"
+        "m4a" -> "audio/mp4"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "ogg" -> "audio/ogg"
+        "flac" -> "audio/flac"
+        "gif" -> "image/gif"
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "webp" -> "image/webp"
+        "srt", "vtt", "ass" -> "text/plain"
         else -> "application/octet-stream"
     }
 }

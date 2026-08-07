@@ -48,7 +48,45 @@ this ever ships widely.
 Chosen from what `packages/core/src/render.ts` actually emits: libx264 + aac
 encode, `subtitles` filter (libass + freetype/fribidi/harfbuzz/fontconfig) for
 burned captions, `loudnorm`/`alimiter`/`atempo`/`aresample` for the audio
-chains, `pcm_s16le` for ASR extraction and waveform peaks. Decoders are left
-fully enabled — a phone import can be almost anything. A size-trim pass
-(disabling unused demuxers/encoders) is a ship-time optimization, not a
-starting point.
+chains, `pcm_s16le` for ASR extraction and waveform peaks, and **zlib** for PNG
+decode. Decoders are left fully enabled — a phone import can be almost anything.
+
+zlib is the one that is easy to lose. Image inserts (`packages/core/src/overlay.ts`)
+feed a still in as a second input — `-loop 1 -framerate F -t D -i pic.png` —
+and generated images arrive as PNG, which ffmpeg cannot decode without it. Every
+filter in that chain (`scale`, `crop`, `format`, `colorchannelmixer`, `fade`,
+`overlay`) is built in and costs no flag; the decoder is the only part with a
+dependency. The script passes `--enable-zlib` explicitly so a missing zlib stops
+the build rather than producing an ffmpeg that fails only on the one feature.
+
+A size-trim pass (disabling unused demuxers/encoders) is a ship-time
+optimization, not a starting point — and when someone does it, `image2` plus the
+png/mjpeg/webp decoders have to survive it.
+
+## What the assistant's escape hatch does without
+
+`apps/server/src/summon.ts` is the one module that reaches past the render's
+codec set: it lets the assistant produce a gif, a still, an audio-only extract —
+media the editor itself never writes. It does not assume anything is here. It
+asks the binary (`ffmpeg -encoders`, once per process) and substitutes what this
+build can actually do:
+
+| asked for | this build | why |
+| --- | --- | --- |
+| `mp3` | `.m4a`, AAC | ffmpeg has **no native mp3 encoder** — it is libmp3lame or libshine or nothing |
+| `webm` | `.mp4`, H.264 | VP8/VP9 and Opus are the only codecs a .webm may carry |
+| mp4, gif, wav, png, jpg | as asked | x264, and the gif/png/mjpeg/pcm encoders every build has |
+
+Adding `--enable-libmp3lame --enable-libvpx --enable-libopus` (and the three
+cross-compiled libraries above ffmpeg in the script) removes the substitution.
+libvpx is the expensive one — a slow build and a few MB of binary — for a
+container Android's own player handles worse than mp4. The substitution is the
+better default; the flags are here if the difference ever matters.
+
+One thing the escape hatch deliberately does NOT need: `-f lavfi`. Turning a
+still into a video wants a silent audio track, and the obvious spelling of that
+is `-f lavfi -i anullsrc`, which is the **lavfi input device** — libavdevice,
+which this build disables. `summon.ts` uses `anullsrc` as a filter source inside
+`-filter_complex` instead: identical silence, from libavfilter, which is always
+built. If `--disable-avdevice` ever gets dropped, leave that alone anyway; it is
+the more portable of the two.

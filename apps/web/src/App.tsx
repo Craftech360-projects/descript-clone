@@ -1939,7 +1939,11 @@ export default function App() {
         if (!project) return 'No project is open.';
         setNotice(purpose);
         const file = await api.summon.op(project.id, op);
-        const made = `${purpose} — made ${file.name} (${fmtBytes(file.bytes)}${file.durationSec ? `, ${fmtShort(file.durationSec)}` : ''}).`;
+        // `substituted` means this machine's ffmpeg could not write the container
+        // asked for and a working one was used — a phone has no mp3 encoder. Said
+        // plainly, because the model is about to tell the user what it made.
+        const instead = file.substituted ? ` Wrote ${file.substituted} instead of ${op.format ?? 'mp4'}.` : '';
+        const made = `${purpose} — made ${file.name} (${fmtBytes(file.bytes)}${file.durationSec ? `, ${fmtShort(file.durationSec)}` : ''}).${instead}`;
         if (attachAs === 'keep') {
           return `${made} It is not attached to anything yet; pass its url back as source "file" to build on it, or attach_as to place it.\nfile: ${file.url}`;
         }

@@ -56,8 +56,16 @@ import { clipsOf } from './store.ts';
 /** Where summoned bytes land. The same directory imports use, so /media serves them. */
 const uploadsDir = () => join(CONFIG.mediaDir, 'uploads');
 
-/** How long one ffmpeg operation may run before it is killed. */
-const OP_TIMEOUT_MS = 120_000;
+/**
+ * How long one ffmpeg operation may run before it is killed.
+ *
+ * Configurable because the same code runs on very different machines: a laptop
+ * encodes a 30-second clip in a few seconds, an arm64 phone doing software x264
+ * takes minutes for the same work (see desktop/android/README.md). A fixed
+ * desktop-shaped cap would turn every phone operation into a timeout, so the
+ * Android shell raises it — SUMMON_OP_TIMEOUT_S, set in NodeRuntime.kt.
+ */
+const OP_TIMEOUT_MS = CONFIG.summonOpTimeoutMs;
 /** The longest output an operation may produce — a guard against a `-loop 1` typo. */
 const MAX_OP_SECONDS = 1800;
 /** Redirect hops followed while fetching, each one re-validated. */
@@ -86,6 +94,10 @@ async function assertPublicUrl(raw: string): Promise<URL> {
     throw new Error('Only http and https URLs can be fetched.');
   }
 
+  // lookup(), NOT resolve4/resolve6: lookup goes through the platform's
+  // getaddrinfo, and resolve* goes through c-ares, which reads /etc/resolv.conf —
+  // a file Android does not have. On a phone every resolve() call fails with
+  // ESERVFAIL, so every fetch would be refused as unresolvable. Keep it lookup.
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const addresses = isIP(host)
     ? [{ address: host }]
@@ -257,25 +269,121 @@ function runCapture(bin: string, args: string[]): Promise<string> {
 
 // ── the media operation ──────────────────────────────────────────────────────
 
-/** Output containers the model may ask for, and the flags that produce each. */
-const FORMATS: Record<string, { ext: string; args: string[]; kind: MediaKind; video: boolean }> = {
-  mp4: {
-    ext: '.mp4', kind: 'video', video: true,
-    args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
-           '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
-  },
-  webm: {
-    ext: '.webm', kind: 'video', video: true,
-    args: ['-c:v', 'libvpx-vp9', '-crf', '32', '-b:v', '0', '-c:a', 'libopus'],
-  },
-  gif: { ext: '.gif', kind: 'image', video: true, args: [] }, // built by gifGraph below
-  mp3: { ext: '.mp3', kind: 'audio', video: false, args: ['-c:a', 'libmp3lame', '-q:a', '2'] },
-  wav: { ext: '.wav', kind: 'audio', video: false, args: ['-c:a', 'pcm_s16le'] },
-  png: { ext: '.png', kind: 'image', video: true, args: ['-frames:v', '1'] },
-  jpg: { ext: '.jpg', kind: 'image', video: true, args: ['-frames:v', '1', '-q:v', '3'] },
-};
+/** Output containers the model may ask for. What each costs is settled below. */
+export const SUMMON_FORMATS = ['mp4', 'webm', 'gif', 'mp3', 'wav', 'png', 'jpg'];
 
-export const SUMMON_FORMATS = Object.keys(FORMATS);
+interface Recipe {
+  ext: string;
+  args: string[];
+  kind: MediaKind;
+  video: boolean;
+  /** Set when the container asked for was not the one this build can produce. */
+  substituted?: string;
+}
+
+/**
+ * What THIS machine's ffmpeg can actually encode.
+ *
+ * Everywhere else the product needs exactly three things — x264, AAC and libass
+ * — and every build it runs on has them, including the phone binary (see
+ * desktop/android/third_party/ffmpeg/build-ffmpeg-android.sh). This file is the
+ * only one that reaches past that set, so it is the only one that has to ASK
+ * instead of assume. The Android ffmpeg is configured without libmp3lame,
+ * libvpx and libopus — three external libraries, cross-compiled, to widen an
+ * escape hatch — and a minimal container image may be missing them too.
+ *
+ * Asked once per process and cached: `-encoders` costs about thirty
+ * milliseconds and the answer cannot change while the binary stays put.
+ */
+let encoderCache: Promise<Set<string>> | null = null;
+function encoders(): Promise<Set<string>> {
+  encoderCache ??= runCapture(CONFIG.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-encoders'])
+    .then(parseEncoders)
+    // A binary that cannot even list its encoders will fail the real call too,
+    // with a message about the actual operation rather than about probing.
+    .catch(() => new Set<string>());
+  return encoderCache;
+}
+
+/**
+ * Encoder names out of `ffmpeg -encoders`.
+ *
+ * Each row is six flag characters and then the name. The legend rows above the
+ * list have the same shape but an `=` where the name goes, which is why the
+ * name has to start with an identifier character.
+ */
+export function parseEncoders(listing: string): Set<string> {
+  return new Set([...listing.matchAll(/^\s*[A-Z.]{6}\s+([A-Za-z0-9_][^\s]*)/gm)].map((m) => m[1]));
+}
+
+const H264 = ['-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p'];
+const MP4_TAIL = ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
+
+/**
+ * The container the model asked for, resolved against the codecs that exist.
+ *
+ * Substitution rather than refusal: someone who asked for "just the audio as an
+ * mp3" is asking for an audio file, and handing them an m4a is the request
+ * honoured. Handing them an error about libmp3lame is not. What did happen is
+ * reported back through `substituted`, so the assistant says "m4a, this build
+ * has no mp3 encoder" instead of quietly renaming the format.
+ */
+export function recipeFor(key: string, have: Set<string>): Recipe {
+  const has = (...names: string[]) => names.find((n) => have.has(n));
+
+  // -preset and -crf are libx264's own options; the mpeg4 fallback has neither,
+  // and passing them leaves ffmpeg warning about options it never used.
+  const mp4 = (): Recipe => {
+    const v = has('libx264');
+    return {
+      ext: '.mp4', kind: 'video', video: true,
+      args: v ? ['-c:v', v, ...H264, ...MP4_TAIL] : ['-c:v', 'mpeg4', '-q:v', '4', '-pix_fmt', 'yuv420p', ...MP4_TAIL],
+    };
+  };
+
+  switch (key) {
+    case 'mp4':
+      return mp4();
+
+    case 'webm': {
+      // vp9 and vp8 are the only codecs a .webm may legally carry; with neither
+      // there is no degraded webm to make, only a different container.
+      // libopus only, never ffmpeg's native `opus`: that one is marked
+      // experimental and refuses to run without -strict -2.
+      const v = has('libvpx-vp9', 'libvpx');
+      const a = has('libopus');
+      if (!v || !a) return { ...mp4(), substituted: 'mp4 (this build has no VP9/Opus encoder)' };
+      return { ext: '.webm', kind: 'video', video: true, args: ['-c:v', v, '-crf', '32', '-b:v', '0', '-c:a', a] };
+    }
+
+    case 'gif':
+      return { ext: '.gif', kind: 'image', video: true, args: [] }; // built by gifGraph below
+
+    case 'mp3': {
+      // ffmpeg has no native mp3 encoder — it is libmp3lame or libshine or
+      // nothing — so the fallback is a different container, not a different flag.
+      const a = has('libmp3lame', 'libshine');
+      if (!a) {
+        return {
+          ext: '.m4a', kind: 'audio', video: false,
+          args: ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
+          substituted: 'm4a (this build has no mp3 encoder)',
+        };
+      }
+      return { ext: '.mp3', kind: 'audio', video: false, args: ['-c:a', a, '-q:a', '2'] };
+    }
+
+    case 'wav':
+      return { ext: '.wav', kind: 'audio', video: false, args: ['-c:a', 'pcm_s16le'] };
+    case 'png':
+      return { ext: '.png', kind: 'image', video: true, args: ['-frames:v', '1'] };
+    case 'jpg':
+      return { ext: '.jpg', kind: 'image', video: true, args: ['-frames:v', '1', '-q:v', '3'] };
+
+    default:
+      throw new Error(`Unknown format "${key}". Use one of: ${SUMMON_FORMATS.join(', ')}.`);
+  }
+}
 
 /**
  * Filter-chain constructs that are refused.
@@ -372,10 +480,16 @@ function gifGraph(userChain: string): string {
 export async function runOp(
   project: store.Project,
   req: OpRequest,
-): Promise<{ url: string; name: string; kind: MediaKind; bytes: number; durationSec: number }> {
+): Promise<{
+  url: string;
+  name: string;
+  kind: MediaKind;
+  bytes: number;
+  durationSec: number;
+  substituted?: string;
+}> {
   const key = req.format ?? 'mp4';
-  const format = FORMATS[key];
-  if (!format) throw new Error(`Unknown format "${key}". Use one of: ${SUMMON_FORMATS.join(', ')}.`);
+  const format = recipeFor(key, await encoders());
 
   const video = assertFilters(req.videoFilters, 'video filter');
   const audio = assertFilters(req.audioFilters, 'audio filter');
@@ -410,18 +524,28 @@ export async function runOp(
   // A still on its way to a video container needs a silent track: every route
   // that accepts a clip probes for audio, and one with none is refused there as
   // "nothing to transcribe".
-  const needsSilence = isStill && (key === 'mp4' || key === 'webm');
-  if (needsSilence) args.push('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo');
+  //
+  // The silence comes from anullsrc as a FILTER SOURCE inside -filter_complex,
+  // not from `-f lavfi -i anullsrc`. Those look interchangeable and are not:
+  // `-f lavfi` is an input DEVICE, it lives in libavdevice, and the Android
+  // binary is configured --disable-avdevice. The filter source is libavfilter,
+  // which every build has. Same silence, one library less to depend on.
+  const needsSilence = isStill && (key === 'mp4' || key === 'webm') && format.video;
 
   if (isStill) args.push('-t', String(still));
   else if (end !== undefined) args.push('-t', String(Math.max(0.05, end - (start ?? 0))));
 
   if (key === 'gif') {
     args.push('-filter_complex', gifGraph(video), '-map', '[outv]');
+  } else if (needsSilence) {
+    args.push(
+      '-filter_complex',
+      `[0:v]${video || 'null'}[outv];anullsrc=r=48000:cl=stereo[outa]`,
+      '-map', '[outv]', '-map', '[outa]',
+    );
   } else {
     if (video && format.video) args.push('-vf', video);
     if (audio && !isStill) args.push('-af', audio);
-    if (needsSilence) args.push('-shortest');
   }
 
   // A still has no frame rate of its own; without this the encoder picks one and
@@ -439,6 +563,7 @@ export async function runOp(
     kind: format.kind,
     bytes: size,
     durationSec: out?.duration ?? 0,
+    substituted: format.substituted,
   };
 }
 

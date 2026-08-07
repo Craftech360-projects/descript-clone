@@ -492,7 +492,7 @@ Reach for this when the user asks for something real that the app has no feature
 
 The result is a NEW file; it never overwrites the project. attach_as decides what becomes of it. Filters are ordinary ffmpeg chains and may not open inputs of their own.
 
-Trim with start_sec/end_sec whenever the user means a moment rather than the whole thing: an untrimmed pass re-encodes the entire source, which on a long video will hit the two-minute limit and come back with nothing. Say what you are about to try before you try it, and report what actually came back.`,
+Trim with start_sec/end_sec whenever the user means a moment rather than the whole thing: an untrimmed pass re-encodes the entire source, which on a long video will run past this machine's time limit and come back with nothing — and that machine may be a phone, where encoding is many times slower. Say what you are about to try before you try it, and report what actually came back.`,
     {
       purpose: { type: 'string', description: 'One plain sentence on what this is for — shown to the user beside the result.' },
       source: {

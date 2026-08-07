@@ -104,10 +104,14 @@ export const CONFIG = {
    *
    * A getter, not a captured value, for the reason the ElevenLabs key is one:
    * the dashboard writes process.env at runtime, and a key set there has to win
-   * over what was in the environment at boot.
+   * over what was in the environment at boot. The baked fallback is the same
+   * arrangement too (see desktop/android/build.mjs) — it exists so a shipped
+   * build can generate before anyone opens the dashboard, and it always loses to
+   * a key set there. It matters most on Android, which has no .env and no shell:
+   * the dashboard is the ONLY way to set a key on a phone.
    */
   get geminiApiKey() {
-    return process.env.GEMINI_API_KEY ?? '';
+    return process.env.GEMINI_API_KEY || process.env.__BAKED_GEMINI_KEY__ || '';
   },
 
   /**
@@ -164,6 +168,14 @@ export const CONFIG = {
   },
 
   /**
+   * Whether image inserts can be GENERATED. Importing a file never needs this —
+   * without a key the Images panel keeps working, it just cannot make anything.
+   */
+  hasImageGen(): boolean {
+    return Boolean(this.geminiApiKey);
+  },
+
+  /**
    * fileURLToPath, not .pathname — .pathname keeps URL percent-encoding, so a
    * project path containing a space resolves to a literal "%20" directory.
    *
@@ -201,6 +213,15 @@ export const CONFIG = {
   summonEnabled: (process.env.SUMMON ?? 'on').toLowerCase() !== 'off',
   /** Cap on ONE fetched file. Separate from maxUploadBytes — see fetchToUploads. */
   summonMaxBytes: (Number(process.env.SUMMON_MAX_MB) || 256) * 1024 * 1024,
+  /**
+   * Wall clock one summoned ffmpeg operation may burn.
+   *
+   * Two minutes is a desktop number. A phone encoding H.264 in software is
+   * roughly an order of magnitude slower, so the Android shell raises this
+   * (NodeRuntime.kt) rather than letting every on-device operation die at the
+   * same cap a laptop never reaches.
+   */
+  summonOpTimeoutMs: (Number(process.env.SUMMON_OP_TIMEOUT_S) || 120) * 1000,
 };
 
 /** Defaults for the Cuts panel. The user can change every one of these. */

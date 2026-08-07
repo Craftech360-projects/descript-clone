@@ -31,12 +31,21 @@ interface ManagedKey {
   hint: string;
 }
 
-/** The keys the dashboard can manage. Adding one here is all it takes to expose it. */
+/**
+ * The keys the dashboard can manage. Adding one here is all it takes to expose it.
+ *
+ * On the phone this list is not a convenience — it is the ONLY way a key can be
+ * set. Android has no .env to edit and no shell to export from, so a credential
+ * missing from here is a feature that can never be switched on from the device.
+ * That is why GEMINI_API_KEY is on it: image generation is otherwise dark on
+ * every build that did not bake a key in at compile time.
+ */
 export const MANAGED_KEYS: ManagedKey[] = [
   { id: 'xai', env: 'XAI_API_KEY', label: 'xAI API key', hint: 'Grok assistant — console.x.ai' },
   { id: 'anthropic', env: 'ANTHROPIC_API_KEY', label: 'Anthropic API key', hint: 'Claude assistant, per-token billing' },
   { id: 'claudeOauth', env: 'CLAUDE_CODE_OAUTH_TOKEN', label: 'Claude subscription token', hint: 'From `claude setup-token` — uses your Claude plan' },
   { id: 'elevenlabs', env: 'ELEVENLABS_API_KEY', label: 'ElevenLabs API key', hint: 'Transcription (Scribe)' },
+  { id: 'gemini', env: 'GEMINI_API_KEY', label: 'Gemini API key', hint: 'Generating image inserts — aistudio.google.com' },
   { id: 'jamendo', env: 'JAMENDO_CLIENT_ID', label: 'Jamendo client ID', hint: 'Larger background-music catalogue (optional)' },
 ];
 
@@ -109,11 +118,7 @@ export function registerSettings(app: Hono): void {
   app.get('/api/settings/keys', (c) =>
     c.json({
       keys: status(),
-      backends: {
-        grok: CONFIG.hasAgent(),
-        claude: CONFIG.hasClaude(),
-        asr: CONFIG.hasAsr(),
-      },
+      backends: backends(),
     }),
   );
 
@@ -143,9 +148,21 @@ export function registerSettings(app: Hono): void {
         return c.json({ error: e instanceof Error ? e.message : 'Could not save keys to disk.' }, 500);
       }
     }
-    return c.json({
-      keys: status(),
-      backends: { grok: CONFIG.hasAgent(), claude: CONFIG.hasClaude(), asr: CONFIG.hasAsr() },
-    });
+    return c.json({ keys: status(), backends: backends() });
   });
+}
+
+/**
+ * What the keys currently light up, which is not the same question as which keys
+ * are set: a build can bake a fallback in (see desktop/android/build.mjs), so a
+ * capability can be ON while its row honestly reads "not set". This is the line
+ * that tells the truth about what will work.
+ */
+function backends() {
+  return {
+    grok: CONFIG.hasAgent(),
+    claude: CONFIG.hasClaude(),
+    asr: CONFIG.hasAsr(),
+    images: CONFIG.hasImageGen(),
+  };
 }

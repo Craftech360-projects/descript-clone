@@ -58,6 +58,20 @@ const MAX_TURNS = 12;
 const TOOL_TIMEOUT_MS = 60_000;
 
 /**
+ * Tools that run an encoder rather than edit a document, and so are allowed to
+ * take far longer than a minute.
+ *
+ * Every other tool is a state change the browser answers in milliseconds, and a
+ * minute of silence there means something broke. These two spawn ffmpeg and wait
+ * — bounded on the server by CONFIG.summonOpTimeoutMs, which the Android shell
+ * raises to seven minutes because software H.264 on a phone is slow. Timing them
+ * out here at sixty seconds would abandon a job that is running perfectly well
+ * and leave the model to report a failure that did not happen.
+ */
+const SLOW_TOOLS = new Set(['run_media_op', 'summon_media']);
+const SLOW_TOOL_TIMEOUT_MS = 15 * 60_000;
+
+/**
  * Find the Claude Code CLI the SDK will spawn, so a missing native binary does
  * not kill the assistant.
  *
@@ -212,7 +226,7 @@ function callBrowser(conn: Conn, name: string, args: Record<string, unknown>): P
     send(conn, { tool: { id, name, args } });
     setTimeout(() => {
       if (conn.pending.delete(id)) resolve('Error: the editor did not respond in time.');
-    }, TOOL_TIMEOUT_MS);
+    }, SLOW_TOOLS.has(name) ? SLOW_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS);
   });
 }
 

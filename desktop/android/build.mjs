@@ -22,7 +22,7 @@
  */
 import { build } from 'esbuild';
 import { execSync } from 'node:child_process';
-import { cpSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, readdirSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -32,27 +32,73 @@ const repo = resolve(here, '..', '..');
 const out = join(here, 'app', 'src', 'main', 'assets', 'nodejs-project');
 
 /**
- * The ElevenLabs key is baked into the shipped app exactly as on desktop: an
- * env var wins, otherwise the repo's .env. It lands in the compiled server.mjs
- * and NOT in git — treat a built APK as private, anyone who has it has the key.
- * No key found → the app ships on the mock provider, which costs nothing.
+ * Empty the output directory, keeping the directory itself.
+ *
+ * `rmSync(out, { recursive: true })` is the obvious spelling and it is wrong on
+ * Windows: `force` only swallows ENOENT, and a directory whose CONTENTS are all
+ * deletable still fails with EPERM if anything holds a handle on the directory —
+ * a Gradle daemon, an editor, an antivirus scan, a shell sitting in it. The old
+ * code then aborted having already deleted everything inside, which is the worst
+ * of the three outcomes: no build, and no payload either.
+ *
+ * What actually matters is that no stale file survives into the APK, and
+ * deleting the children achieves that. Removing the empty directory afterwards
+ * is cosmetic, so it is attempted and forgiven.
  */
-let asrKey = process.env.ELEVENLABS_API_KEY ?? '';
-if (!asrKey) {
+function emptyDir(dir) {
+  let entries;
   try {
-    process.loadEnvFile(join(repo, '.env'));
-    asrKey = process.env.ELEVENLABS_API_KEY ?? '';
+    entries = readdirSync(dir);
   } catch {
-    /* no .env on this machine — fall through to mock ASR */
+    return; // not there yet — the mkdir below makes it
+  }
+  for (const name of entries) rmSync(join(dir, name), { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true });
+  } catch {
+    /* held open by something else; empty is all we needed */
   }
 }
+
+/**
+ * Keys are baked into the shipped app exactly as on desktop: an env var wins,
+ * otherwise the repo's .env. They land in the compiled server.mjs and NOT in
+ * git — treat a built APK as private, anyone who has it has the keys.
+ *
+ * Neither is required. No ElevenLabs key → the app ships on the mock ASR
+ * provider, which costs nothing. No Gemini key → the Images panel imports files
+ * but cannot generate them. Both can be added later from the app's own API-keys
+ * dialog, which on a phone is the ONLY way to set one: there is no .env on
+ * Android and no shell to export from. A key set there always wins over a baked
+ * one (see the getters in apps/server/src/config.ts).
+ */
+const NAMES = ['ELEVENLABS_API_KEY', 'GEMINI_API_KEY'];
+// Load the .env only if something is missing from the environment, and read the
+// env AFTER: an env var set on the command line must still win, and loadEnvFile
+// throws when there is no file at all.
+if (NAMES.some((n) => !process.env[n])) {
+  const before = Object.fromEntries(NAMES.map((n) => [n, process.env[n]]));
+  try {
+    process.loadEnvFile(join(repo, '.env'));
+  } catch {
+    /* no .env on this machine — whatever is in the environment stands alone */
+  }
+  for (const [n, v] of Object.entries(before)) if (v) process.env[n] = v;
+}
+const asrKey = process.env.ELEVENLABS_API_KEY ?? '';
+const geminiKey = process.env.GEMINI_API_KEY ?? '';
 console.log(
   asrKey
     ? `• baking in ElevenLabs key (…${asrKey.slice(-4)})`
     : '• no ElevenLabs key found — app will use mock ASR',
 );
+console.log(
+  geminiKey
+    ? `• baking in Gemini key (…${geminiKey.slice(-4)})`
+    : '• no Gemini key found — images can be imported but not generated',
+);
 
-rmSync(out, { recursive: true, force: true });
+emptyDir(out);
 mkdirSync(out, { recursive: true });
 
 console.log('• bundling server → assets/nodejs-project/server.mjs');
@@ -78,10 +124,15 @@ await build({
       },
     },
   ],
-  // Bake the key in as a FALLBACK, not the live var — same reasoning as
-  // desktop/win/build.mjs: defining ELEVENLABS_API_KEY itself would freeze the
-  // getter and break runtime key editing from the dashboard (settings.ts).
-  define: { 'process.env.__BAKED_ELEVENLABS_KEY__': JSON.stringify(asrKey) },
+  // Bake the keys in as FALLBACKS, not the live vars — same reasoning as
+  // desktop/win/build.mjs: defining ELEVENLABS_API_KEY (or GEMINI_API_KEY)
+  // itself would freeze the getter to the compiled-in string and break runtime
+  // key editing from the dashboard (settings.ts), which is the only editing
+  // there is on a phone.
+  define: {
+    'process.env.__BAKED_ELEVENLABS_KEY__': JSON.stringify(asrKey),
+    'process.env.__BAKED_GEMINI_KEY__': JSON.stringify(geminiKey),
+  },
   // Bundled CJS deps (e.g. `ws`, via @hono/node-ws) call require() for
   // builtins at runtime; a plain .mjs has no global require without this.
   banner: {

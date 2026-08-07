@@ -111,7 +111,10 @@ interface Props {
   /** The AI assistant. `enabled` is false until a Grok or Claude key is set. */
   agentEnabled: boolean;
   agentDefaultModel: string;
-  /** Open the API-keys dialog — surfaced from the assistant panel when it is off. */
+  /**
+   * Open the API-keys dialog — surfaced from the assistant panel when it is off,
+   * and from the Images section when generation is.
+   */
   onOpenSettings: () => void;
 }
 
@@ -225,6 +228,7 @@ export default function Rail(p: Props) {
         onRetargetOverlayToWord={p.onRetargetOverlayToWord}
         generatingImage={p.generatingImage}
         canGenerateImages={p.canGenerateImages}
+        onOpenSettings={p.onOpenSettings}
         color={p.color}
         setColor={p.setColor}
         onColorDragStart={p.onColorDragStart}

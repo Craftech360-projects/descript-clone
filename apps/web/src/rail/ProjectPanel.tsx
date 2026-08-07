@@ -125,6 +125,13 @@ interface Props {
   onRetargetOverlayToWord: (id: string, phrase: string) => void;
   /** True while a generation is in flight — it takes seconds, not milliseconds. */
   generatingImage: boolean;
+  /**
+   * Open the API-keys dialog, so generation can be switched on from where you
+   * noticed it was off. The same escape hatch the assistant panel offers, and it
+   * is load-bearing on Android: a phone has no .env and no shell, so that dialog
+   * is the only place a key can be entered at all.
+   */
+  onOpenSettings: () => void;
   /** False when the server has no GEMINI_API_KEY; import still works. */
   canGenerateImages: boolean;
 
@@ -827,9 +834,14 @@ function ImagesField(p: Props) {
                 asked for. Move it afterwards if it guessed wrong.
               </Hint>
             ) : (
-              <Hint>
-                Image generation needs a Gemini API key on the server. You can still import a file.
-              </Hint>
+              <>
+                <Hint>
+                  Generating pictures needs a Gemini API key. Importing a file works without one.
+                </Hint>
+                <button type="button" className="link" onClick={p.onOpenSettings}>
+                  Add a Gemini key…
+                </button>
+              </>
             )}
             <input
               ref={fileInput}

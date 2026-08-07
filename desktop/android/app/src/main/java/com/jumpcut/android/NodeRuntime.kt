@@ -96,6 +96,15 @@ class NodeRuntime(private val context: Context) {
             // fontconfig (burned captions) wants a home and a cache.
             "HOME" to context.filesDir.absolutePath,
             "XDG_CACHE_HOME" to context.cacheDir.absolutePath,
+            // The assistant's improvised ffmpeg operations (summon.ts) run under
+            // a wall-clock cap whose default is a desktop number. Software x264
+            // on an arm64 phone is far slower than on a laptop, so a two-minute
+            // cap would kill work that is progressing normally. Seven minutes,
+            // and the MAX_OP_SECONDS output cap still bounds what can be asked.
+            "SUMMON_OP_TIMEOUT_S" to "420",
+            // A phone's storage is not a workstation's, and this cap covers a
+            // URL the model chose rather than a file the user picked.
+            "SUMMON_MAX_MB" to "96",
         )
     }
 

@@ -156,8 +156,16 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == FILE_CHOOSER_REQUEST) {
-            val uris = if (resultCode == RESULT_OK && data?.data != null) arrayOf(data.data!!) else null
-            filePathCallback?.onReceiveValue(uris)
+            // parseResult, not data.data. They agree for a document picked out of
+            // Files, and disagree for a photo: Android 13+ routes an image/* pick
+            // to the system photo picker, which returns its selection in
+            // getClipData() and leaves getData() null. Reading only getData()
+            // there hands the page `null`, which <input type=file> cannot tell
+            // apart from "cancelled" — so importing a picture silently did
+            // nothing on exactly the devices where pictures come from.
+            filePathCallback?.onReceiveValue(
+                WebChromeClient.FileChooserParams.parseResult(resultCode, data),
+            )
             filePathCallback = null
             return
         }

@@ -11,7 +11,7 @@ interface Props {
 }
 
 /** The order the rows appear in; ids match the server's MANAGED_KEYS. */
-const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'jamendo'];
+const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'gemini', 'jamendo'];
 
 /**
  * View and update the app's API keys without touching .env or restarting.
@@ -23,7 +23,9 @@ const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'jamendo'];
  */
 export default function SettingsDialog({ open, onClose, onSaved }: Props) {
   const [keys, setKeys] = useState<Record<string, KeyStatus>>({});
-  const [backends, setBackends] = useState<{ grok: boolean; claude: boolean; asr: boolean } | null>(null);
+  const [backends, setBackends] = useState<
+    { grok: boolean; claude: boolean; asr: boolean; images: boolean } | null
+  >(null);
   /** Only the keys the user has edited this session: value to set, or '' to clear. */
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -98,7 +100,8 @@ export default function SettingsDialog({ open, onClose, onSaved }: Props) {
           Assistant: {backends.grok || backends.claude ? 'on' : 'off'}
           {backends.grok ? ' · Grok' : ''}
           {backends.claude ? ' · Claude' : ''} &nbsp;·&nbsp; Transcription:{' '}
-          {backends.asr ? 'on' : 'off'}
+          {backends.asr ? 'on' : 'off'} &nbsp;·&nbsp; Image generation:{' '}
+          {backends.images ? 'on' : 'off'}
         </p>
       )}
 

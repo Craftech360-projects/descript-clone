@@ -96,8 +96,13 @@ repo-root `.env`, else nothing:
 
 | | Baked from | Missing means |
 | --- | --- | --- |
-| Transcription | `ELEVENLABS_API_KEY` | mock ASR: everything works, transcription is fake, nothing billed |
+| Transcription (ElevenLabs) | `ELEVENLABS_API_KEY` | unavailable unless entered later in the API keys dialog |
+| Transcription (Sarvam Saaras v3) | `SARVAM_API_KEY` | unavailable unless entered later in the API keys dialog |
 | Image generation | `GEMINI_API_KEY` | the Images panel imports files but cannot generate them |
+
+When both transcription keys are baked, Sarvam is the default automatic-import
+provider; the on-import panel lets the user choose ElevenLabs instead. With just
+one transcription key, that provider is selected automatically.
 
 **A built APK containing a key is private** — anyone who has it can extract the
 key and spend the credit.

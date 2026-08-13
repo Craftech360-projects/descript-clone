@@ -72,7 +72,7 @@ function emptyDir(dir) {
  * Android and no shell to export from. A key set there always wins over a baked
  * one (see the getters in apps/server/src/config.ts).
  */
-const NAMES = ['ELEVENLABS_API_KEY', 'GEMINI_API_KEY'];
+const NAMES = ['ELEVENLABS_API_KEY', 'SARVAM_API_KEY', 'GEMINI_API_KEY'];
 // Load the .env only if something is missing from the environment, and read the
 // env AFTER: an env var set on the command line must still win, and loadEnvFile
 // throws when there is no file at all.
@@ -86,11 +86,17 @@ if (NAMES.some((n) => !process.env[n])) {
   for (const [n, v] of Object.entries(before)) if (v) process.env[n] = v;
 }
 const asrKey = process.env.ELEVENLABS_API_KEY ?? '';
+const sarvamKey = process.env.SARVAM_API_KEY ?? '';
 const geminiKey = process.env.GEMINI_API_KEY ?? '';
 console.log(
   asrKey
     ? `• baking in ElevenLabs key (…${asrKey.slice(-4)})`
     : '• no ElevenLabs key found — app will use mock ASR',
+);
+console.log(
+  sarvamKey
+    ? `Sarvam key will be baked in (...${sarvamKey.slice(-4)})`
+    : 'No Sarvam key found',
 );
 console.log(
   geminiKey
@@ -131,6 +137,7 @@ await build({
   // there is on a phone.
   define: {
     'process.env.__BAKED_ELEVENLABS_KEY__': JSON.stringify(asrKey),
+    'process.env.__BAKED_SARVAM_KEY__': JSON.stringify(sarvamKey),
     'process.env.__BAKED_GEMINI_KEY__': JSON.stringify(geminiKey),
   },
   // Bundled CJS deps (e.g. `ws`, via @hono/node-ws) call require() for

@@ -21,6 +21,8 @@ interface Props {
   verbatim: boolean;
   job: { progress: number; stage: string } | null;
   onCancelJob: () => void;
+  /** A request error belongs in this modal; otherwise the workspace banner sits behind it. */
+  error: string | null;
 }
 
 /**
@@ -49,6 +51,7 @@ export default function TranscribeDialog({
   verbatim,
   job,
   onCancelJob,
+  error,
 }: Props) {
   const model = caps.asrModels.find((m) => m.id === asr.model);
   const running = busy === 'transcribe';
@@ -61,7 +64,7 @@ export default function TranscribeDialog({
       footer={
         <>
           <button onClick={onClose} disabled={running}>Cancel</button>
-          <button className="primary" onClick={onTranscribe} disabled={running}>
+          <button type="button" className="primary" onClick={() => void onTranscribe()} disabled={running}>
             {running ? 'Transcribing…' : hasScript ? 'Re-transcribe' : 'Transcribe'}
           </button>
         </>
@@ -77,6 +80,7 @@ export default function TranscribeDialog({
       {/* In place, where the button was — not a toast. The work is the subject
         * of this dialog, so this is where you look for it. */}
       {job && <Progress progress={job.progress} stage={job.stage} onCancel={onCancelJob} />}
+      {error && <Warn alert>{error}</Warn>}
 
       {/* What the project holds right now — the summary that used to sit in the
         * Project rail. It belongs here: it is the state a re-transcribe replaces,
@@ -103,9 +107,9 @@ export default function TranscribeDialog({
       <Field label="Model">
         <select value={asr.model} onChange={(e) => setAsr({ ...asr, model: e.target.value })}>
           {caps.asrModels.map((m) => (
-            <option key={m.id} value={m.id} disabled={m.id !== 'mock' && !caps.hasAsr}>
+            <option key={m.id} value={m.id} disabled={!m.available}>
               {m.label}
-              {m.id !== 'mock' && !caps.hasAsr ? ' — needs ELEVENLABS_API_KEY' : ''}
+              {!m.available && ` - needs ${m.provider === 'sarvam' ? 'SARVAM_API_KEY' : 'ELEVENLABS_API_KEY'}`}
             </option>
           ))}
         </select>

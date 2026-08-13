@@ -24,7 +24,7 @@ in separate terminals.
 was in flight. Jobs are persisted, so the UI reports an honest failure rather
 than hanging — but the render is still gone.
 
-**It works with no API key.** With `ELEVENLABS_API_KEY` unset the server uses a
+**It works with no API key.** With both transcription keys unset the server uses a
 mock ASR provider: fake words, real timings, spread across your actual media. The
 entire pipeline — ingest, transcript, EDL, ffmpeg render — runs for real at zero
 cost. Only the words are invented.
@@ -33,7 +33,14 @@ To use real transcription, put a key in `.env`:
 
 ```
 ELEVENLABS_API_KEY=your-key
+# or
+SARVAM_API_KEY=your-key
 ```
+
+Sarvam uses Saaras v3's batch API for long media. Its timestamps are per phrase,
+so the editor distributes each phrase across its words; ElevenLabs retains native
+word timings. When both keys are set, choose the on-import provider in Library >
+On import; when only one is set, automatic import uses that provider.
 
 Requires `ffmpeg` and `ffprobe` on PATH, and Node 24+ (it runs TypeScript directly,
 no build step).

@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 
 import { ASR_MODELS, CONFIG, EDIT_DEFAULTS } from './config.ts';
 import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools } from './ffmpeg.ts';
-import { transcribe, ASR_DEFAULTS, type AsrOptions } from './asr.ts';
+import { transcribe, defaultAsrOptions, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as jobs from './jobs.ts';
@@ -114,8 +114,14 @@ app.get('/api/health', async (c) => {
 app.get('/api/capabilities', (c) =>
   c.json({
     hasAsr: CONFIG.hasAsr(),
-    asrModels: ASR_MODELS,
-    asrDefaults: ASR_DEFAULTS,
+    asrModels: ASR_MODELS.map((model) => ({
+      ...model,
+      available:
+        model.provider === 'mock' ||
+        (model.provider === 'elevenlabs' && CONFIG.hasElevenLabsAsr()) ||
+        (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()),
+    })),
+    asrDefaults: defaultAsrOptions(),
     editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
     /**
      * Where the music picker can search. Never empty — Openverse needs no key,
@@ -341,7 +347,7 @@ app.post('/api/projects/:id/transcribe', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project) return c.json({ error: 'No such project' }, 404);
 
-  const options: AsrOptions = { ...ASR_DEFAULTS, ...(await c.req.json().catch(() => ({}))) };
+  const options: AsrOptions = { ...defaultAsrOptions(), ...(await c.req.json().catch(() => ({}))) };
   const force = Boolean((options as Record<string, unknown>).force);
 
   const job = jobs.start(project.id, 'transcribe', 'Extracting audio', (runner) =>
@@ -487,7 +493,7 @@ app.post('/api/projects/:id/clips', async (c) => {
   // A transcribed project keeps its transcript complete: transcribe the newcomer
   // now (incrementally — only this clip lacks words) so the script covers it.
   if (project.status === 'transcribed') {
-    const options: AsrOptions = project.asrOptions ?? ASR_DEFAULTS;
+    const options: AsrOptions = project.asrOptions ?? defaultAsrOptions();
     const job = jobs.start(project.id, 'transcribe', 'Transcribing new clip', (runner) =>
       transcribeProject(project, options, runner, { force: false }),
     );
@@ -1572,7 +1578,11 @@ app.onError((err, c) => {
 
 const server = serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
   console.log(`server  http://localhost:${info.port}`);
-  console.log(`asr     ${CONFIG.hasAsr() ? 'ElevenLabs Scribe' : 'disabled (mock ASR)'}`);
+  const asr = [
+    CONFIG.hasElevenLabsAsr() ? 'ElevenLabs Scribe' : '',
+    CONFIG.hasSarvamAsr() ? 'Sarvam Saaras v3' : '',
+  ].filter(Boolean).join(' + ') || 'disabled (mock ASR)';
+  console.log(`asr     ${asr}`);
   console.log(
     `music   ${CONFIG.jamendoClientId ? 'Jamendo + Openverse' : 'Openverse only (set JAMENDO_CLIENT_ID for more)'}`,
   );

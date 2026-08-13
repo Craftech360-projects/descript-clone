@@ -290,7 +290,15 @@ export interface CustomFont {
 
 export interface Capabilities {
   hasAsr: boolean;
-  asrModels: Array<{ id: string; label: string; hint: string; verbatim: boolean; verified: boolean }>;
+  asrModels: Array<{
+    id: string;
+    provider: 'elevenlabs' | 'sarvam' | 'mock';
+    label: string;
+    hint: string;
+    verbatim: boolean;
+    verified: boolean;
+    available: boolean;
+  }>;
   asrDefaults: AsrOptions;
   editDefaults: CutSettings;
   /** Catalogues the music picker can search. Never empty — Openverse needs no key. */

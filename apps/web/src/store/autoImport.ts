@@ -29,6 +29,8 @@ const KEY = 'jumpcut.autoImport';
 export interface AutoImport {
   /** Run ASR the moment the import lands. Nothing after this works without it. */
   transcribe: boolean;
+  /** Provider to prefer when both real ASR keys are configured. */
+  asrProvider: 'elevenlabs' | 'sarvam';
   /** Sweep filler words. Hesitations only — um, uh, er — plus your custom list. */
   fillers: boolean;
   /** Shorten every silence to `pauseCapMs`. */
@@ -45,6 +47,7 @@ export interface AutoImport {
 
 export const AUTO_IMPORT_DEFAULTS: AutoImport = {
   transcribe: true,
+  asrProvider: 'sarvam',
   fillers: true,
   pauses: true,
   pauseCapMs: 50,
@@ -96,6 +99,7 @@ export function loadAutoImport(): AutoImport {
     const bool = (v: unknown, fallback: boolean) => (typeof v === 'boolean' ? v : fallback);
     return {
       transcribe: bool(saved.transcribe, AUTO_IMPORT_DEFAULTS.transcribe),
+      asrProvider: saved.asrProvider === 'elevenlabs' ? 'elevenlabs' : 'sarvam',
       fillers: bool(saved.fillers, AUTO_IMPORT_DEFAULTS.fillers),
       pauses: bool(saved.pauses, AUTO_IMPORT_DEFAULTS.pauses),
       // Clamped to the slider's own range: a stored 0 would mean "keep every

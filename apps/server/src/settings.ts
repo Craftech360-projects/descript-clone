@@ -45,6 +45,7 @@ export const MANAGED_KEYS: ManagedKey[] = [
   { id: 'anthropic', env: 'ANTHROPIC_API_KEY', label: 'Anthropic API key', hint: 'Claude assistant, per-token billing' },
   { id: 'claudeOauth', env: 'CLAUDE_CODE_OAUTH_TOKEN', label: 'Claude subscription token', hint: 'From `claude setup-token` — uses your Claude plan' },
   { id: 'elevenlabs', env: 'ELEVENLABS_API_KEY', label: 'ElevenLabs API key', hint: 'Transcription (Scribe)' },
+  { id: 'sarvam', env: 'SARVAM_API_KEY', label: 'Sarvam API key', hint: 'Transcription (Saaras v3)' },
   { id: 'gemini', env: 'GEMINI_API_KEY', label: 'Gemini API key', hint: 'Generating image inserts — aistudio.google.com' },
   { id: 'jamendo', env: 'JAMENDO_CLIENT_ID', label: 'Jamendo client ID', hint: 'Larger background-music catalogue (optional)' },
 ];

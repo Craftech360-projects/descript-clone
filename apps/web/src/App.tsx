@@ -534,7 +534,14 @@ export default function App() {
         );
         return p;
       }
-      const { jobId } = await api.transcribe(p.id, asr);
+      // The auto-import preference only breaks a tie. If exactly one real key is
+      // configured, it wins regardless of an older saved preference.
+      const preferred = caps.asrModels.find(
+        (model) => model.provider === steps.asrProvider && model.available,
+      );
+      const onlyReal = caps.asrModels.filter((model) => model.available && model.provider !== 'mock');
+      const autoModel = preferred ?? (onlyReal.length === 1 ? onlyReal[0] : undefined);
+      const { jobId } = await api.transcribe(p.id, { ...asr, ...(autoModel ? { model: autoModel.id } : {}) });
       setJob({ id: jobId, progress: -1, stage: 'Transcribing', kind: 'transcribe' });
       await waitForJob(jobId, (j) =>
         setJob({ id: jobId, progress: j.progress, stage: j.stage, kind: 'transcribe' }),
@@ -2032,6 +2039,10 @@ export default function App() {
         autoImport={autoImport}
         onAutoImport={setAutoImport}
         canTranscribe={!!caps?.hasAsr}
+        asrProviders={{
+          elevenlabs: Boolean(caps?.asrModels.some((model) => model.provider === 'elevenlabs' && model.available)),
+          sarvam: Boolean(caps?.asrModels.some((model) => model.provider === 'sarvam' && model.available)),
+        }}
       />
 
       {/* ---- the transcript: the left column, the surface you edit on ---- */}
@@ -2319,6 +2330,7 @@ export default function App() {
         verbatim={project?.verbatim ?? true}
         job={job?.kind === 'transcribe' ? job : null}
         onCancelJob={cancelJob}
+        error={error}
       />
 
       <ExportDialog

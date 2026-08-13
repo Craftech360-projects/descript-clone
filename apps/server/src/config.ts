@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 /** The ElevenLabs speech-to-text endpoint. One call: the body is the audio. */
 export const ASR_ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
+export const SARVAM_ASR_ENDPOINT = 'https://api.sarvam.ai';
 
 /**
  * Transcription models the user can pick between in the Transcribe panel.
@@ -28,13 +29,23 @@ export const ASR_ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
 export const ASR_MODELS = [
   {
     id: 'scribe_v1',
+    provider: 'elevenlabs',
     label: 'ElevenLabs Scribe',
     hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings + diarization. Filler removal needs this.',
     verbatim: true,
     verified: true,
   },
   {
+    id: 'saaras_v3',
+    provider: 'sarvam',
+    label: 'Sarvam Saaras v3',
+    hint: 'Indic-language ASR with verbatim mode. Phrase timings are distributed across words for editing.',
+    verbatim: true,
+    verified: true,
+  },
+  {
     id: 'mock',
+    provider: 'mock',
     label: 'Mock (no API cost)',
     hint: 'Fake words, real timings. Exercises the whole pipeline for free.',
     verbatim: true,
@@ -43,6 +54,7 @@ export const ASR_MODELS = [
 ] as const;
 
 export type AsrModelId = (typeof ASR_MODELS)[number]['id'];
+export type AsrProviderId = (typeof ASR_MODELS)[number]['provider'];
 
 /**
  * The unbuilt tools — Studio Sound, Overdub, Translate, Find clips, Green
@@ -71,6 +83,11 @@ export const CONFIG = {
   // baked in and is never frozen to it.
   get elevenLabsKey() {
     return process.env.ELEVENLABS_API_KEY || process.env.__BAKED_ELEVENLABS_KEY__ || '';
+  },
+
+  /** Sarvam API key for Saaras v3 speech-to-text. Runtime-editable like the ElevenLabs key. */
+  get sarvamApiKey() {
+    return process.env.SARVAM_API_KEY || process.env.__BAKED_SARVAM_KEY__ || '';
   },
 
   /**
@@ -149,7 +166,15 @@ export const CONFIG = {
 
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
+    return (Boolean(this.elevenLabsKey) || Boolean(this.sarvamApiKey)) && process.env.ASR_PROVIDER !== 'mock';
+  },
+
+  hasElevenLabsAsr(): boolean {
     return Boolean(this.elevenLabsKey) && process.env.ASR_PROVIDER !== 'mock';
+  },
+
+  hasSarvamAsr(): boolean {
+    return Boolean(this.sarvamApiKey) && process.env.ASR_PROVIDER !== 'mock';
   },
 
   /** Whether the Grok assistant is configured — it needs an xAI key and nothing else. */

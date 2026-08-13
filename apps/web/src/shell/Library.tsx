@@ -33,6 +33,7 @@ interface Props {
   onAutoImport: (next: AutoImport) => void;
   /** No ASR provider configured — the chain cannot transcribe, so nor can it run. */
   canTranscribe: boolean;
+  asrProviders: { elevenlabs: boolean; sarvam: boolean };
 }
 
 /**
@@ -47,10 +48,11 @@ interface Props {
  * Collapsed by default (Field's `collapsible`), so the drawer still reads as
  * Media / Clips / Speakers until you go looking for this.
  */
-function AutoImportField({ value, onChange, canTranscribe }: {
+function AutoImportField({ value, onChange, canTranscribe, asrProviders }: {
   value: AutoImport;
   onChange: (next: AutoImport) => void;
   canTranscribe: boolean;
+  asrProviders: { elevenlabs: boolean; sarvam: boolean };
 }) {
   const set = <K extends keyof AutoImport>(key: K, v: AutoImport[K]) =>
     onChange({ ...value, [key]: v });
@@ -81,6 +83,18 @@ function AutoImportField({ value, onChange, canTranscribe }: {
           This spends ASR credits on every file you import, without asking first. Switch it off
           if you would rather start transcription by hand.
         </Warn>
+      )}
+      {value.transcribe && asrProviders.elevenlabs && asrProviders.sarvam && (
+        <Field label="Transcription provider">
+          <select
+            value={value.asrProvider}
+            onChange={(e) => set('asrProvider', e.target.value === 'sarvam' ? 'sarvam' : 'elevenlabs')}
+          >
+            <option value="elevenlabs">ElevenLabs Scribe</option>
+            <option value="sarvam">Sarvam Saaras v3</option>
+          </select>
+          <Hint>Used automatically on import while both API keys are available.</Hint>
+        </Field>
       )}
 
       <Check
@@ -176,6 +190,7 @@ export default function Library({
   autoImport,
   onAutoImport,
   canTranscribe,
+  asrProviders,
 }: Props) {
   return (
     <>
@@ -199,7 +214,12 @@ export default function Library({
         * setting that decides what "import" even means — whether the Dashboard's
         * new-project tile puts a file on disk or gets it ready to edit. */}
       <section className="lib-section lib-auto">
-        <AutoImportField value={autoImport} onChange={onAutoImport} canTranscribe={canTranscribe} />
+        <AutoImportField
+          value={autoImport}
+          onChange={onAutoImport}
+          canTranscribe={canTranscribe}
+          asrProviders={asrProviders}
+        />
       </section>
 
       {/* The clips that make up the OPEN project, in play order. This is where a

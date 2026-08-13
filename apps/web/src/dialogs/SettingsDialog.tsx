@@ -11,7 +11,7 @@ interface Props {
 }
 
 /** The order the rows appear in; ids match the server's MANAGED_KEYS. */
-const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'gemini', 'jamendo'];
+const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'sarvam', 'gemini', 'jamendo'];
 
 /**
  * View and update the app's API keys without touching .env or restarting.

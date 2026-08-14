@@ -7,7 +7,7 @@ import {
   type ProjectChat,
   type ToolChip,
 } from '../api.ts';
-import { buildContext, runTool } from '../agent/tools.ts';
+import { buildContext, noteUserMessage, resetUserMessages, runTool } from '../agent/tools.ts';
 
 export type { ChatEntry, ToolChip };
 
@@ -112,6 +112,9 @@ export function resetChat(): void {
   wire = [];
   claudeSessionId = null;
   claudeTurnId = null;
+  // Clearing the chat withdraws any folder the user named in it: use_folder
+  // matches against what they typed, and none of it is on screen any more.
+  resetUserMessages();
   set({ entries: [] });
   void persistChat();
 }
@@ -127,7 +130,11 @@ export function setChatProject(id: string | null, chat?: ProjectChat | null): vo
   claudeSessionId = chat?.claudeSessionId ?? null;
   claudeTurnId = null;
   wire = chat?.wire ? [...chat.wire] : [];
-  set({ entries: chat?.entries ? [...chat.entries] : [] });
+  const entries = chat?.entries ? [...chat.entries] : [];
+  // Reopening a conversation restores what the user typed in it, so a folder
+  // they named yesterday is still theirs to reuse today without retyping it.
+  resetUserMessages(entries.filter((e) => e.role === 'user').map((e) => e.text));
+  set({ entries });
 }
 
 // A single-flight guard: turns finish seconds apart, but Clear-then-send or a fast
@@ -177,6 +184,7 @@ export async function sendMessage(text: string): Promise<void> {
   }
 
   push({ id: newId(), role: 'user', text: trimmed });
+  noteUserMessage(trimmed);
   wire.push({ role: 'user', content: trimmed });
   set({ status: 'busy' });
 
@@ -344,6 +352,7 @@ async function onClaudeMessage(evt: MessageEvent): Promise<void> {
 /** Send a user message over the Claude socket and let the server drive the loop. */
 async function sendViaClaude(text: string): Promise<void> {
   push({ id: newId(), role: 'user', text });
+  noteUserMessage(text);
   set({ status: 'busy' });
   claudeTurnId = null;
   try {

@@ -706,6 +706,22 @@ export const api = {
     fetch: (id: string, url: string, accept?: 'image' | 'audio' | 'video') =>
       post(`/api/projects/${id}/summon/fetch`, { url, accept }).then(json<SummonedFile>),
     op: (id: string, req: SummonOp) => post(`/api/projects/${id}/summon/op`, req).then(json<SummonedFile>),
+    /** Copy one file out of a folder the user shared. Same shape back as `fetch`. */
+    local: (id: string, path: string) =>
+      post(`/api/projects/${id}/summon/local`, { path }).then(json<SummonedFile>),
+  },
+
+  /**
+   * Folders on this machine the assistant may read. None until the user names one
+   * in the chat; the grant lasts for the life of the server process and is never
+   * written to disk. `list` with no dir returns the granted folders themselves.
+   */
+  local: {
+    /** `said` is the user's own messages — the server checks `path` against them. */
+    grant: (path: string, said: string[]) =>
+      post('/api/local/grant', { path, said }).then(json<{ granted: string; folders: string[] }>),
+    list: (dir?: string) =>
+      fetch(`/api/local/media${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`).then(json<LocalListing>),
   },
 
   /**
@@ -719,6 +735,16 @@ export const api = {
       post('/api/settings/keys', patch).then(json<KeysResponse>),
   },
 };
+
+/** One listing of a folder the user shared with the assistant. Names and sizes only. */
+export interface LocalListing {
+  /** The folder listed, or null when listing the shared folders themselves. */
+  dir: string | null;
+  folders: Array<{ name: string; path: string }>;
+  files: Array<{ name: string; path: string; bytes: number }>;
+  /** The folder held more than the listing cap, so this is a partial view. */
+  truncated: boolean;
+}
 
 /** A file the assistant summoned — fetched from the web, or made by an operation. */
 export interface SummonedFile {

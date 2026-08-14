@@ -63,6 +63,13 @@ export interface AgentSnapshot {
   project: { id: string; name: string; durationSec: number; hasVideo: boolean } | null;
   transcribed: boolean;
   asrAvailable: boolean;
+  /**
+   * Whether GEMINI_API_KEY is set, so generate_image will actually work.
+   *
+   * Carried here for the same reason asrAvailable is: the model should decline
+   * before it promises, not after a 503. Nothing else in the app needs to ask.
+   */
+  imageGenAvailable: boolean;
   doc: Doc | null;
   selectedWordIds: string[];
   selectionText: string;
@@ -115,7 +122,15 @@ export interface AgentBridge {
    * rather than returning null so the executor can report why (a missing key and
    * a refused prompt are different problems and need different answers).
    */
-  generateImage(prompt: string): Promise<{ id: string; name: string }>;
+  /**
+   * Generate one picture with Gemini at the project's own aspect ratio and put
+   * it in the image library. `url` is the /media/uploads/… path, so run_media_op
+   * can take the result as source "file" — that is what turns a generated still
+   * into a title card.
+   */
+  generateImage(prompt: string): Promise<{ id: string; name: string; url: string; width: number; height: number }>;
+  /** Save a file the app already holds out to the user, through the browser's download. */
+  downloadFile(url: string, name: string): Promise<string>;
   setMusicVolume(volume: number): Promise<void>;
   removeMusic(): Promise<void>;
   seek(seconds: number): void;
@@ -144,6 +159,16 @@ export interface AgentBridge {
   // indistinguishable from an imported one by the time it lands.
   summonMedia(url: string, attachAs: SummonAttach, name?: string): Promise<string>;
   runMediaOp(op: SummonOpRequest): Promise<string>;
+
+  // ── the user's own disk ─────────────────────────────────────────────────────
+  //
+  // Only inside folders the user named in chat, and only media. `browse` never
+  // returns a file's contents — names, sizes and durations are all the model
+  // ever sees — and `import` copies rather than referencing in place.
+  /** `said` is every message the user typed; the server checks the path against it. */
+  useFolder(path: string, said: string[]): Promise<string>;
+  browseLocalMedia(folder?: string): Promise<string>;
+  importLocalMedia(path: string, attachAs: SummonAttach, name?: string): Promise<string>;
 }
 
 /** Transcription options the model may set. Mirrors the server's AsrOptions. */
@@ -182,6 +207,33 @@ export function setAgentBridge(next: AgentBridge | null): void {
 function requireBridge(): AgentBridge {
   if (!bridge) throw new Error('The editor is not ready yet.');
   return bridge;
+}
+
+// ── what the user actually typed ─────────────────────────────────────────────
+//
+// The browser is the only component that knows which words came from the USER
+// rather than from the model, a transcript, or a tool result — so keeping that
+// record is its job, and deciding what the words mean is not.
+//
+// use_folder therefore sends two things that come from different places: the
+// path (the model's claim) and these messages (the user's own words). The server
+// grants only where the two agree, resolving against the real filesystem — see
+// grantFolder in server summon.ts, which is where the reasoning lives.
+
+/** Every message the user has typed this conversation, verbatim. */
+let userSaid: string[] = [];
+
+/**
+ * Record one user message. Called by the chat store on every user turn, and
+ * again for the whole history when a saved chat is reopened.
+ */
+export function noteUserMessage(text: string): void {
+  userSaid.push(text);
+}
+
+/** Forget the conversation's messages — a new or cleared chat starts with none. */
+export function resetUserMessages(history: string[] = []): void {
+  userSaid = [...history];
 }
 
 /** The doc, or a thrown message the model will relay to the user. */
@@ -239,6 +291,11 @@ export function buildContext(): string {
     );
   } else {
     lines.push('Images: none placed');
+  }
+  // Stated only when OFF. A capability that works needs no announcement, and a
+  // line saying so on every turn is tokens spent to tell the model nothing.
+  if (!s.imageGenAvailable) {
+    lines.push('Image generation: unavailable (no GEMINI_API_KEY on the server)');
   }
   lines.push(
     s.selectionText
@@ -729,6 +786,35 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
 
   // ── images over the picture ─────────────────────────────────────────────────
 
+  generate_image: async (args) => {
+    const prompt = str(args.prompt);
+    if (!prompt) return 'Describe the picture to generate.';
+    const then = str(args.then) ?? 'keep';
+    if (then !== 'keep' && then !== 'download') return 'then must be "keep" or "download".';
+
+    const snap = requireBridge().snapshot();
+    if (!snap.project) return 'No project is open. Open one first — the picture is made at its aspect ratio.';
+    // Checked before the call rather than after the 503, so a missing key reads
+    // as "switched off" rather than as a failure the user should retry.
+    if (!snap.imageGenAvailable) {
+      return 'Image generation is not configured on this server. The user can add a GEMINI_API_KEY under Settings.';
+    }
+
+    let made: { id: string; name: string; url: string; width: number; height: number };
+    try {
+      made = await requireBridge().generateImage(prompt);
+    } catch (e) {
+      return `Could not generate that picture: ${e instanceof Error ? e.message : String(e)}`;
+    }
+
+    const saved = then === 'download' ? ` ${await requireBridge().downloadFile(made.url, made.name)}` : '';
+    return (
+      `Generated "${made.name}" (${made.width}x${made.height}), image id ${made.id}.${saved}` +
+      `\nPlace it on a phrase with add_image_at_words (image_id ${made.id}), or build on it with run_media_op as source "file".` +
+      `\nfile: ${made.url}`
+    );
+  },
+
   add_image_at_words: async (args) => {
     const snap = requireBridge().snapshot();
     const doc = requireDoc(snap);
@@ -964,6 +1050,27 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
   },
 
   // ── improvising ────────────────────────────────────────────────────────────
+
+  use_folder: async (args) => {
+    const path = str(args.path);
+    if (!path) return 'Provide the folder path the user gave.';
+    // The user's own messages travel WITH the request; the server is what
+    // decides whether they name this folder. Nothing is checked here, so there
+    // is only one implementation of the rule to keep correct.
+    return requireBridge().useFolder(path, userSaid);
+  },
+
+  browse_local_media: async (args) => requireBridge().browseLocalMedia(str(args.folder)),
+
+  import_local_media: async (args) => {
+    const path = str(args.path);
+    if (!path) return 'Provide the path of a file from browse_local_media.';
+    const attach = (str(args.attach_as) ?? 'clip') as SummonAttach;
+    if (!['clip', 'music', 'image', 'download', 'keep'].includes(attach)) {
+      return 'attach_as must be clip, music, image, download or keep.';
+    }
+    return requireBridge().importLocalMedia(path, attach, str(args.name));
+  },
 
   summon_media: async (args) => {
     const url = str(args.url);

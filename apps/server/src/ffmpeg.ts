@@ -114,10 +114,26 @@ export async function probeImage(path: string): Promise<{ width: number; height:
       '-show_streams',
       path,
     ]);
-  } catch {
+  } catch (e) {
     // ffprobe exits non-zero on anything it cannot demux at all. That is the
     // "user attached a PDF" case, and it is a 400 rather than a 500.
-    throw new Error('That file could not be read as an image.');
+    //
+    // But it ALSO rejects here when it never ran, and that is a different
+    // sentence entirely: a packaged build whose ffprobe is missing, unsigned or
+    // built for the wrong architecture fails on the first import of anything,
+    // and telling the user their PNG "could not be read as an image" points them
+    // at the one thing that is not wrong. See ToolError. The health check at
+    // /api/health answers this in one request.
+    if (e instanceof ToolError && e.kind === 'spawn') {
+      throw new Error(
+        `ffprobe could not be started, so no file can be imported — this is the app's install, not this picture. ${e.message}`,
+      );
+    }
+    // ffprobe's own last line names what it objected to ("Invalid data found
+    // when processing input", "No such file or directory"). Quote it: the
+    // sentence without it is true of every failure and useful for none.
+    const said = e instanceof ToolError ? lastLine(e.stderr) : '';
+    throw new Error(`That file could not be read as an image${said ? `: ${said}` : '.'}`);
   }
 
   const data = JSON.parse(out);
@@ -501,6 +517,42 @@ function runBinary(bin: string, args: string[]): Promise<Buffer> {
   });
 }
 
+/**
+ * A spawned tool that failed, carrying WHICH WAY it failed.
+ *
+ * The two kinds are opposite problems and a caller that cannot tell them apart
+ * will describe one as the other. `spawn` means the binary never ran — missing,
+ * wrong architecture, not executable, killed by Gatekeeper — which is a fault in
+ * this app's INSTALL and identical for every input. `exit` means it ran, read
+ * the file and refused it, which is a fault in the FILE and specific to that
+ * one. Reported as the same sentence, a broken package reads to the user as a
+ * broken picture, and they go off and re-export the picture.
+ *
+ * `stderr` is kept because it is where the tool says what it actually objected
+ * to; a caller writing a user-facing message should quote it rather than
+ * inventing its own guess. See probeImage.
+ */
+export class ToolError extends Error {
+  // Written out longhand rather than as constructor parameter properties: the
+  // server runs its TypeScript through Node's strip-only loader, which erases
+  // types and refuses anything that would EMIT code. See package.json's scripts.
+  kind: 'spawn' | 'exit';
+  stderr: string;
+
+  constructor(kind: 'spawn' | 'exit', message: string, stderr = '') {
+    super(message);
+    this.name = 'ToolError';
+    this.kind = kind;
+    this.stderr = stderr;
+  }
+}
+
+/** The last thing a tool said before giving up — its complaint, without the banner. */
+function lastLine(text: string): string {
+  const lines = text.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] ?? '';
+}
+
 function run(bin: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(bin, args, { windowsHide: true });
@@ -511,12 +563,12 @@ function run(bin: string, args: string[]): Promise<string> {
     proc.stderr.on('data', (d) => (stderr += d));
 
     proc.on('error', (err) =>
-      reject(new Error(`Could not run ${bin}. Is it on PATH? (${err.message})`)),
+      reject(new ToolError('spawn', `Could not run ${bin}. Is it on PATH? (${err.message})`)),
     );
 
     proc.on('close', (code) => {
       if (code === 0) resolve(stdout);
-      else reject(new Error(`${bin} exited ${code}: ${stderr.trim() || '(no stderr)'}`));
+      else reject(new ToolError('exit', `${bin} exited ${code}: ${stderr.trim() || '(no stderr)'}`, stderr));
     });
   });
 }

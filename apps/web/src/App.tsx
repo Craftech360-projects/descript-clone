@@ -1768,6 +1768,7 @@ export default function App() {
           : null,
         transcribed: Boolean(doc),
         asrAvailable: Boolean(caps?.hasAsr),
+        imageGenAvailable: Boolean(caps?.images?.generate),
         doc,
         selectedWordIds: [...selectedSet],
         selectionText: selectedWords.map((w) => w.text).join(' '),
@@ -1844,7 +1845,19 @@ export default function App() {
         setProject(fresh);
         const added = (fresh.images ?? []).at(-1);
         if (!added) throw new Error('the picture was generated but not saved.');
-        return { id: added.id, name: added.name };
+        return {
+          id: added.id,
+          name: added.name,
+          url: added.sourceUrl,
+          width: added.width,
+          height: added.height,
+        };
+      },
+      downloadFile: async (url, name) => {
+        // The same saveAs the summon path uses, so on the desktop build this
+        // goes through the real Save dialog rather than vanishing into Downloads.
+        saveAs(url, name);
+        return `Saved ${name} — choose where to put it.`;
       },
       setMusicVolume: async (volume) => {
         updateMusic({ volume });
@@ -1955,6 +1968,44 @@ export default function App() {
           return `${made} It is not attached to anything yet; pass its url back as source "file" to build on it, or attach_as to place it.\nfile: ${file.url}`;
         }
         return `${made} ${await attachSummoned(file, attachAs)}`;
+      },
+
+      // ── the user's own disk ──────────────────────────────────────────────
+      //
+      // Read-only and folder-scoped on the server (summon.ts). The listing is
+      // rendered as plain lines rather than JSON because the model has to quote
+      // a path back exactly, and a flat "name — size — path" is the shape it
+      // copies most reliably.
+      useFolder: async (path, said) => {
+        const { granted } = await api.local.grant(path, said);
+        return `Opened ${granted}. You can browse and import media from it for the rest of this session — browse_local_media to see what is in it.`;
+      },
+      browseLocalMedia: async (folder) => {
+        const listing = await api.local.list(folder);
+        if (!listing.dir) {
+          return listing.folders.length
+            ? `Folders the user shared with you (call browse_local_media again with one of these paths to see inside):\n${listing.folders
+                .map((f) => f.path)
+                .join('\n')}`
+            : 'The user has not shared any folders. They can add one under Settings → Folders.';
+        }
+        const lines = [
+          ...listing.folders.map((f) => `[folder] ${f.name} — ${f.path}`),
+          ...listing.files.map((f) => `${f.name} — ${fmtBytes(f.bytes)} — ${f.path}`),
+        ];
+        if (lines.length === 0) return `${listing.dir} has no media in it.`;
+        const more = listing.truncated ? '\n(There were more; this listing was cut short.)' : '';
+        return `In ${listing.dir}:\n${lines.join('\n')}${more}`;
+      },
+      importLocalMedia: async (path, attachAs, name) => {
+        if (!project) return 'No project is open.';
+        setNotice(`Importing ${path.split(/[\\/]/).pop()}…`);
+        const file = await api.summon.local(project.id, path);
+        const got = `Imported ${file.name} (${fmtBytes(file.bytes)}${file.durationSec ? `, ${fmtShort(file.durationSec)}` : ''}) — the original was left where it was.`;
+        if (attachAs === 'keep') {
+          return `${got} It is not attached to anything yet; pass its url back to run_media_op as source "file", or attach it with attach_as.\nfile: ${file.url}`;
+        }
+        return `${got} ${await attachSummoned(file, attachAs, name)}`;
       },
     };
     setAgentBridge(bridge);

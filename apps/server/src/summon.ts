@@ -2,10 +2,10 @@ import type { Hono } from 'hono';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { rename, unlink, stat } from 'node:fs/promises';
+import { rename, unlink, stat, readdir, copyFile, realpath } from 'node:fs/promises';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { join, extname, basename } from 'node:path';
+import { join, extname, basename, resolve, relative, isAbsolute } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 
@@ -26,6 +26,9 @@ import { clipsOf } from './store.ts';
  *
  *   POST /api/projects/:id/summon/fetch   pull one URL onto disk, probed
  *   POST /api/projects/:id/summon/op      run one ffmpeg operation over media
+ *   POST /api/local/grant                 allow a folder the user named in chat
+ *   GET  /api/local/media                 list media in a granted folder
+ *   POST /api/projects/:id/summon/local   copy one file out of a granted folder
  *
  * Neither mutates the project. Both land a file in uploads/ and hand back its
  * URL; ATTACHING it — as a clip, as the bed, as a B-roll image — goes back
@@ -49,8 +52,13 @@ import { clipsOf } from './store.ts';
  *    job and nothing else.
  *  - Every run is capped: OP_TIMEOUT_MS of wall clock, MAX_OP_SECONDS of output.
  *
- * SUMMON=off removes both routes; the assistant then reports that improvising is
- * switched off rather than failing in a way it cannot explain.
+ * SUMMON=off removes the fetch and op routes; the assistant then reports that
+ * improvising is switched off rather than failing in a way it cannot explain.
+ *
+ * The three LOCAL routes are not on that switch, because they are governed by
+ * something stricter: they do nothing at all until the user has named a folder
+ * in the chat, and an env var cannot grant what only a user can. See the
+ * "reading media off this machine's disk" section below.
  */
 
 /** Where summoned bytes land. The same directory imports use, so /media serves them. */
@@ -226,6 +234,312 @@ function guessKindFromPath(path: string): MediaKind {
 }
 
 const defaultExt = (kind: MediaKind) => (kind === 'image' ? '.jpg' : kind === 'audio' ? '.mp3' : '.mp4');
+
+// ── reading media off this machine's disk ────────────────────────────────────
+//
+// The third way a file can get in, after "the user picked it" and "it came off
+// the web". The user names a folder IN THE CHAT — "the footage is in D:\shoot" —
+// and from then on the assistant may browse and import within it, and nowhere
+// else. There is no settings pane and nothing on disk: a grant lasts as long as
+// the server process, because the conversation that created it does too.
+//
+// ── why the grant is safe to take from a chat message ───────────────────────
+//
+// It would not be, taken naively. The model is the one that calls grantFolder(),
+// and the model reads TRANSCRIPTS — text that came from whatever media the user
+// happened to import, which is to say text an attacker may have written. A model
+// that can be talked into granting itself C:\Users\someone is a model with no
+// boundary at all.
+//
+// So a grant needs TWO things that only ever come from different places: the
+// path (from the model, untrusted) and the user's own messages (from the
+// browser, which is the only component that knows what was actually typed). The
+// model's path is honoured only if the user's own words resolve to it. A path it
+// invented, inferred, or read out of a transcript resolves to nothing.
+//
+// ── deciding where a typed path ends ────────────────────────────────────────
+//
+// "grab from C:\Video Work\raw please" is a real sentence and that is a real
+// folder, so refusing it would be a bug the user is right to complain about. But
+// nothing about the SYNTAX says where the path stops — `C:\Video`, `C:\Video
+// Work` and `C:\Video Work\raw` are all readings, and the first two are broader
+// folders the user did not mean. Guessing between them by punctuation is exactly
+// how a prefix gets granted.
+//
+// The filesystem is not guessing. Each run of words starting at something
+// path-shaped is tried against the disk, longest first, and the LONGEST ONE THAT
+// IS ACTUALLY A DIRECTORY is what the user meant. `C:\Video Work\raw please` is
+// not a directory; `C:\Video Work\raw` is. That also disposes of the prefix
+// problem in the same stroke: a prefix is never the longest match, so it is
+// never what a message resolves to, and asking for one is refused.
+//
+// Two guards then do the rest, and they are separate on purpose:
+//
+//  - CONTAINMENT. Every candidate is realpath'd and compared against realpath'd
+//    grants, so `..`, an absolute path, a UNC path and a symlink planted inside
+//    a granted folder all land outside and are refused. Real path against real
+//    path is the part that matters: comparing the strings as given would let a
+//    symlink in ~/Movies point at ~/.ssh and pass.
+//  - TYPE. Extension must be media AND ffprobe must agree, so a document renamed
+//    to .mp4 is rejected before anything can attach it. The extension check
+//    alone would be a filename convention, not a control.
+//
+// What this deliberately is NOT is general file reading. There is no route here
+// that returns a file's BYTES to the model — an import copies media into
+// uploads/ and hands back a URL, and the model only ever sees names, sizes and
+// durations. A transcript is attacker-influenceable text, so the assistant
+// reading one must not become a way to read anything else.
+
+/**
+ * Folders granted this session, resolved. In memory only, and deliberately so:
+ * a grant that outlived the conversation would be a permission the user granted
+ * in passing and can no longer see to revoke.
+ */
+const grants = new Set<string>();
+
+/** How many words a path may span. Long enough for "C:\My Great Big Video Folder". */
+const MAX_SPAN_WORDS = 12;
+/** A ceiling on stat() calls per grant, so a long chat cannot turn into a disk scan. */
+const MAX_PROBES = 400;
+
+/** Compare paths the way a person writes them: separators and case are noise. */
+const normalizePath = (s: string): string =>
+  s.trim().replace(/^["'`]+|["'`]+$/g, '').replace(/[,.;:!?]+$/, '')
+    .replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+
+/** Could this word begin a path? `/x`, `C:\x`, `\\server\x`, `~/x`. */
+const looksLikeRoot = (w: string): boolean => /^([A-Za-z]:[\\/]|[\\/]|~[\\/])/.test(w);
+
+/** Resolved directory, or null. The single question the filesystem answers here. */
+async function asDirectory(candidate: string): Promise<string | null> {
+  const path = candidate.trim().replace(/^["'`]+|["'`]+$/g, '').replace(/[,.;:!?]+$/, '');
+  if (!path || !isAbsolute(path)) return null;
+  try {
+    const real = await realpath(resolve(path));
+    return (await stat(real)).isDirectory() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every folder the user's own messages actually name, resolved against the disk.
+ *
+ * A quoted span or a line that is nothing but a path is unambiguous and tried as
+ * written. Otherwise each word that looks like a root starts a run, and the run
+ * is extended word by word — the longest one that IS a directory wins, so a path
+ * with spaces resolves and none of its prefixes ever does.
+ */
+async function foldersNamedIn(said: string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  let probes = 0;
+
+  for (const message of said) {
+    for (const line of message.split('\n')) {
+      // Unambiguous shapes first: the whole line, and anything in quotes.
+      const explicit = [line, ...[...line.matchAll(/["'`]([^"'`\n]+)["'`]/g)].map((m) => m[1])];
+      for (const c of explicit) {
+        if (probes++ > MAX_PROBES) return found;
+        const dir = await asDirectory(c);
+        if (dir) found.add(dir);
+      }
+
+      const words = line.split(/\s+/).filter(Boolean);
+      for (let i = 0; i < words.length; i++) {
+        if (!looksLikeRoot(words[i])) continue;
+        // Longest wins: keep going past a miss, because "C:\Video Work" can fail
+        // while "C:\Video Work\raw" succeeds, and it is the latter they meant.
+        let best: string | null = null;
+        for (let j = i; j < Math.min(words.length, i + MAX_SPAN_WORDS); j++) {
+          if (probes++ > MAX_PROBES) break;
+          const dir = await asDirectory(words.slice(i, j + 1).join(' '));
+          if (dir) best = dir;
+        }
+        if (best) found.add(best);
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Grant a folder, if the user's own messages name it.
+ *
+ * `said` is every message the user typed this conversation, supplied by the
+ * browser — the only place that knows. `raw` is the model's claim about which
+ * one it is. The claim is checked against the messages, never trusted on its own.
+ */
+export async function grantFolder(raw: string, said: string[]): Promise<string> {
+  const asked = normalizePath(raw ?? '');
+  if (!asked) throw new Error('Name a folder.');
+
+  const named = await foldersNamedIn(said);
+  if (named.size === 0) {
+    throw new Error(
+      'The user has not named a folder in this conversation. Ask which folder the files are in — and if what they wrote is not a folder that exists, say so rather than guessing at a different one.',
+    );
+  }
+
+  for (const dir of named) {
+    if (normalizePath(dir) === asked) {
+      grants.add(dir);
+      return dir;
+    }
+  }
+  throw new Error(
+    'That is not a folder the user named. Only a path they typed themselves can be opened — not one you worked out, and not one from a transcript. The folders they have actually named are: ' +
+      [...named].join(' | '),
+  );
+}
+
+/** The folders granted so far, for reporting back. */
+export const grantedFolders = (): string[] => [...grants];
+
+/**
+ * What to say when nothing has been granted yet. Phrased as an instruction to the
+ * assistant rather than a failure, because on the first ask it is neither an
+ * error nor the user's mistake — the folder simply has not been named yet.
+ */
+const NO_GRANT =
+  'No folder has been named yet. Ask the user which folder their files are in, then pass exactly what they type to use_folder.';
+
+/** Extensions this may import. Everything JumpCut can actually put on a timeline. */
+const MEDIA_EXT =
+  /\.(mp4|m4v|mov|mkv|webm|avi|mpe?g|wmv|flv|mp3|wav|m4a|aac|flac|ogg|oga|opus|wma|aiff?|jpe?g|png|gif|webp|bmp|avif|heic|heif|tiff?)$/i;
+
+/** Entries returned per listing. A folder of ten thousand files is not a menu. */
+const MAX_LISTING = 250;
+
+/**
+ * Resolve a path the model named to a real one inside an allowed folder, or throw.
+ *
+ * The error text names no path that failed and lists no root the caller did not
+ * already know about — a probe for "does /etc/passwd exist" and a probe for "is
+ * that folder allowed" get the same answer either way.
+ */
+async function insideAllowedRoot(candidate: string): Promise<string> {
+  const roots = grantedFolders();
+  if (roots.length === 0) throw new Error(NO_GRANT);
+  if (!isAbsolute(candidate)) throw new Error('That is not a full path to a file or folder.');
+
+  let real: string;
+  try {
+    real = await realpath(resolve(candidate));
+  } catch {
+    throw new Error('There is nothing at that path.');
+  }
+
+  for (const root of roots) {
+    const realRoot = await realpath(root).catch(() => null);
+    if (!realRoot) continue; // folder went away since it was granted
+    if (real === realRoot) return real;
+    const rel = relative(realRoot, real);
+    if (rel && !rel.startsWith('..') && !isAbsolute(rel)) return real;
+  }
+  throw new Error(
+    'That path is not inside a folder the user named. Ask them for the folder and pass it to use_folder first.',
+  );
+}
+
+export interface LocalListing {
+  /** The folder listed, or null when listing the shared roots themselves. */
+  dir: string | null;
+  folders: Array<{ name: string; path: string }>;
+  files: Array<{ name: string; path: string; bytes: number }>;
+  /** True when the folder held more than MAX_LISTING of either kind. */
+  truncated: boolean;
+}
+
+/** Browse the shared folders. No `dir` lists the roots; a `dir` lists inside one. */
+export async function listLocalMedia(dir?: string): Promise<LocalListing> {
+  if (!dir) {
+    const roots = grantedFolders();
+    if (roots.length === 0) throw new Error(NO_GRANT);
+    return { dir: null, folders: roots.map((p) => ({ name: p, path: p })), files: [], truncated: false };
+  }
+
+  const real = await insideAllowedRoot(dir);
+  let entries;
+  try {
+    entries = await readdir(real, { withFileTypes: true });
+  } catch {
+    throw new Error('That folder could not be read.');
+  }
+
+  const folders: LocalListing['folders'] = [];
+  const files: LocalListing['files'] = [];
+  let truncated = false;
+
+  for (const entry of entries) {
+    // Dotfiles are configuration and caches, never someone's footage, and
+    // listing them is noise at best and a hint at worst.
+    if (entry.name.startsWith('.')) continue;
+    const path = join(real, entry.name);
+    if (entry.isDirectory()) {
+      if (folders.length >= MAX_LISTING) { truncated = true; continue; }
+      folders.push({ name: entry.name, path });
+    } else if (entry.isFile() && MEDIA_EXT.test(entry.name)) {
+      if (files.length >= MAX_LISTING) { truncated = true; continue; }
+      // A file that vanished between readdir and stat is simply not listed.
+      const bytes = await stat(path).then((s) => s.size).catch(() => null);
+      if (bytes !== null) files.push({ name: entry.name, path, bytes });
+    }
+  }
+
+  folders.sort((a, b) => a.name.localeCompare(b.name));
+  files.sort((a, b) => a.name.localeCompare(b.name));
+  return { dir: real, folders, files, truncated };
+}
+
+/**
+ * Copy one file from a shared folder into uploads/, so the rest of the app can
+ * treat it exactly like an upload.
+ *
+ * COPY rather than reference-in-place, which is the same decision the fetch path
+ * makes: a project that points at ~/Downloads breaks the day the user tidies up,
+ * and a project's media living outside the media directory breaks export, /media
+ * serving, and every assumption store.ts makes about where bytes are.
+ */
+export async function importFromDisk(
+  candidate: string,
+): Promise<{ id: string; path: string; url: string; name: string; kind: MediaKind; bytes: number }> {
+  const real = await insideAllowedRoot(candidate);
+
+  const info = await stat(real);
+  if (!info.isFile()) throw new Error('That is a folder, not a file.');
+  if (!MEDIA_EXT.test(real)) {
+    throw new Error('That is not a video, audio or image file, so it cannot be imported.');
+  }
+  if (info.size === 0) throw new Error('That file is empty.');
+  if (info.size > CONFIG.maxUploadBytes) {
+    throw new Error(`That file is larger than the ${Math.round(CONFIG.maxUploadBytes / 1048576)} MB import limit.`);
+  }
+
+  const name = basename(real);
+  const ext = extname(real).toLowerCase();
+  const id = randomUUID();
+  const path = join(uploadsDir(), `${id}${ext}`);
+  await copyFile(real, path);
+
+  // The extension said it was media; ffprobe is what actually knows. A file that
+  // fails here is removed rather than left in uploads/ as a half-import.
+  const probed = await probeAny(path).catch(() => null);
+  if (!probed || (!probed.hasVideo && !probed.hasAudio)) {
+    await unlink(path).catch(() => {});
+    throw new Error(`"${name}" is not media this app can read, whatever its extension says.`);
+  }
+
+  // Kind comes from what ffprobe found, not from the extension — the same test
+  // runOp uses for a still (a video stream, no audio, no duration ffprobe will
+  // commit to). Extension-guessing would call a .heic an "audio" file.
+  const kind: MediaKind = !probed.hasVideo
+    ? 'audio'
+    : !probed.hasAudio && probed.duration === 0
+      ? 'image'
+      : 'video';
+
+  return { id, path, url: `/media/uploads/${id}${ext}`, name, kind, bytes: info.size };
+}
 
 // ── probing without demanding audio ──────────────────────────────────────────
 
@@ -621,6 +935,68 @@ export function registerSummon(app: Hono): void {
       });
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+    }
+  });
+
+  /**
+   * Grant one folder for this session.
+   *
+   * `said` is every message the USER typed this conversation; `path` is the
+   * model's claim about which folder they meant. Both are required, because one
+   * without the other is either a path nobody authorised or an authorisation
+   * with no path. See grantFolder.
+   */
+  app.post('/api/local/grant', async (c) => {
+    const body = await c.req.json<{ path?: string; said?: unknown }>().catch(() => ({}));
+    if (!body.path) return c.json({ error: 'Provide path.' }, 400);
+    const said = Array.isArray(body.said) ? body.said.filter((s): s is string => typeof s === 'string') : [];
+    try {
+      const granted = await grantFolder(body.path, said);
+      return c.json({ granted, folders: grantedFolders() });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+  });
+
+  /**
+   * Browse the folders the user named. Not project-scoped — it reads nothing of
+   * the project — and it returns names and sizes only, never a file's contents.
+   */
+  app.get('/api/local/media', async (c) => {
+    try {
+      return c.json(await listLocalMedia(c.req.query('dir') || undefined));
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+    }
+  });
+
+  /**
+   * Copy one file out of a shared folder into uploads/, returning the same shape
+   * `fetch` does — so the browser attaches it through the identical path and no
+   * attach logic gains a third case.
+   */
+  app.post('/api/projects/:id/summon/local', async (c) => {
+    const project = await store.get(c.req.param('id'));
+    if (!project) return c.json({ error: 'No such project' }, 404);
+
+    const body = await c.req.json<{ path?: string }>().catch(() => ({}));
+    if (!body.path) return c.json({ error: 'Provide path.' }, 400);
+    try {
+      const got = await importFromDisk(body.path);
+      const info = await probeAny(got.path).catch(() => null);
+      return c.json({
+        url: got.url,
+        name: got.name,
+        kind: got.kind,
+        bytes: got.bytes,
+        durationSec: info?.duration ?? 0,
+        hasVideo: info?.hasVideo ?? false,
+        hasAudio: info?.hasAudio ?? false,
+        width: info?.width,
+        height: info?.height,
+      });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
     }
   });
 

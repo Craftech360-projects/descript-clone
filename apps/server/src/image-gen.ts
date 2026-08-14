@@ -13,22 +13,24 @@
  * crop. Search could not do that at all: you take the photograph's shape and
  * lose the sides. See nearestAspectRatio in core/image-prompt.ts.
  *
- * ── UNVERIFIED, and where the risk sits ──────────────────────────────────────
+ * ── two details worth knowing ────────────────────────────────────────────────
  *
- * This was written from Google's published documentation WITHOUT a live key to
- * check it against, which is a materially weaker position than the rest of this
- * codebase is written from — the ffmpeg graphs next door were each measured
- * against a real render before being committed. Two specifics:
+ *  1. **The shape is `generationConfig.imageConfig`, and only that.** This file
+ *     originally sent `responseFormat.image` alongside it, on the theory that an
+ *     unrecognised field is ignored so sending both spellings was free. It is
+ *     not: `responseFormat.image` is a REAL field whose `aspectRatio` and
+ *     `imageSize` are enums, so the plain strings we send for `imageConfig`
+ *     ("9:16", "2K") failed validation there and took the whole request down
+ *     with a 400. The same request reported no complaint about `imageConfig` —
+ *     and Google's JSON parser lists every fault in one message, unknown fields
+ *     included — which is what confirms `imageConfig` is both known and correctly
+ *     typed. Do not re-add the other spelling to be safe; it is not safe.
  *
- *  1. **The aspect-ratio field has two documented spellings.** Google's own
- *     pages show `generationConfig.responseFormat.image.aspectRatio`, while
- *     several client libraries report `generationConfig.imageConfig.aspectRatio`.
- *     BOTH are sent below. They are additive and an unrecognised field is
- *     ignored, so sending both costs nothing and sending only the wrong one
- *     costs everything: an out-of-list or unread ratio is SILENTLY rewritten to
- *     1:1 rather than rejected, and a square image dropped into a widescreen
- *     frame looks like a cropping bug rather than an API mistake. Once someone
- *     confirms with a real key, delete the loser.
+ *     What the ratio still cannot do is fail loudly. An out-of-list value is
+ *     SILENTLY rewritten to 1:1 rather than rejected, and a square image dropped
+ *     into a widescreen frame reads as a cropping bug rather than an API
+ *     mistake — hence the snapping in nearestAspectRatio, on our side, where it
+ *     can be tested.
  *  2. **The response is interleaved.** `parts` carries text and image blocks in
  *     whatever order the model emits them, so the image is found by scanning for
  *     the first part with `inlineData` — never `parts[0]`.
@@ -90,8 +92,7 @@ export async function generateImage({ prompt, aspectRatio }: GenerateRequest): P
       // IMAGE alone is not a documented way to suppress that, and the parse
       // below tolerates the text either way.
       responseModalities: ['TEXT', 'IMAGE'],
-      // See the header: two spellings, both sent, until one is confirmed.
-      responseFormat: { image: { aspectRatio, imageSize: IMAGE_SIZE } },
+      // The only spelling that takes these as strings — see the header.
       imageConfig: { aspectRatio, imageSize: IMAGE_SIZE },
     },
   };
@@ -162,8 +163,9 @@ export async function generateImage({ prompt, aspectRatio }: GenerateRequest): P
  * seconds at a glance and it must not carry text — a generated caption competes
  * with the real captions burned on top of it and is the single most obvious
  * "this was made by a machine" tell. The ratio is repeated in words because the
- * structured field is the part this file is least sure of; if it is being
- * ignored, this at least pushes the composition the right way.
+ * structured field decides the CANVAS and not the composition: it can hand back
+ * a 9:16 frame with a 16:9 photograph letterboxed inside it, and saying the shape
+ * out loud is what pushes the subject to fill the tall frame.
  */
 function promptFor(prompt: string, aspectRatio: GeneratedAspectRatio): string {
   return (

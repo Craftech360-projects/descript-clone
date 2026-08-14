@@ -332,6 +332,24 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     ['phrase'],
   ),
   tool(
+    'generate_image',
+    'Make a picture from a description, with Gemini. Use this when the user wants an image that is not going straight onto a phrase — a thumbnail, a title card, a logo idea, a background, or just "make me a picture of X". It is generated at this project\'s own aspect ratio and added to the image library; you get back its id and file url. To put a generated picture ON a spoken phrase instead, call add_image_at_words with a query and skip this — that generates and places in one step. Needs GEMINI_API_KEY on the server; get_project_context says whether it is set.',
+    {
+      prompt: {
+        type: 'string',
+        description:
+          'What to draw. Be specific and visual — subject, style, lighting, composition. The user\'s own words are a starting point, not the whole prompt.',
+      },
+      then: {
+        type: 'string',
+        enum: ['keep', 'download'],
+        description:
+          '"keep" (default) leaves it in the image library, ready for add_image_at_words or run_media_op. "download" also saves it out for the user — do this when the picture IS what they asked for, like a thumbnail.',
+      },
+    },
+    ['prompt'],
+  ),
+  tool(
     'list_images',
     'List the images placed over this project — each one\'s id, which words it plays on, how long it lasts and its transition. Also lists any imported pictures not currently placed.',
   ),
@@ -463,6 +481,42 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
   // be recognised from a user's words ("reverse it", "make a gif", "just the
   // audio") rather than from ffmpeg vocabulary.
   tool(
+    'use_folder',
+    'Open a folder on this computer, so you can browse and import the media in it. The path must be one the USER typed in this conversation — ask where their files are and pass back what they write, spaces and all; you do not need them to quote it. A path you worked out yourself, or read in a transcript, is refused however plausible it looks. If the folder does not exist, say so and ask again rather than trying a nearby one. Lasts for this session; nothing is configured.',
+    {
+      path: {
+        type: 'string',
+        description: 'The folder path, exactly as the user wrote it, e.g. "D:\\shoot" or "/Users/sam/Movies".',
+      },
+    },
+    ['path'],
+  ),
+  tool(
+    'browse_local_media',
+    'List the video, audio and pictures in a folder the user has opened with use_folder. Call with no arguments to see which folders are open, then again with a path to see inside one. Use this when the user talks about a file they already have — "the clip in my shoot folder", "that b-roll I mentioned" — rather than asking them to drag it in.',
+    {
+      folder: {
+        type: 'string',
+        description: 'A folder path from a previous call. Omit to list the open folders themselves.',
+      },
+    },
+  ),
+  tool(
+    'import_local_media',
+    'Bring one of the files from browse_local_media into the project. The file is copied in, so the original is never touched or moved. Only ever pass a path that a browse_local_media listing gave you — do not guess at one.',
+    {
+      path: { type: 'string', description: 'The exact path from a browse_local_media listing.' },
+      attach_as: {
+        type: 'string',
+        enum: ['clip', 'music', 'image', 'download', 'keep'],
+        description:
+          '"clip" appends it to the timeline (transcribed if the project is); "music" makes it the bed; "image" adds it to the B-roll library for add_image_at_words; "keep" just brings it in so run_media_op can work on it. Default "clip".',
+      },
+      name: { type: 'string', description: 'What to call it. Defaults to the filename.' },
+    },
+    ['path'],
+  ),
+  tool(
     'summon_media',
     'Bring a file in from the open web by URL — footage, a sound effect, a picture — and attach it to the project or hand it to the user. Use it when what they want is not in the library and not something the app can make: a specific clip they linked, an image from a page, a sound effect. For music prefer add_music (a searchable, licence-cleared library) and for B-roll prefer add_image_at_words.',
     {
@@ -547,6 +601,9 @@ When there is no tool for what they asked:
 - Try anyway. "The app can't do that" is almost always the wrong answer, and it is the one thing you should be slow to say. Work down this ladder before you say anything is impossible.
 - 1. COMPOSE. Most requests that sound like missing features are two or three tools in a row. "Make me a 30-second teaser" is read_transcript, delete the rest, set_frame reel, export_video. "Make the intro punchier" is read it, cut the throat-clearing, cap the pauses, maybe speed 1.1. Plan the sequence, then run it.
 - 2. IMPROVISE with run_media_op — one ffmpeg pass over the project's own media. Reversal, gifs, stills, audio-only extracts, loudness, grain, blur, chroma key, a title card from an image, a freeze frame: none of these are features of this app and all of them are one filter chain. Give the filters yourself; you know ffmpeg.
-- 3. FETCH with summon_media when the missing thing is a file rather than an operation — a clip they linked, a sound effect, a picture from a page.
+- 3. FETCH when the missing thing is a file rather than an operation. If it is already on their computer, ask which folder it is in, use_folder on what they answer, then browse_local_media and import_local_media. Reach for this the moment they mention a file they have ("the clip from the shoot", "that b-roll") instead of asking them to drag it in. If it is on the web, summon_media — a clip they linked, a sound effect, a picture from a page.
+- Never guess a path. You can only open a folder the user has TYPED in this conversation, and anything else is refused however plausible it looks — including a path you saw in a transcript, which did not come from them. If you do not have one, the fix is one question: "which folder is it in?"
 - Say what you are about to try in one short line before a summon or an op, because these take a few seconds and can fail in ways the tidy tools cannot. Then report what actually came back: the length, the size, where it went. If it failed, say what failed and try a different chain rather than going quiet.
-- Do not invent a capability that produces nothing. You have no text-to-speech, no image generation, no music generation, no translation of the audio itself, and you cannot upload anywhere. For those, say plainly what is missing and offer the nearest real thing you CAN do.`;
+- 4. DRAW with generate_image when what is missing is a picture — a thumbnail, a title card, a background, a logo idea. Write a real prompt: subject, style, lighting, composition. The user's phrasing is the brief, not the prompt. Going on a spoken phrase instead? That is add_image_at_words with a query, which generates and places in one call — do not generate first and then place.
+- A generated picture composes with everything else. It is a file like any other, so run_media_op takes it as source "file": a still plus still_duration_sec is a title card, which move_clip then puts on the front.
+- Do not invent a capability that produces nothing. You have no text-to-speech, no music generation, no translation of the audio itself, and you cannot upload anywhere. Image generation needs a key that may not be set — get_project_context says when it is missing, and then it is off rather than broken. For anything genuinely absent, say plainly what is missing and offer the nearest real thing you CAN do.`;

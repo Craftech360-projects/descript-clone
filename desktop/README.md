@@ -60,30 +60,57 @@ npm run dist
 The installer lands in `desktop/<platform>/dist/`. To smoke-test without
 packaging (opens the app straight from source): `npm start`.
 
-### Mac: which chip you build on matters
+### Mac: the build picks its own architecture
 
-`npm run dist` builds **Apple Silicon (arm64)** and must be run on an Apple
-Silicon Mac. `npm run dist:intel` builds x86_64 for older Intel Macs.
+`npm run dist` builds **Apple Silicon (arm64)**. `npm run dist:intel` builds
+x86_64. Neither cares which chip you build on: each one begins by refetching the
+media tools for its own target, so cross-building the arm64 app from an Intel Mac
+is just `npm run dist`. Electron and `codesign` cross-build without complaint, so
+nothing else needs special handling.
 
-**Building the arm64 app on an Intel Mac works**, with one catch. Electron and
-`codesign` cross-build without complaint, and `ffprobe-static` ships every arch —
-but `ffmpeg-static` downloads a single binary for whatever machine ran
-`npm install`. Left alone, you get an Apple Silicon app carrying an x86_64
-ffmpeg: it launches fine and dies on the first render. `afterPack.cjs` checks
-for exactly this and fails the build rather than shipping it.
+That refetch is not optional, because neither media tool is chosen by the build.
+`ffmpeg-static` downloads a single ffmpeg, and `@ffprobe-installer/ffprobe`
+installs a single platform package — each for whatever machine last ran
+`npm install`. Left to that, an Intel Mac produces an Apple Silicon app carrying
+x86_64 tools: it launches fine and then dies on the first import or the first
+render. `afterPack.cjs` checks both and fails the build rather than shipping it.
 
-So from an Intel Mac, use:
+It takes two npm settings, and they are not interchangeable. `--arch=arm64` is
+what `ffmpeg-static`'s install script reads to pick its download; `--cpu=arm64`
+is what npm's own optional-dependency filter reads to pick which
+`@ffprobe-installer/<platform>-<arch>` package to install. Pass only `--arch` and
+you still get an x64 ffprobe. Both live in the `tools` script, which `dist` and
+`dist:intel` call with their own target:
 
 ```
-npm run dist:arm64-on-intel
+npm run tools -- --arch=arm64 --cpu=arm64
 ```
 
-which refetches ffmpeg for arm64 (`npm_config_arch=arm64`) before packaging.
+> One consequence worth knowing: after a `dist`, this folder's `node_modules`
+> holds the **target's** binaries, not the build machine's. On an Intel Mac that
+> means `npm start` cannot probe or render until you run a bare `npm run tools`
+> to put the local ones back.
 
-> Afterwards this folder's `node_modules` holds an **arm64** ffmpeg, so `npm
-> start` and `npm run dist:intel` will misbehave on that Intel Mac until you run
-> a plain `npm install` to put the x64 binary back. A routine `npm install` also
-> silently reverts it — always go through the script above.
+### Why ffprobe does not come from `ffprobe-static`
+
+`ffprobe-static` looks like the easy answer: one package, a binary for every
+platform, nothing downloaded per machine. It is not. The file it ships at
+`bin/darwin/arm64/ffprobe` is an **x86_64** build — the folder says arm64 and the
+Mach-O header says `CPU_TYPE_X86_64`, which `file` will confirm.
+
+So the Apple Silicon app shipped an Intel ffprobe. It ran under Rosetta 2 on the
+Macs that had Rosetta, and could not be spawned at all on the Macs that did not:
+the app launched, the project list appeared, and every import failed with
+
+```
+Could not run …/app.asar.unpacked/node_modules/ffprobe-static/bin/darwin/arm64/ffprobe.
+Is it on PATH? (spawn … ENOENT)
+```
+
+`@ffprobe-installer/ffprobe` resolves a per-platform package instead
+(`@ffprobe-installer/darwin-arm64`, `win32-x64`, …) whose binary really is the
+advertised architecture, and `afterPack.cjs` now verifies that on every Mac
+build. ffmpeg was never affected — `ffmpeg-static` downloads the right one.
 
 An Intel build does run on Apple Silicon via Rosetta, but macOS shows a
 "Support Ending for Intel-Based Apps" warning and a future macOS will drop it.

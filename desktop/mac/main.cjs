@@ -15,18 +15,56 @@
 
 const { app, BrowserWindow, Menu, dialog, session } = require('electron');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 
 // A native binary cannot execute from inside app.asar, so electron-builder is
-// told to leave ffmpeg-static/ffprobe-static unpacked (see asarUnpack). Rewrite
+// told to leave the ffmpeg/ffprobe packages unpacked (see asarUnpack). Rewrite
 // the require()'d path to the unpacked copy. In dev the path has no "app.asar",
 // so this is a no-op.
+//
+// ffprobe comes from @ffprobe-installer/ffprobe and NOT from ffprobe-static,
+// and the two are not interchangeable. ffprobe-static@3.1.0 ships an x86_64
+// Mach-O at bin/darwin/arm64/ffprobe — the folder says arm64, the file's header
+// says CPU_TYPE_X86_64 (run `file` on it, or read bytes 4-8: 07 00 00 01). So
+// the Apple Silicon build carried an Intel ffprobe, which runs only on a Mac
+// that happens to have Rosetta 2 installed and otherwise cannot be spawned at
+// all: the app launched, and then every import died on the media probe.
+// @ffprobe-installer resolves a per-platform package instead
+// (@ffprobe-installer/darwin-arm64, win32-x64, …), each holding a binary that
+// really is the architecture it advertises.
 const unpacked = (p) => p.replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep);
 const ffmpegPath = unpacked(require('ffmpeg-static'));
-const ffprobePath = unpacked(require('ffprobe-static').path);
+const ffprobePath = unpacked(require('@ffprobe-installer/ffprobe').path);
 
 let serverProc = null;
+
+/**
+ * Fail at launch if a shipped binary did not survive packaging.
+ *
+ * Without this the window opens, the editor looks fine, and the first import
+ * comes back with "Could not run <long path>/ffprobe. Is it on PATH?" — which
+ * reads as a bug in the editor rather than as a broken build. The binaries are
+ * lifted out of the asar by path (see asarUnpack), so any change to these two
+ * dependencies can quietly stop matching; this is the check that says so.
+ */
+function binariesPresent() {
+  const missing = [
+    ['ffmpeg', ffmpegPath],
+    ['ffprobe', ffprobePath],
+  ].filter(([, bin]) => !fs.existsSync(bin));
+
+  if (missing.length === 0) return true;
+
+  dialog.showErrorBox(
+    'Broken installation',
+    `This build is missing ${missing.map(([name]) => name).join(' and ')}.\n\n` +
+      `${missing.map(([, bin]) => bin).join('\n')}\n\n` +
+      'Reinstall the app. If you built it yourself, check "asarUnpack" in package.json.',
+  );
+  return false;
+}
 
 /** Ask the OS for a free port, so we never collide with a running dev server. */
 function freePort() {
@@ -95,6 +133,10 @@ async function waitForServer(port, timeoutMs = 20000) {
 
 async function main() {
   await app.whenReady();
+  if (!binariesPresent()) {
+    app.quit();
+    return;
+  }
   const userData = app.getPath('userData');
   const port = await freePort();
   startServer(port, userData);

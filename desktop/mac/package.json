@@ -9,13 +9,13 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --mac --arm64",
-    "dist:intel": "npm run build && electron-builder --mac --x64",
-    "dist:arm64-on-intel": "npm_config_arch=arm64 npm install ffmpeg-static --force && npm run dist"
+    "dist": "npm run tools -- --arch=arm64 --cpu=arm64 && npm run build && electron-builder --mac --arm64",
+    "dist:intel": "npm run tools -- --arch=x64 --cpu=x64 && npm run build && electron-builder --mac --x64",
+    "tools": "npm install --force ffmpeg-static @ffprobe-installer/ffprobe"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.3.0",
-    "ffprobe-static": "^3.1.0"
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "ffmpeg-static": "^5.3.0"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -41,7 +41,7 @@
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
-      "node_modules/ffprobe-static/**"
+      "node_modules/@ffprobe-installer/**"
     ],
     "mac": {
       "target": "dmg",

@@ -12,8 +12,8 @@
     "dist": "npm run build && electron-builder --win"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.2.0",
-    "ffprobe-static": "^3.1.0"
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "ffmpeg-static": "^5.2.0"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -28,7 +28,7 @@
     "extraResources": [{ "from": "resources", "to": "." }],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
-      "node_modules/ffprobe-static/**"
+      "node_modules/@ffprobe-installer/**"
     ],
     "win": {
       "target": "nsis"

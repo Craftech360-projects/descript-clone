@@ -7,16 +7,36 @@
  * Run automatically by `npm run dist`. Identical in desktop/win and desktop/mac.
  * Requires `npm install` to have been run at the repo root, so esbuild can
  * resolve the server's imports (hono, @hono/node-server) from the workspace.
+ *
+ * Takes the target from --platform= and --arch=, defaulting to this machine.
+ * That only matters for the one native binary we ship (see the SDK section
+ * below), and `npm run dist` passes the same arch it hands electron-builder.
  */
 import { build } from 'esbuild';
-import { execSync } from 'node:child_process';
-import { cpSync, rmSync, mkdirSync, readdirSync } from 'node:fs';
+import { execSync, execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..', '..');
 const out = join(here, 'resources');
+
+/** `--name=value` off the command line, or `fallback` when it was not passed. */
+const flag = (name, fallback) =>
+  process.argv.slice(2).find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
+
+const targetPlatform = flag('platform', process.platform);
+const targetArch = flag('arch', process.arch);
 
 /**
  * The ElevenLabs key is baked into the shipped app: an env var wins, otherwise
@@ -75,24 +95,77 @@ await build({
 });
 
 // Ship the SDK beside the bundle so its `import '@anthropic-ai/claude-agent-sdk'`
-// resolves at runtime, and its native binary package (claude.exe / claude) sits
-// on disk. resources/ is copied verbatim by electron-builder's extraResources and
-// is NOT packed into the asar, so the binary stays executable. We copy every
-// claude-agent-sdk* dir present — the SDK proper plus whichever platform packages
-// this machine's `npm install` fetched (win32-x64 here, darwin-* on a Mac).
-console.log('• copying Claude Agent SDK → resources/node_modules');
+// resolves at runtime, and so the native CLI it spawns sits on disk. resources/
+// is copied verbatim by electron-builder's extraResources and is NOT packed into
+// the asar, so the binary stays executable.
+//
+// That CLI is a per-platform package — @anthropic-ai/claude-agent-sdk-darwin-arm64,
+// -win32-x64, and so on — pinned to the SDK's exact version and gated by `os`/`cpu`,
+// so a plain `npm install` only ever fetches the BUILD MACHINE's. This step used to
+// copy whichever ones happened to be in node_modules, which is how an Intel Mac
+// produced an Apple Silicon app carrying the darwin-x64 CLI: the app launched, the
+// editor worked, and every message to the assistant came back "Claude's local CLI
+// isn't available", because agent-claude.ts looks up -darwin-arm64 and there was
+// nothing there. The same shape as the ffmpeg/ffprobe trap, one layer further out.
+//
+// So name the target rather than trust the machine, and when this machine does not
+// have that package, fetch it with `npm pack` — which downloads a tarball without
+// consulting os/cpu, and so can pull a platform this one cannot install.
 const sdkScope = join(repo, 'node_modules', '@anthropic-ai');
 const sdkDst = join(out, 'node_modules', '@anthropic-ai');
-const sdkDirs = readdirSync(sdkScope).filter((n) => n.startsWith('claude-agent-sdk'));
-if (!sdkDirs.some((n) => n === 'claude-agent-sdk')) {
-  throw new Error('@anthropic-ai/claude-agent-sdk not found in node_modules — run `npm install` at the repo root first.');
+if (!existsSync(join(sdkScope, 'claude-agent-sdk'))) {
+  throw new Error(
+    '@anthropic-ai/claude-agent-sdk not found in node_modules — run `npm install` at the repo root first.',
+  );
 }
-if (!sdkDirs.some((n) => n.startsWith('claude-agent-sdk-'))) {
-  throw new Error('No native claude-agent-sdk-<platform> package installed — run `npm install` WITHOUT --omit=optional so the CLI binary ships.');
+const sdkVersion = JSON.parse(
+  readFileSync(join(sdkScope, 'claude-agent-sdk', 'package.json'), 'utf8'),
+).version;
+const native = `claude-agent-sdk-${targetPlatform}-${targetArch}`;
+const cli = targetPlatform === 'win32' ? 'claude.exe' : 'claude';
+
+console.log(`• copying Claude Agent SDK ${sdkVersion} → resources/node_modules`);
+cpSync(join(sdkScope, 'claude-agent-sdk'), join(sdkDst, 'claude-agent-sdk'), { recursive: true });
+
+if (existsSync(join(sdkScope, native, cli))) {
+  console.log(`• copying ${native} (already installed here)`);
+  cpSync(join(sdkScope, native), join(sdkDst, native), { recursive: true });
+} else {
+  // A quarter of a gigabyte over the wire, so this is slow. It only happens when
+  // building for a platform other than this one.
+  console.log(`• fetching ${native}@${sdkVersion} (not installed here)`);
+  const tmp = mkdtempSync(join(tmpdir(), 'jumpcut-sdk-'));
+  try {
+    // cwd rather than --pack-destination, so no path has to survive the shell.
+    const tgz = execSync(`npm pack @anthropic-ai/${native}@${sdkVersion} --silent`, {
+      cwd: tmp,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+    }).trim();
+    execFileSync('tar', ['-xzf', tgz], { cwd: tmp });
+    cpSync(join(tmp, 'package'), join(sdkDst, native), { recursive: true });
+  } catch (err) {
+    // Offline, or a registry that will not serve this platform. Worth naming,
+    // because the raw npm failure does not say what the build was trying to do.
+    throw new Error(
+      `Could not fetch ${native}@${sdkVersion}, the Claude CLI for this target.\n` +
+        `The build machine does not have it installed, so it had to come from the\n` +
+        `registry. Check the network, or build on a ${targetArch} machine.\n\n` +
+        String(err?.message ?? err),
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
-for (const name of sdkDirs) {
-  cpSync(join(sdkScope, name), join(sdkDst, name), { recursive: true });
-}
+
+// cpSync and electron-builder both copy modes verbatim, so the execute bit has
+// to be right this far back. The tarball records 0755 and npm honours it, but a
+// stray umask or an unpack on a filesystem without the bit would drop it, and a
+// CLI that cannot be executed fails exactly the way a missing one does. Setting
+// it costs nothing. (This does assume a Unix host — cross-building the Mac app
+// from Windows would need the bit restored some other way, but electron-builder
+// cannot produce a signed .app there anyway.)
+if (targetPlatform !== 'win32') chmodSync(join(sdkDst, native, cli), 0o755);
 
 console.log('• building web app (vite)');
 execSync('npm run build --workspace apps/web', { cwd: repo, stdio: 'inherit' });

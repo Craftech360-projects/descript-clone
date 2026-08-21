@@ -32,7 +32,10 @@ Neither folder reimplements the app. At build time each one:
    into one self-contained `resources/server.mjs` with esbuild. Node can't run
    the raw `.ts` sources inside Electron, so they're compiled ahead of time.
 2. **Builds the web UI** (`apps/web`, Vite) into `resources/web/`.
-3. Lets `electron-builder` wrap `main.cjs` + those resources + a bundled
+3. **Copies the Claude Agent SDK** into `resources/node_modules/`, together with
+   the native `claude` CLI it spawns for the assistant. The SDK is the one import
+   left out of the bundle, because it locates that CLI relative to its own file.
+4. Lets `electron-builder` wrap `main.cjs` + those resources + a bundled
    **ffmpeg/ffprobe** into an installer.
 
 At runtime, `main.cjs` starts `server.mjs` as a background Node process on a free
@@ -63,33 +66,53 @@ packaging (opens the app straight from source): `npm start`.
 ### Mac: the build picks its own architecture
 
 `npm run dist` builds **Apple Silicon (arm64)**. `npm run dist:intel` builds
-x86_64. Neither cares which chip you build on: each one begins by refetching the
-media tools for its own target, so cross-building the arm64 app from an Intel Mac
-is just `npm run dist`. Electron and `codesign` cross-build without complaint, so
-nothing else needs special handling.
+x86_64. Neither cares which chip you build on: each one begins by refetching for
+its own target, so cross-building the arm64 app from an Intel Mac is just
+`npm run dist`. Electron and `codesign` cross-build without complaint, so nothing
+else needs special handling.
 
-That refetch is not optional, because neither media tool is chosen by the build.
-`ffmpeg-static` downloads a single ffmpeg, and `@ffprobe-installer/ffprobe`
-installs a single platform package — each for whatever machine last ran
-`npm install`. Left to that, an Intel Mac produces an Apple Silicon app carrying
-x86_64 tools: it launches fine and then dies on the first import or the first
-render. `afterPack.cjs` checks both and fails the build rather than shipping it.
+That refetch is not optional, because **the app ships three native binaries and
+the build chooses none of them**. Each is fetched for whatever machine asked for
+it, and the packager copies whatever it finds:
 
-It takes two npm settings, and they are not interchangeable. `--arch=arm64` is
-what `ffmpeg-static`'s install script reads to pick its download; `--cpu=arm64`
-is what npm's own optional-dependency filter reads to pick which
-`@ffprobe-installer/<platform>-<arch>` package to install. Pass only `--arch` and
-you still get an x64 ffprobe. Both live in the `tools` script, which `dist` and
-`dist:intel` call with their own target:
+| Binary | Comes from | Fetched by |
+| ------ | ---------- | ---------- |
+| `ffmpeg` | `ffmpeg-static` (one download per machine) | `npm run tools` |
+| `ffprobe` | `@ffprobe-installer/darwin-<arch>` | `npm run tools` |
+| `claude` | `@anthropic-ai/claude-agent-sdk-darwin-<arch>` | `build.mjs` |
+
+Left alone, an Intel Mac therefore produces an Apple Silicon app with x86_64
+tools inside. It launches fine, the editor looks right, and then each piece fails
+separately — on the first import, the first render, and the first message to the
+assistant — with three errors that read as three unrelated bugs. `afterPack.cjs`
+checks all three and fails the build rather than shipping it.
+
+The media tools take two npm settings, and they are not interchangeable.
+`--arch=arm64` is what `ffmpeg-static`'s install script reads to pick its
+download; `--cpu=arm64` is what npm's own optional-dependency filter reads to
+pick which `@ffprobe-installer/<platform>-<arch>` package to install. Pass only
+`--arch` and you still get an x64 ffprobe. Both live in the `tools` script, which
+`dist` and `dist:intel` call with their own target:
 
 ```
 npm run tools -- --arch=arm64 --cpu=arm64
 ```
 
+The `claude` CLI is handled separately because it lives in the **repo root**
+`node_modules`, not this folder's, so `tools` cannot reach it. `build.mjs` takes
+the target instead, and fetches that platform's package itself when the build
+machine does not have it — with `npm pack`, which downloads a tarball without
+consulting `os`/`cpu` and so can pull a platform npm would refuse to install:
+
+```
+npm run build -- --platform=darwin --arch=arm64
+```
+
 > One consequence worth knowing: after a `dist`, this folder's `node_modules`
-> holds the **target's** binaries, not the build machine's. On an Intel Mac that
-> means `npm start` cannot probe or render until you run a bare `npm run tools`
-> to put the local ones back.
+> holds the **target's** media tools, not the build machine's. On an Intel Mac
+> that means `npm start` cannot probe or render until you run a bare
+> `npm run tools` to put the local ones back. The `claude` CLI is unaffected —
+> it is fetched into the build output, never into `node_modules`.
 
 ### Why ffprobe does not come from `ffprobe-static`
 
@@ -115,6 +138,29 @@ build. ffmpeg was never affected — `ffmpeg-static` downloads the right one.
 An Intel build does run on Apple Silicon via Rosetta, but macOS shows a
 "Support Ending for Intel-Based Apps" warning and a future macOS will drop it.
 Build arm64 for M-series machines.
+
+### When the assistant says its CLI isn't available
+
+```
+Claude's local CLI isn't available. Fix any one of these: run `npm install`
+(without --omit=optional) in the app folder so the platform binary installs;
+install Claude Code so it's on your PATH; or set CLAUDE_CODE_EXECUTABLE to a
+claude binary.
+```
+
+That message comes from `apps/server/src/agent-claude.ts`, and in a **packaged**
+app it means the shipped CLI is not the one this Mac needs. The SDK spawns a
+binary from a per-platform package pinned to its exact version, and
+`agent-claude.ts` looks it up as
+`@anthropic-ai/claude-agent-sdk-darwin-${process.arch}`. An arm64 app built on an
+Intel Mac used to carry `darwin-x64`, so that lookup found nothing, the PATH
+fallback found nothing either (an end user has no Claude Code install), and every
+message came back with the text above. The rest of the app was unaffected, which
+is what made it look like an assistant bug rather than a packaging one.
+
+The fix is the arch handling described above — `npm run dist` now names its
+target and `afterPack.cjs` verifies the slice. In **dev** the same message means
+what it says: run `npm install` at the repo root without `--omit=optional`.
 
 ## The ElevenLabs key
 

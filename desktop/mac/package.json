@@ -9,8 +9,8 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
-    "dist": "npm run tools -- --arch=arm64 --cpu=arm64 && npm run build && electron-builder --mac --arm64",
-    "dist:intel": "npm run tools -- --arch=x64 --cpu=x64 && npm run build && electron-builder --mac --x64",
+    "dist": "npm run tools -- --arch=arm64 --cpu=arm64 && npm run build -- --platform=darwin --arch=arm64 && electron-builder --mac --arm64",
+    "dist:intel": "npm run tools -- --arch=x64 --cpu=x64 && npm run build -- --platform=darwin --arch=x64 && electron-builder --mac --x64",
     "tools": "npm install --force ffmpeg-static @ffprobe-installer/ffprobe"
   },
   "dependencies": {

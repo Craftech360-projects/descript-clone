@@ -2094,6 +2094,33 @@ export default function App() {
        * music on" and wrong when they say "give me more options" — and a bed is
        * a taste decision, so a shortlist is the honest default.
        */
+      readWebpage: async (url) => api.readPage(url),
+
+      listFolders: async () => {
+        const list = await api.folders.list();
+        setFolders(list);
+        return list.map((f) => ({
+          id: f.id,
+          name: f.name,
+          hasMemory: Boolean(f.brief.trim()),
+          memory: f.brief,
+          projects: library.filter((p) => p.folderId === f.id).length,
+        }));
+      },
+
+      setFolderMemory: async (folderId, memory) => {
+        // Default to the folder in front of the user: "write the memory for this
+        // folder" is the common phrasing, and making them name an id they cannot
+        // see would be a worse tool.
+        const id = folderId || (project ? project.folderId : openFolderId) || '';
+        if (!id) {
+          return 'No folder is in view. Open a folder first, or pass folder_id from list_folders.';
+        }
+        const updated = await api.folders.update(id, { brief: memory });
+        await loadFolders();
+        return `Memory saved on "${updated.name}" (${memory.length} characters). Every title and description for that folder is written against it from now on.`;
+      },
+
       searchMusic: async (query, instrumental, limit) => {
         const provider = caps?.musicProviders?.[0];
         const run = (q: string) => api.music.search(q, { instrumental, provider });

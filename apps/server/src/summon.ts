@@ -92,7 +92,7 @@ const MAX_REDIRECTS = 3;
  * actually needs. Every redirect hop is re-checked: a public host that 302s to
  * 169.254.169.254 is the standard way past a check done only on the first URL.
  */
-async function assertPublicUrl(raw: string): Promise<URL> {
+export async function assertPublicUrl(raw: string): Promise<URL> {
   let url: URL;
   try {
     url = new URL(raw);

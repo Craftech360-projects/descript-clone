@@ -25,6 +25,7 @@ import { registerSummon } from './summon.ts';
 import { registerSocial } from './social.ts';
 import * as folders from './folders.ts';
 import * as preferences from './preferences.ts';
+import { readPage } from './read-page.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
 import { captionImagesReady } from './caption-image.ts';
@@ -143,6 +144,23 @@ app.use(
  * The model especially: it was in-memory only, so a reload put you back on the
  * default without saying so.
  */
+/**
+ * Read a web page's text, for the assistant.
+ *
+ * The address comes from a chat message, so it is untrusted input aimed at this
+ * server's network position — `readPage` runs it through the same public-address
+ * guard the media fetch uses before a byte is requested.
+ */
+app.post('/api/read-page', async (c) => {
+  const { url } = await c.req.json<{ url?: string }>().catch(() => ({ url: '' }));
+  if (!url?.trim()) return c.json({ error: 'Give a URL to read.' }, 400);
+  try {
+    return c.json(await readPage(url.trim()));
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
 app.get('/api/preferences', (c) => c.json(preferences.get()));
 
 app.patch('/api/preferences', async (c) => {

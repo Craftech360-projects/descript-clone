@@ -466,6 +466,12 @@ export const api = {
   // response would tell refreshCaps the ASR key is still missing right after the
   // user added it, so the on-import chain would keep refusing to transcribe.
   capabilities: () => fetch('/api/capabilities', { cache: 'no-store' }).then(json<Capabilities>),
+  /** A web page's text, for the assistant. Guarded server-side against private addresses. */
+  readPage: (url: string) =>
+    post('/api/read-page', { url }).then(
+      json<{ url: string; title: string; text: string; truncated: boolean }>,
+    ),
+
   preferences: {
     get: () => fetch('/api/preferences').then(json<{ model: string; socialTarget: string; safeArea: string }>),
     patch: (patch: Partial<{ model: string; socialTarget: string; safeArea: string }>) =>

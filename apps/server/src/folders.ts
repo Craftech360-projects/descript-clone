@@ -23,7 +23,7 @@
  * these, never thousands, and the whole set is read on every listing.
  */
 
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -41,12 +41,37 @@ export interface Folder {
   updatedAt: string;
 }
 
-const file = () => join(CONFIG.mediaDir, 'folders.json');
+const file = () => join(CONFIG.dataDir, 'folders.json');
+/** Where this used to live, back when it was web-readable. See init(). */
+const legacyFile = () => join(CONFIG.mediaDir, 'folders.json');
 
 let cache: Folder[] | null = null;
 
 export async function init(): Promise<void> {
   await mkdir(dirname(file()), { recursive: true }).catch(() => {});
+
+  /**
+   * Move an existing folders.json out of the media directory.
+   *
+   * It was written there first, which put every folder memory at
+   * /media/folders.json — served statically, so a user's private notes were
+   * downloadable. Migrating rather than starting fresh, because those notes are
+   * the whole point of the feature and losing them to fix a path would be a
+   * worse bug than the one being fixed.
+   */
+  try {
+    const legacy = await readFile(legacyFile(), 'utf8');
+    let exists = true;
+    try { await readFile(file(), 'utf8'); } catch { exists = false; }
+    if (!exists) {
+      await writeFile(file(), legacy, { mode: 0o600 });
+      console.log('folders migrated out of the web-served media directory');
+    }
+    await unlink(legacyFile()).catch(() => {});
+  } catch {
+    // No legacy file. The normal case after the first run.
+  }
+
   cache = await read();
 }
 
@@ -72,7 +97,8 @@ async function flush(list: Folder[]): Promise<void> {
   cache = list;
   const target = file();
   const tmp = `${target}.tmp`;
-  await writeFile(tmp, JSON.stringify(list, null, 2), 'utf8');
+  // 0600 for the same reason the secrets file is: these are personal notes.
+  await writeFile(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
   await rename(tmp, target);
 }
 

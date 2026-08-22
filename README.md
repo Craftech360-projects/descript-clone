@@ -54,6 +54,40 @@ On import; when only one is set, automatic import uses that provider.
 Requires `ffmpeg` and `ffprobe` on PATH, and Node 24+ (it runs TypeScript directly,
 no build step).
 
+## Where your things are kept
+
+Two directories, and the split is not tidiness — it is what is reachable from a
+browser.
+
+```
+media/          SERVED at /media. The browser fetches these directly.
+  uploads/      your source files
+  renders/      finished exports
+  posters/      dashboard cover frames
+  thumbs/       filmstrip sheets
+  projects/     one .json per project: transcript, edit, settings
+  jobs/         in-flight and finished job records
+  fonts/        imported caption faces
+  tmp/          scratch: caption tiles, single frames. Safe to delete.
+
+data/           NOT served. Only the server reads it. Mode 0600.
+  folders.json  your folders and the memory written on each
+  preferences.json  which model Jumpy uses, and other install-level choices
+
+.jumpcut-secrets.json   API keys, at the repo root, also unserved
+```
+
+`MEDIA_DIR` and `DATA_DIR` move either one — point them at a mounted volume in a
+container, because the defaults sit inside the source tree.
+
+**Why `data/` exists at all.** Folder memories were first written to
+`media/folders.json`, which put a user's private notes at `/media/folders.json`
+— downloadable by anything that could reach the server. Media is what the
+browser must fetch; data is what only the server reads. An existing
+`media/folders.json` is migrated to `data/` on the next start.
+
+Everything survives a restart: projects, folders, memories, and Jumpy's model.
+
 ## How it works
 
 The whole product is one idea:

@@ -2909,7 +2909,17 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   border-bottom: 1px solid var(--line-soft);
   font-size: var(--t-base); color: var(--text);
 }
-.fab-model { font-family: var(--font-mono); font-size: var(--t-micro); color: var(--faint); }
+.fab-model {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--dim);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 2px var(--s-1);
+  max-width: 12rem;
+}
+.fab-model:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
 .fab-scroll { flex: 1; overflow-y: auto; padding: var(--s-3) var(--s-4); display: grid; gap: var(--s-3); }
 .fab-empty, .fab-busy { margin: 0; font-size: var(--t-ui); color: var(--faint); line-height: var(--lh-normal); }
 .fab-msg { font-size: var(--t-base); line-height: var(--lh-normal); }

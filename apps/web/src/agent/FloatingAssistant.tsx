@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import Icon from '../ui/Icon.tsx';
 import Markdown from './Markdown.tsx';
-import { initAgent, sendMessage, useAgent } from '../store/agent.ts';
+import { initAgent, sendMessage, setModel, useAgent } from '../store/agent.ts';
 
 /**
  * The assistant, reachable from anywhere.
@@ -32,7 +32,7 @@ export default function FloatingAssistant(p: {
   defaultModel: string;
   onOpenSettings: () => void;
 }) {
-  const { entries, status, model } = useAgent();
+  const { entries, status, model, models, catalogue } = useAgent();
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -93,7 +93,27 @@ export default function FloatingAssistant(p: {
         <div className="fab-panel" role="dialog" aria-label="Jumpy">
           <div className="fab-head">
             <strong>Jumpy</strong>
-            <span className="fab-model">{model ? model.replace(/^local:/, '') : 'no model'}</span>
+            {/* The picker lives HERE, not only in a tab three clicks away. The
+                model is the single biggest thing that changes what Jumpy can
+                do — a local one never touches the network, a hosted one is
+                stronger at long tool chains — so it belongs where the work is.
+                The choice is remembered across reloads. */}
+            <select
+              className="fab-model"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              aria-label="Model Jumpy uses"
+              title={catalogue.find((c) => c.id === model)?.hint}
+            >
+              {(models.includes(model) ? models : [model, ...models]).filter(Boolean).map((m) => {
+                const c = catalogue.find((x) => x.id === m);
+                return (
+                  <option key={m} value={m} title={c?.hint}>
+                    {c ? `${c.label}${c.where === 'On this machine' ? ' · offline' : ''}` : m}
+                  </option>
+                );
+              })}
+            </select>
           </div>
 
           <div className="fab-scroll" ref={scrollRef}>

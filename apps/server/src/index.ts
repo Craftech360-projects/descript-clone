@@ -24,6 +24,7 @@ import { registerClaudeAgent } from './agent-claude.ts';
 import { registerSummon } from './summon.ts';
 import { registerSocial } from './social.ts';
 import * as folders from './folders.ts';
+import * as preferences from './preferences.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
 import { captionImagesReady } from './caption-image.ts';
@@ -102,6 +103,7 @@ await store.init();
 await jobs.init();
 await fonts.init();
 await folders.init();
+await preferences.init();
 
 const app = new Hono();
 
@@ -135,6 +137,19 @@ app.use(
  * Liveness + dependency check. Reports 503 when ffmpeg is missing, so an
  * orchestrator refuses to route to a container that cannot do the job.
  */
+/**
+ * Choices that belong to this installation rather than to a browser tab.
+ *
+ * The model especially: it was in-memory only, so a reload put you back on the
+ * default without saying so.
+ */
+app.get('/api/preferences', (c) => c.json(preferences.get()));
+
+app.patch('/api/preferences', async (c) => {
+  const body = await c.req.json<Partial<import('./preferences.ts').Preferences>>().catch(() => ({}));
+  return c.json(await preferences.patch(body));
+});
+
 app.get('/api/health', async (c) => {
   const tools = await checkTools();
   const ok = Boolean(tools.ffmpeg && tools.ffprobe);

@@ -252,6 +252,22 @@ export const CONFIG = {
   mediaDir: process.env.MEDIA_DIR ?? fileURLToPath(new URL('../../../media/', import.meta.url)),
 
   /**
+   * Where the app's own state lives — everything that is NOT media.
+   *
+   * Separate from mediaDir for one reason, and it is not tidiness: mediaDir is
+   * served statically at /media so the browser can fetch uploads, posters and
+   * renders. Anything written there is downloadable by anyone who can reach the
+   * server. Folder memories were briefly kept in media/folders.json and were
+   * readable at /media/folders.json — a user's private notes about their family,
+   * served over HTTP. `settings.ts` documents this same trap for API keys.
+   *
+   * So: media is what the browser must fetch; data is what only the server
+   * reads. DATA_DIR points it at a mounted volume in a container, for the same
+   * reason MEDIA_DIR exists.
+   */
+  dataDir: process.env.DATA_DIR ?? fileURLToPath(new URL('../../../data/', import.meta.url)),
+
+  /**
    * Serve the built web app from this server when set, so one container is the
    * whole product. Unset in dev, where Vite serves the UI and proxies /api here.
    */

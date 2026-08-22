@@ -134,7 +134,7 @@ export default function SettingsDialog({ open, onClose, onSaved }: Props) {
                 {k.configured && (
                   <button
                     className="set-clear"
-                    onClick={() => setDraft(id, cleared ? (undefined as unknown as string) : '')}
+                    onClick={() => toggleClear(id, cleared)}
                     disabled={busy}
                     title="Remove this key on save"
                   >

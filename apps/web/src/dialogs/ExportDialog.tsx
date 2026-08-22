@@ -52,7 +52,11 @@ export default function ExportDialog(p: Props) {
       footer={
         <>
           <button onClick={p.onClose} disabled={rendering}>Cancel</button>
-          <button className="primary" onClick={p.onRender} disabled={rendering || nothingLeft}>
+          {/* Any in-flight work blocks a render, not just another render. The
+              sibling caption button below already reads `p.busy`; this one only
+              knew about renders, so Render stayed clickable while a caption
+              export was running and two jobs could be started at once. */}
+          <button className="primary" onClick={p.onRender} disabled={!!p.busy || nothingLeft}>
             {rendering ? 'Rendering…' : 'Render video'}
           </button>
         </>

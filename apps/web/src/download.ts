@@ -71,5 +71,8 @@ export function saveTextAs(content: string, filename: string, mime = 'text/plain
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   saveAs(url, filename);
-  URL.revokeObjectURL(url);
+  // Revoked on a timer, not on the next line. Chrome starts the download
+  // synchronously so it survives an immediate revoke; Firefox and Safari
+  // historically do not, and the file simply never arrives.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

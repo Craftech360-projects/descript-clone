@@ -101,7 +101,6 @@ interface Props {
   onRemoveFillers: () => void;
   onRemoveRetakes: () => void;
   onRestoreAll: () => void;
-  onRetranscribe: () => void;
   onTranscribe: () => void;
   onDeleteSelection: () => void;
   onRestoreSelection: () => void;
@@ -255,7 +254,6 @@ export default function Rail(p: Props) {
         onRemoveFillers={p.onRemoveFillers}
         onRemoveRetakes={p.onRemoveRetakes}
         onRestoreAll={p.onRestoreAll}
-        onRetranscribe={p.onRetranscribe}
         busy={p.busy}
       />
     </>

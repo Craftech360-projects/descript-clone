@@ -10,16 +10,20 @@ import { Readable } from 'node:stream';
 import { join, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { ASR_MODELS, CONFIG, EDIT_DEFAULTS } from './config.ts';
-import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools } from './ffmpeg.ts';
+import { ASR_MODELS, CONFIG, EDIT_DEFAULTS, setAppleSpeechReady } from './config.ts';
+import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools, canBurnCaptions, burnCaptionsReady, burnCaptionStrip } from './ffmpeg.ts';
 import { transcribe, defaultAsrOptions, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
+import { registerLocalAgent, probe as probeLocalAgent } from './agent-local.ts';
 import { registerClaudeAgent } from './agent-claude.ts';
 import { registerSummon } from './summon.ts';
+import * as appleSpeech from './apple-speech.ts';
+import * as captionImage from './caption-image.ts';
+import { captionImagesReady } from './caption-image.ts';
 import * as settings from './settings.ts';
 import {
   availableProviders,
@@ -50,6 +54,7 @@ import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts'
 import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
 import { bedLength, bedLoops } from '../../../packages/core/src/music.ts';
 import {
+  DEFAULT_FRAME,
   frameSize,
   normalizeFrame,
   resolveFrame,
@@ -65,6 +70,29 @@ import type { CompileOptions, Edl, Transcript, Word } from '../../../packages/co
 // Load any dashboard-set API keys into process.env BEFORE anything reads them —
 // so CONFIG's credential getters and the Claude SDK both see them from the start.
 await settings.init();
+
+/**
+ * Probe on-device speech ONCE at boot and cache the answer.
+ *
+ * `hasAsr()` is read inside request handlers that cannot await, but deciding
+ * whether the local helper is usable means hitting the filesystem and possibly
+ * the Swift toolchain. So the async question is asked here and the synchronous
+ * getters read the result. A machine does not sprout a compiler mid-session.
+ */
+setAppleSpeechReady(await appleSpeech.available());
+
+// Ask ffmpeg once whether it can burn captions, so the answer is a synchronous
+// fact for every request handler and for /api/capabilities. See canBurnCaptions.
+await canBurnCaptions();
+
+// And whether we can draw them ourselves when ffmpeg cannot. One of the two has
+// to be true for "Burn captions" to mean anything.
+await captionImage.probeAvailability();
+
+// Look for a local LLM runtime (Ollama, LM Studio, llama.cpp). Four loopback
+// probes with a short timeout — a machine with none installed pays milliseconds.
+await probeLocalAgent();
+
 await store.init();
 await jobs.init();
 await fonts.init();
@@ -119,7 +147,8 @@ app.get('/api/capabilities', (c) =>
       available:
         model.provider === 'mock' ||
         (model.provider === 'elevenlabs' && CONFIG.hasElevenLabsAsr()) ||
-        (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()),
+        (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()) ||
+        (model.provider === 'apple' && CONFIG.hasAppleSpeech()),
     })),
     asrDefaults: defaultAsrOptions(),
     editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
@@ -128,6 +157,16 @@ app.get('/api/capabilities', (c) =>
      * so unlike ASR this capability degrades in QUALITY rather than switching
      * off, and the panel says which catalogue it is on rather than hiding.
      */
+    /**
+     * The EFFECTIVE answer, not "does ffmpeg have libass".
+     *
+     * There are two routes — libass, or drawing the glyphs with CoreText and
+     * compositing them (caption-image.ts). The UI only cares whether ticking
+     * "Burn captions into the video" will produce captions, so it is told that,
+     * not which of the two will do it.
+     */
+    canBurnCaptions: burnCaptionsReady() || captionImagesReady(),
+    captionBurnVia: burnCaptionsReady() ? 'libass' : captionImagesReady() ? 'coretext' : null,
     musicProviders: availableProviders(),
     /**
      * Image inserts. `generate` gates the prompt box in the Images panel — it is
@@ -156,6 +195,7 @@ app.get('/api/capabilities', (c) =>
 // Claude branch (WebSocket at /api/agent/claude/ws). Registered here, before the
 // static catch-all below, like every other /api route.
 registerAgent(app);
+registerLocalAgent(app);
 registerClaudeAgent(app, upgradeWebSocket);
 // The assistant's escape hatch: fetch a file off the open web, run a media
 // operation no panel exists for. Its own module because neither backs a feature
@@ -276,6 +316,20 @@ app.post('/api/projects', async (c) => {
     height: info.height,
     fps: info.fps,
     status: 'imported',
+    /**
+     * New projects are REELS. Written here, at creation, rather than by changing
+     * what an ABSENT frame normalizes to.
+     *
+     * The distinction matters. `normalizeFrame` reads a missing frame as
+     * 'source' — "nothing was ever chosen, so leave the media alone" — and every
+     * project saved before this change has no frame stored. Moving that fallback
+     * to 'reel' would silently re-crop every existing project to 9:16 the next
+     * time it was opened, which is not a default, it is an edit nobody asked for.
+     *
+     * Stamping the new record instead means the default applies to work started
+     * from now on and existing work keeps the shape it was made at.
+     */
+    frame: DEFAULT_FRAME,
     transcript: null,
     asrProvider: null,
     verbatim: false,
@@ -1178,6 +1232,42 @@ app.post('/api/projects/:id/render', async (c) => {
   });
   const wantsCaptions = Boolean(options.burnCaptions ?? captions.enabled);
 
+  /**
+   * Refuse a burn this ffmpeg cannot do, BEFORE the job starts.
+   *
+   * `subtitles` is the libass filter, and it is a build option. Without it the
+   * render queued, ran, and died with "No such filter: 'subtitles'" — an ffmpeg
+   * internal buried in a job record, from a button that just said Export. The
+   * user is left believing the app is broken rather than that one optional
+   * dependency is missing.
+   *
+   * Refusing here says what is wrong, what it costs, and the two ways out. The
+   * sidecar caption export is unaffected: it is text, not pixels, and never
+   * touches libass.
+   */
+  /**
+   * Two ways to burn a caption, and the fallback is not a downgrade.
+   *
+   * libass is the usual route and it is a BUILD OPTION ffmpeg here does not
+   * carry, so `subtitles` does not exist and the render used to die inside
+   * ffmpeg. When it is missing we draw the glyphs ourselves with CoreText and
+   * composite the result as an image track — see caption-image.ts. Only when
+   * NEITHER is available is there nothing to do but say so.
+   */
+  const captionsViaImages = wantsCaptions && !burnCaptionsReady() && captionImagesReady();
+
+  if (wantsCaptions && !burnCaptionsReady() && !captionImagesReady()) {
+    return c.json(
+      {
+        error:
+          'Captions cannot be burned in on this machine: this ffmpeg was built without libass, ' +
+          'and the built-in caption renderer needs macOS. Turn off "Burn captions into the video" ' +
+          'to export without them — the caption file download is unaffected.',
+      },
+      422,
+    );
+  }
+
   // The output frame, resolved before captions because captions are placed
   // against it. Layered the same way as the caption style: the request wins over
   // the record, per field, so an Export fired mid-debounce reframes to what is on
@@ -1274,7 +1364,7 @@ app.post('/api/projects/:id/render', async (c) => {
       : undefined;
 
   const subtitles =
-    wantsCaptions && project.hasVideo
+    wantsCaptions && project.hasVideo && !captionsViaImages
       ? toAss(
           toCues(captionTranscript, edl, {
             maxChars: captions.maxChars,
@@ -1375,10 +1465,55 @@ app.post('/api/projects/:id/render', async (c) => {
       },
     );
 
+    /**
+     * The CoreText caption pass.
+     *
+     * Runs only when libass is absent — otherwise the glyphs are already in the
+     * picture and this is skipped entirely. The tiles are drawn from the same
+     * cues and the same CaptionSettings the preview reads, so what ships is what
+     * was on screen.
+     */
+    let finalName = name;
+    if (captionsViaImages && project.hasVideo) {
+      runner.onProgress({ progress: -1, stage: 'Drawing captions' });
+
+      const cues = toCues(captionTranscript, edl, {
+        maxChars: captions.maxChars,
+        maxDurationMs: options.maxDurationMs,
+      });
+      const scaled = speed === 1 ? cues : scaleCues(cues, speed);
+
+      const strip = await captionImage.build(
+        scaled,
+        captions,
+        outSize,
+        CONFIG.mediaDir,
+        job.id,
+      );
+
+      if (strip) {
+        try {
+          const burnedName = name.replace(/\.mp4$/, '-cc.mp4');
+          runner.onProgress({ progress: -1, stage: 'Burning captions' });
+          await burnCaptionStrip(
+            join(CONFIG.mediaDir, 'renders', name),
+            join(CONFIG.mediaDir, 'renders', burnedName),
+            strip,
+            { onSpawn: (child) => runner.track(child) },
+          );
+          // The clean render was an intermediate; only the captioned file ships.
+          await unlink(join(CONFIG.mediaDir, 'renders', name)).catch(() => {});
+          finalName = burnedName;
+        } finally {
+          await captionImage.cleanup(strip);
+        }
+      }
+    }
+
     return {
-      url: `/media/renders/${name}`,
+      url: `/media/renders/${finalName}`,
       segments,
-      burnedIn,
+      burnedIn: burnedIn || captionsViaImages,
       // An audio-only project cannot show a caption. Say so rather than silently
       // dropping the option the user ticked.
       captionsSkipped: wantsCaptions && !project.hasVideo,
@@ -1410,6 +1545,12 @@ app.post('/api/projects/:id/thumbs', async (c) => {
   if (project.thumbs) return c.json({ thumbs: project.thumbs });
 
   const job = jobs.start(project.id, 'thumbs', 'Building filmstrip', async (runner) => {
+    // Probe rather than trust the record. The tile's SHAPE comes from these two
+    // numbers, and the record is the one thing here that can be stale — it is
+    // written once at import, while `probe` reads the file in front of it. A
+    // disagreement used to bake a squashed picture into every sheet.
+    const probed = await probe(project.sourcePath).catch(() => null);
+
     const thumbs = await generateThumbs(
       project.sourcePath,
       project.id,
@@ -1417,8 +1558,8 @@ app.post('/api/projects/:id/thumbs', async (c) => {
         duration: project.duration,
         hasVideo: project.hasVideo,
         hasAudio: true,
-        width: project.width,
-        height: project.height,
+        width: probed?.width ?? project.width,
+        height: probed?.height ?? project.height,
       },
       { onSpawn: (child) => runner.track(child) },
     );
@@ -1581,6 +1722,7 @@ const server = serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
   const asr = [
     CONFIG.hasElevenLabsAsr() ? 'ElevenLabs Scribe' : '',
     CONFIG.hasSarvamAsr() ? 'Sarvam Saaras v3' : '',
+    CONFIG.hasAppleSpeech() ? 'Apple on-device (no key, no diarization)' : '',
   ].filter(Boolean).join(' + ') || 'disabled (mock ASR)';
   console.log(`asr     ${asr}`);
   console.log(

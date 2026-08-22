@@ -93,7 +93,7 @@ import {
   type AutoImport,
 } from './store/autoImport.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
-import { DEFAULT_FRAME, frameLayout } from '../../../packages/core/src/frame.ts';
+import { DEFAULT_FRAME, frameLayout, frameSize } from '../../../packages/core/src/frame.ts';
 import {
   MIN_MOVE_SEC,
   boxToPunch,
@@ -184,6 +184,8 @@ export default function App() {
 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Why the workspace could not boot. Read by the gate, not by the banner. */
+  const [bootError, setBootError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   /** The long-running job in flight, if any: what it is and how far along. */
@@ -196,8 +198,12 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Re-read capabilities after keys change so the assistant/transcription light up
   // (or dim) without a reload. setAsr keeps the transcribe defaults in step too.
+  // Errors here are reported, not swallowed: after saving an API key a failed
+  // refresh used to leave the assistant reading "off" forever with no reason given.
   const refreshCaps = useCallback(() => {
-    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch(() => {});
+    api.capabilities()
+      .then((c) => { setCaps(c); setAsr(c.asrDefaults); })
+      .catch((e) => setError(`Could not refresh what this workspace can do: ${e.message}`));
   }, []);
   /** The media/speakers drawer behind the title-bar ☰. */
   const [libOpen, setLibOpen] = useState(false);
@@ -254,6 +260,26 @@ export default function App() {
   const cut = doc?.cut ?? null;
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
   const frame = doc?.frame ?? DEFAULT_FRAME;
+
+  /**
+   * The output's SHAPE, published to CSS.
+   *
+   * The stylesheet had no way to know whether it was laying out a landscape or a
+   * vertical programme, so every rule assumed landscape — which is why a 9:16
+   * frame sat in a wide centre column surrounded by mat. `frameSize` is the same
+   * function the render uses, so the layout reacts to the shape that will
+   * actually ship rather than to the shape of the source.
+   */
+  const frameOut = frameSize(frame, {
+    width: project?.width ?? 1920,
+    height: project?.height ?? 1080,
+  });
+  const frameOrientation =
+    frameOut.width === frameOut.height
+      ? 'square'
+      : frameOut.width < frameOut.height
+        ? 'portrait'
+        : 'landscape';
   const color = doc?.color ?? DEFAULT_COLOR;
   const overlays = doc?.overlays ?? EMPTY_OVERLAYS;
   /**
@@ -308,11 +334,30 @@ export default function App() {
     setActiveClipId(clips[0]?.id ?? null);
   }, [project?.id]);
 
-  useEffect(() => {
-    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch((e) => setError(e.message));
-    api.list().then(setLibrary).catch(() => {});
-    api.fonts.list().then(setCustomFonts).catch(() => {});
+  /**
+   * The boot fetch, and the reason it has its OWN error state.
+   *
+   * The workspace does not render until `caps` and `asr` arrive, so a failure
+   * here is not one more banner among many — it is the whole screen. Routing it
+   * through `setError` looked like it reported the problem, but the banner is
+   * rendered further down than the "Loading workspace…" early return, so nobody
+   * ever saw it: with the API server down the app sat on the loading line
+   * forever, with no message and no way to retry. `bootError` is what the gate
+   * itself reads.
+   */
+  const loadWorkspace = useCallback(() => {
+    setBootError(null);
+    api.capabilities()
+      .then((c) => { setCaps(c); setAsr(c.asrDefaults); })
+      .catch((e) => setBootError(e.message || 'The server did not respond.'));
+    // Say so when the listing fails. Swallowing this rendered the Dashboard's
+    // "Nothing yet" empty state over a server that was simply unreachable — the
+    // user is told their entire library is gone.
+    api.list().then(setLibrary).catch((e) => setError(`Could not load your projects: ${e.message}`));
+    api.fonts.list().then(setCustomFonts).catch((e) => setError(`Could not load your fonts: ${e.message}`));
   }, []);
+
+  useEffect(() => { loadWorkspace(); }, [loadWorkspace]);
 
   // Make every imported font available to the preview by declaring an @font-face
   // for it — the same family libass gets from fontsdir at render, so the monitor
@@ -470,7 +515,9 @@ export default function App() {
   };
 
   const cancelJob = useCallback(() => {
-    if (job) void api.cancelJob(job.id).catch(() => {});
+    // A failed cancel used to look exactly like a successful one — the job kept
+    // running and the UI implied it had stopped.
+    if (job) void api.cancelJob(job.id).catch((e) => setError(`Could not cancel the job: ${e.message}`));
   }, [job]);
 
   const openTranscript = (p: Project, defaults: CutSettings) => {
@@ -611,7 +658,7 @@ export default function App() {
    */
   const addClip = (file: File, atIndex?: number) =>
     run('addClip', async () => {
-      flushSave();
+      await flushSave();
       // The clips present before the append — used both to spot which id is the
       // newcomer and to rebuild the order when inserting somewhere other than end.
       const before = clips.map((c) => c.id);
@@ -661,8 +708,27 @@ export default function App() {
   /** Remove a clip from the open project. Refused server-side if it is the last. */
   const removeClip = (clipId: string) =>
     run('removeClip', async () => {
-      flushSave();
+      await flushSave();
       await api.removeClip(project!.id, clipId);
+      const fresh = await api.get(project!.id);
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      return fresh;
+    });
+
+  /**
+   * Commit a whole new play order at once — what dragging a clip along the
+   * timeline's clip lane produces.
+   *
+   * Reordering, not repositioning: clips are a gapless sequence whose offsets
+   * are the sum of the durations before them, so the only thing a drag can
+   * change is which slot a clip occupies.
+   */
+  const reorderClips = (ids: string[]) =>
+    run('reorderClip', async () => {
+      await flushSave();
+      await api.reorderClips(project!.id, ids);
       const fresh = await api.get(project!.id);
       setProject(fresh);
       openTranscript(fresh, editDefaults(caps));
@@ -673,7 +739,7 @@ export default function App() {
   /** Move a clip one place earlier (-1) or later (+1) in play order. */
   const moveClip = (clipId: string, delta: -1 | 1) =>
     run('reorderClip', async () => {
-      flushSave();
+      await flushSave();
       const ids = clips.map((c) => c.id);
       const from = ids.indexOf(clipId);
       const to = from + delta;
@@ -702,7 +768,7 @@ export default function App() {
       return 'That time is at a clip edge — there is nothing to cut off there.';
     }
     const fresh = await run('splitClip', async () => {
-      flushSave();
+      await flushSave();
       await api.splitClip(project!.id, clip.id, at);
       const fresh = await api.get(project!.id);
       setProject(fresh);
@@ -905,7 +971,7 @@ export default function App() {
     setDialog(null);
     setError(null);
     setNotice(null);
-    api.list().then(setLibrary).catch(() => {});
+    api.list().then(setLibrary).catch((e) => setError(`Could not load your projects: ${e.message}`));
   };
 
   /**
@@ -1008,6 +1074,11 @@ export default function App() {
 
   const doCaptions = (format: string) =>
     run('captions', async () => {
+      // Same reason the render flushes: the server builds cues from ITS stored
+      // transcript, so an unsaved cut would be absent from the picture and
+      // present in the subtitles. This path had no flush at all — cut a
+      // sentence, export an .srt, and the sentence was still in the file.
+      await flushSave();
       // speed rides along: a sidecar file is read against the RENDERED clock, so
       // its cues have to be divided the way the render's are.
       const r = await api.captions(project!.id, { format, ...cut, speed });
@@ -1020,9 +1091,11 @@ export default function App() {
 
   const doRender = () =>
     run('render', async () => {
-      // The server renders from ITS copy of the deleted set, so make sure the
-      // edit has landed before asking for pixels.
-      flushSave();
+      // The server renders from ITS copy of the deleted set, so the edit has to
+      // have LANDED before we ask for pixels — awaited, not fired off. Without
+      // the await, a render started inside the 800ms save debounce exported the
+      // previous document: the words you just cut were still in the file.
+      await flushSave();
       const { jobId } = await api.render(project!.id, {
         ...cut!,
         burnCaptions: captions.enabled,
@@ -1669,6 +1742,16 @@ export default function App() {
       // entirely.
       if (document.activeElement?.closest('input,textarea,select,[contenteditable]')) return;
 
+      /**
+       * A modal owns the keyboard while it is open.
+       *
+       * `showModal()` makes the background INERT to pointers and to focus, but a
+       * listener bound on `window` still hears every key. So bare S was splitting
+       * the clip under the playhead behind an open Export dialog, and Space was
+       * scrubbing a video the user could not see.
+       */
+      if (document.querySelector('dialog[open]')) return;
+
       const mod = e.metaKey || e.ctrlKey;
 
       if (mod && e.key.toLowerCase() === 'z') {
@@ -1689,13 +1772,31 @@ export default function App() {
       else if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); setSelectionDeleted(false); }
       // Escape closes the drawer first if it's open, otherwise clears selection.
       else if (e.key === 'Escape') { if (libOpen) setLibOpen(false); else setSelection(null); }
-      else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      /**
+       * Space plays — UNLESS a button has focus, where Space is that button's
+       * own activation key.
+       *
+       * Chrome fires a focused button's click on keyUP, and only if the keydown
+       * was not cancelled. Calling preventDefault() here unconditionally meant a
+       * keyboard user tabbed onto "Render video" pressed Space and got playback
+       * toggling instead of a render — the button simply never fired.
+       */
+      else if (e.key === ' ') {
+        if (document.activeElement?.closest('button,[role="button"],a[href],summary')) return;
+        e.preventDefault();
+        togglePlay();
+      }
+      // Home and the arrows are advertised in the transport's own tooltips, so
+      // they have to exist. They did not.
+      else if (e.key === 'Home') { e.preventDefault(); seek(0); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); stepWord(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); stepWord(1); }
       // The razor: cut the clip under the playhead in two. Bare S, like an NLE.
       else if (!mod && e.key.toLowerCase() === 's') { e.preventDefault(); void splitRef.current(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay, libOpen]);
+  }, [togglePlay, libOpen, seek, stepWord]);
 
   /**
    * What becomes of a file the assistant summoned — fetched from the web, or made
@@ -1903,7 +2004,7 @@ export default function App() {
       },
       reorderClips: async (ids) => {
         const fresh = await run('reorderClip', async () => {
-          flushSave();
+          await flushSave();
           await api.reorderClips(project!.id, ids);
           const fresh = await api.get(project!.id);
           setProject(fresh);
@@ -2012,7 +2113,25 @@ export default function App() {
   });
   useEffect(() => () => setAgentBridge(null), []);
 
-  if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
+  if (!caps || !asr) {
+    return (
+      <div className="boot">
+        {bootError ? (
+          <div className="boot-fail" role="alert">
+            <h2>The workspace could not load</h2>
+            <p className="boot-why">{bootError}</p>
+            <p className="boot-hint">
+              This usually means the API server is not running. Start it with{' '}
+              <code>npm run server</code> and try again.
+            </p>
+            <button className="primary" onClick={loadWorkspace}>Try again</button>
+          </div>
+        ) : (
+          'Loading workspace…'
+        )}
+      </div>
+    );
+  }
 
   // --- the start screen ---------------------------------------------------------
   /**
@@ -2049,6 +2168,7 @@ export default function App() {
   return (
     <div
       className={`app m-view-${mobileTab}`}
+      data-frame={frameOrientation}
       // Give the dock the extra height the music lane needs, rather than stealing
       // it from the waveform. Only when a bed is attached; no bed, no change.
       style={musicLane ? ({ '--h-dock': '298px' } as React.CSSProperties) : undefined}
@@ -2152,6 +2272,7 @@ export default function App() {
           activeClip={activeClip}
           result={result}
           onTimeUpdate={onTimeUpdate}
+          onMediaError={setError}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           frame={frame}
@@ -2317,7 +2438,6 @@ export default function App() {
             onRemoveFillers={doFillers}
             onRemoveRetakes={doRetakes}
             onRestoreAll={doRestoreAll}
-            onRetranscribe={() => setDialog('transcribe')}
             onTranscribe={() => setDialog('transcribe')}
             onDeleteSelection={() => setSelectionDeleted(true)}
             onRestoreSelection={() => setSelectionDeleted(false)}
@@ -2363,6 +2483,8 @@ export default function App() {
           music={musicLane}
           onMusicResize={resizeMusic}
           onMusicFill={fillMusic}
+          clipLane={clips.map((c, i) => ({ id: c.id, label: c.name ?? `Clip ${i + 1}` }))}
+          onReorderClips={(ids) => void reorderClips(ids)}
         />
       </footer>
 

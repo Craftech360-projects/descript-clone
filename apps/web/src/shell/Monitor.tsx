@@ -39,6 +39,12 @@ interface Props {
   activeClip?: Clip | null;
   result: RenderResult | null;
   onTimeUpdate: () => void;
+  /**
+   * The media itself failed to load — a 404, a codec the browser will not take.
+   * Without this the monitor was just a black rectangle that ignored Play, which
+   * is indistinguishable from a broken app.
+   */
+  onMediaError?: (message: string) => void;
   onPlay: () => void;
   onPause: () => void;
   /** Drawn over the picture. The monitor stays ignorant of what it is. */
@@ -134,7 +140,7 @@ interface Props {
  * which is exactly where the render puts the burn — after the zoompan.
  */
 const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
-  { project, activeClip, result, onTimeUpdate, onPlay, onPause, overlay, frame, frameRef, onFrameChange, onFrameDragStart, onFrameDragEnd, color, getCurrentTime, markingMoveId, onMark, onMarkCancel },
+  { project, activeClip, result, onTimeUpdate, onMediaError, onPlay, onPause, overlay, frame, frameRef, onFrameChange, onFrameDragStart, onFrameDragEnd, color, getCurrentTime, markingMoveId, onMark, onMarkCancel },
   ref,
 ) {
   // The clip the monitor is showing. Playback drives it by playhead via
@@ -389,6 +395,13 @@ const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       e.preventDefault();
+      /**
+       * Stop here. App has its own window-level Escape that clears the script
+       * selection, and preventDefault does not stop a sibling listener — so
+       * cancelling a marquee ALSO dropped the selection, swapping the rail away
+       * from the very words the push-in was aimed at.
+       */
+      e.stopImmediatePropagation();
       markAnchor.current = null;
       setMarquee(null);
       onMarkCancel();
@@ -426,6 +439,14 @@ const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
               onTimeUpdate={onTimeUpdate}
               onPlay={onPlay}
               onPause={onPause}
+              // A missing or unplayable file is silent otherwise: the element
+              // simply never paints and never fires timeupdate.
+              onError={() =>
+                onMediaError?.(
+                  `This project's media could not be loaded (${clip.sourceUrl}). ` +
+                    'The file may have been moved or deleted.',
+                )
+              }
               style={{
                 ...(layout.width > 0
                   ? { width: layout.width, height: layout.height, left: layout.left, top: layout.top }

@@ -170,7 +170,6 @@ interface Props {
   onRemoveFillers: () => void;
   onRemoveRetakes: () => void;
   onRestoreAll: () => void;
-  onRetranscribe: () => void;
   busy: string | null;
 }
 
@@ -399,6 +398,7 @@ function PausesField(p: Props) {
           p.onCutDragEnd(gap === 0 ? 'Keep every pause' : `Shorten pauses to ${gap}ms`)
         }
         onChange={(v) => p.setCut({ ...p.cut, maxGapMs: v > 0 ? v : Infinity })}
+        label="pause length cap"
         format={(v) => (v === 0 ? 'Keep every pause' : `Cap at ${v}ms`)}
       />
     </Section>
@@ -600,6 +600,7 @@ function FrameField(p: Props) {
         max={MAX_ZOOM}
         step={0.01}
         onChange={(zoom) => p.setFrame({ ...frame, zoom })}
+        label="frame zoom"
         format={(v) =>
           Math.abs(v - 1) < 0.005
             ? 'Fill the frame'
@@ -700,6 +701,7 @@ function MovesField(p: Props) {
                   onChange={(zoom) => p.onSetMove(m.id, { zoom })}
                   onPointerDown={p.onFrameDragStart}
                   onPointerUp={() => p.onFrameDragEnd(`Set push-in to ${m.zoom.toFixed(2)}×`)}
+                  label="push-in zoom"
                   format={(v) => (v <= 1.001 ? 'No push-in' : `${v.toFixed(2)}× in`)}
                 />
 
@@ -711,6 +713,7 @@ function MovesField(p: Props) {
                   onChange={(ease) => p.onSetMove(m.id, { ease })}
                   onPointerDown={p.onFrameDragStart}
                   onPointerUp={() => p.onFrameDragEnd('Set push-in ease')}
+                  label="push-in ease"
                   format={(v) => (v < 0.03 ? 'Hard cut in and out' : `${v.toFixed(2)}s ease`)}
                 />
 
@@ -915,6 +918,11 @@ function ImagesField(p: Props) {
                       className={o.transition === t ? 'on' : ''}
                       onClick={() => p.onSetOverlay(o.id, { transition: t })}
                       title={TRANSITION_HELP[t]}
+                      /* The label is a bare arrow glyph, and text content beats
+                         `title` in accessible-name computation — so these
+                         announced themselves as "←" / "→" / "↑" / "↓". The help
+                         string already says the real thing. */
+                      aria-label={TRANSITION_HELP[t]}
                     >
                       {TRANSITION_LABEL[t]}
                     </button>
@@ -1348,6 +1356,7 @@ function MusicField(p: Props) {
             max={100}
             step={5}
             onChange={(v) => p.onUpdateMusic({ volume: v / 100 })}
+            label="music volume"
             format={(v) => `${v}% volume`}
           />
 
@@ -1598,6 +1607,7 @@ function CaptionsField(p: Props) {
             onChange={(v) => set({ fontSize: v })}
             // Authored at 1080p and scaled to the real frame, so the number is
             // stable across projects rather than meaning a different size in each.
+            label="caption text size"
             format={(v) => `${v}px at 1080p`}
           />
 
@@ -1641,6 +1651,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd(`Set caption outline to ${c.strokeWidth}px`)}
             onChange={(v) => set({ strokeWidth: v })}
+            label="caption outline or box padding"
             format={(v) =>
               isBox
                 ? v === 0
@@ -1685,6 +1696,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
             onChange={(v) => set({ boxWidth: v / 100 })}
+            label="caption box width"
             format={(v) => `${v}% wide`}
           />
           <Slider
@@ -1695,6 +1707,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
             onChange={(v) => set({ boxHeight: v / 100 })}
+            label="caption box height"
             format={(v) => `${v}% tall`}
           />
           <Hint>
@@ -1710,6 +1723,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd(`Split captions at ${c.maxChars} characters`)}
             onChange={(v) => set({ maxChars: v })}
+            label="characters per caption"
             format={(v) => `Split past ${v} characters`}
           />
           {/* Three lines of hint was ~50px of a field that is already the

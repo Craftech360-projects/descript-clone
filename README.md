@@ -24,10 +24,19 @@ in separate terminals.
 was in flight. Jobs are persisted, so the UI reports an honest failure rather
 than hanging — but the render is still gone.
 
-**It works with no API key.** With both transcription keys unset the server uses a
-mock ASR provider: fake words, real timings, spread across your actual media. The
-entire pipeline — ingest, transcript, EDL, ffmpeg render — runs for real at zero
-cost. Only the words are invented.
+**On a Mac it works with no API key and real words.** macOS 26 ships a verbatim
+speech model, and the server uses it when no cloud key is set: `SpeechAnalyzer`
+via a small Swift helper compiled on first use. It is on-device, free, and
+private — and it is VERBATIM, which is the property this editor is built on.
+Measured: "So um, today I want to, uh, talk about…" comes back with `um` and `ah`
+as their own timed words rather than tidied away. It has no diarization, so the
+speaker margin stays quiet; that is the whole trade.
+
+Requires macOS 26+ and the Command Line Tools (for `swiftc`). Off any Mac, or
+with `ASR_PROVIDER=mock`, the server falls back to a mock provider: fake words,
+real timings, spread across your actual media. The entire pipeline — ingest,
+transcript, EDL, ffmpeg render — still runs for real at zero cost. Only the words
+are invented.
 
 To use real transcription, put a key in `.env`:
 
@@ -291,9 +300,16 @@ audio say something new needs Overdub, and Overdub needs a TTS endpoint.
   ElevenLabs would have meant a second provider and a second key to keep models
   that report `verbatim: false` — i.e. that defeat the feature this product is
   built around.
-- **One provider, one key.** Transcription is the only thing here that needs a
-  remote service. Cuts, captions, retakes and fillers are pure functions in
+- **Transcription is the only thing that may need a remote service** — and on a
+  Mac it does not. Cuts, captions, retakes and fillers are pure functions in
   `packages/core`; ingest and render are local ffmpeg. Nothing else takes a key.
+  The on-device provider adds the one capability a key used to buy, minus
+  diarization: `Word.speaker` comes back empty and the editor declines to guess.
+- **On-device timings absorb silence.** Measured against macOS 26: a 2.5s gap
+  between two sentences was reported as a 1.38s hole, the rest swallowed by the
+  words either side. Pause-shortening therefore under-trims on that provider,
+  which is the safe direction — a pause survives rather than a syllable being
+  clipped.
 - No speaker renaming yet. The margin shows who is talking; you cannot correct it.
 - **No multitrack, and it is not a UI gap.** `buildRenderPlan` cuts `[0:v]` and
   `[0:a]` against the *same* keep-ranges — there is exactly one `keep[]`. A track UI would offer operations the compiler cannot

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import Icon, { type IconName } from './Icon.tsx';
 
 /**
@@ -104,6 +104,19 @@ export function SectionGroup({ label, children }: { label: string; children: Rea
  * reach should already be on screen. Native <details> keeps full keyboard and
  * screen-reader support with no JS.
  */
+/**
+ * The nearest Field's label, so a Slider inside it has a name without every call
+ * site repeating one.
+ *
+ * 18 sliders had no accessible name at all. Threading a `label` prop through all
+ * of them would have worked and would also have been 18 chances to forget. A
+ * Field already knows what it is called; a Slider inside it is almost always
+ * "that Field's value", so the heading is the right default. A Field holding
+ * SEVERAL sliders (the push-in zoom and ease, the six colour knobs) should still
+ * pass an explicit `label` — this makes the floor "named", not "named well".
+ */
+const FieldLabel = createContext<string | undefined>(undefined);
+
 export function Field({ label, children, collapsible, defaultOpen }: {
   label: string;
   children: ReactNode;
@@ -112,17 +125,21 @@ export function Field({ label, children, collapsible, defaultOpen }: {
 }) {
   if (collapsible) {
     return (
-      <details className="field field-c" open={defaultOpen}>
-        <summary>{label}</summary>
-        <div className="field-body">{children}</div>
-      </details>
+      <FieldLabel.Provider value={label}>
+        <details className="field field-c" open={defaultOpen}>
+          <summary>{label}</summary>
+          <div className="field-body">{children}</div>
+        </details>
+      </FieldLabel.Provider>
     );
   }
   return (
-    <section className="field">
-      <h3>{label}</h3>
-      {children}
-    </section>
+    <FieldLabel.Provider value={label}>
+      <section className="field">
+        <h3>{label}</h3>
+        {children}
+      </section>
+    </FieldLabel.Provider>
   );
 }
 
@@ -270,17 +287,32 @@ export function Color({ value, onChange, onCommit, label }: {
  * thumb is a 16px target on a 22px-tall hit strip instead of the ~10px sliver
  * Windows hands out. See `.slider` in app.css.
  */
-export function Slider({ value, min, max, step, onChange, format, onPointerDown, onPointerUp }: {
+export function Slider({ value, min, max, step, onChange, format, label, onPointerDown, onPointerUp }: {
   value: number;
   min: number;
   max: number;
   step: number;
   onChange: (v: number) => void;
   format: (v: number) => string;
+  /**
+   * What this slider controls, spoken.
+   *
+   * Without it the input has no accessible name at all: the `<h3>` a Field
+   * renders above is a heading, not a label, and the formatted readout beside
+   * the bar is an unassociated `<span>`. Every slider in the Inspector — pause
+   * cap, frame zoom, all six colour knobs, caption size — announced itself as a
+   * bare "slider", while the − and + buttons flanking it were properly named
+   * "Less" and "More". Optional so no call site breaks, but pass it.
+   */
+  label?: string;
   /** Bracket the gesture so a drag is ONE undo step rather than one per frame. */
   onPointerDown?: () => void;
   onPointerUp?: () => void;
 }) {
+  // An explicit label wins; otherwise inherit the enclosing Field's heading.
+  const inherited = useContext(FieldLabel);
+  const name = label ?? inherited;
+
   /* A nudge is a whole gesture in one click, so it has to open AND close the
    * history bracket. Closing it inline would seal the entry with the label the
    * parent built from the OLD value — the label closes over the props of the
@@ -312,7 +344,7 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
         <button
           type="button"
           className="nudge"
-          aria-label="Less"
+          aria-label={name ? `Less ${name}` : 'Less'}
           disabled={value <= min}
           onClick={() => nudge(-1)}
         >
@@ -324,6 +356,11 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
           max={max}
           step={step}
           value={value}
+          aria-label={name}
+          // The raw number is meaningless read aloud — "40" against a range of
+          // 0..500 says nothing. `format` is already the human reading of this
+          // value ("40ms padding"), so it is what gets announced.
+          aria-valuetext={format(value)}
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           // A keyboard nudge has no pointerup to seal the group, so treat blur as
@@ -334,7 +371,7 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
         <button
           type="button"
           className="nudge"
-          aria-label="More"
+          aria-label={name ? `More ${name}` : 'More'}
           disabled={value >= max}
           onClick={() => nudge(1)}
         >

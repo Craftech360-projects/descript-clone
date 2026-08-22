@@ -195,7 +195,13 @@ export default function Library({
   return (
     <>
       {open && <div className="lib-scrim" onClick={onClose} />}
-      <aside className={open ? 'library open' : 'library'} aria-hidden={!open}>
+      {/* `inert`, not `aria-hidden`. The drawer is moved off-canvas with a
+          transform and never unmounted, so its close button, switches and
+          sliders stayed focusable: tabbing from the title bar walked focus into
+          an invisible panel and appeared to lose it. `inert` removes it from the
+          tab order and the accessibility tree together — and aria-hidden alone
+          on a container with focusable children is itself an error. */}
+      <aside className={open ? 'library open' : 'library'} inert={!open}>
         <div className="lib-top">
           <h2>Library</h2>
           <button className="icon" onClick={onClose} aria-label="Close library">
@@ -235,7 +241,15 @@ export default function Library({
                 type="file"
                 accept="video/*,audio/*"
                 disabled={addingClip}
-                onChange={(e) => e.target.files?.[0] && onAddClip(e.target.files[0])}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  // Clear the value even when we take the file. Without this the
+                  // element still holds it, so re-picking the SAME file after a
+                  // cancel or a failure fires no change event and the control is
+                  // simply dead. Every other file input here does this.
+                  e.target.value = '';
+                  if (file) onAddClip(file);
+                }}
               />
             </label>
           </div>

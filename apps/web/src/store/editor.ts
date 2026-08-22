@@ -984,9 +984,33 @@ function scheduleSave(): void {
   saveTimer = setTimeout(() => void pump(), 800);
 }
 
+/**
+ * The write currently on the wire, so a flush can WAIT for it.
+ *
+ * `pump` used to return immediately when a debounced save was already in flight,
+ * which quietly broke every caller that flushes to make an edit durable before
+ * asking the server to act on it. `doRender` says "make sure the edit has landed
+ * before asking for pixels" and then got back a resolved promise while the
+ * server still held the previous document — so a word deleted a moment earlier
+ * could survive into the exported file. The render reads the SERVER's copy of
+ * the deleted set, so this was the whole guarantee.
+ *
+ * Holding the promise lets a flush chain onto the in-flight write and then run
+ * again for whatever changed while it was away.
+ */
+let inFlightWrite: Promise<void> | null = null;
+
 async function pump(): Promise<void> {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  if (!saveFn || inFlight) return; // a later change re-enters below
+  if (!saveFn) return;
+
+  // A write is already going. Wait for it, then re-enter: the document may have
+  // moved on since that write was built, and the caller is asking for CURRENT.
+  if (inFlight) {
+    await inFlightWrite;
+    if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') await pump();
+    return;
+  }
 
   const doc = state.doc;
   if (!doc || doc.rev === savedRev) { setStatus('saved'); return; }
@@ -994,25 +1018,37 @@ async function pump(): Promise<void> {
   const rev = doc.rev;
   inFlight = true;
   setStatus('saving');
-  try {
-    await saveFn(doc);
-    savedRev = rev;
-    // The doc may have moved while we were away — say saved only if it did not.
-    setStatus(state.doc && state.doc.rev !== rev ? 'unsaved' : 'saved');
-  } catch {
-    setStatus('error');
-  } finally {
-    inFlight = false;
-    if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') void pump();
-  }
+
+  const write = (async () => {
+    try {
+      await saveFn!(doc);
+      savedRev = rev;
+      // The doc may have moved while we were away — say saved only if it did not.
+      setStatus(state.doc && state.doc.rev !== rev ? 'unsaved' : 'saved');
+    } catch {
+      setStatus('error');
+    } finally {
+      inFlight = false;
+      inFlightWrite = null;
+    }
+  })();
+
+  inFlightWrite = write;
+  await write;
+
+  // Anything that changed mid-write still has to go. Awaited, not fired off, so
+  // a caller that flushed is told the truth about when the document is durable.
+  if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') await pump();
 }
 
 /**
- * Save now — before a render, on Ctrl+S, on unload, on leaving the editor.
+ * Save now, and RESOLVE ONLY WHEN THE SERVER HAS THE CURRENT DOCUMENT — before a
+ * render, a caption export, a clip operation, Ctrl+S, unload, or leaving the
+ * editor.
  *
- * Returns the write so a caller about to DROP the document (clearDoc) can await
- * it; pump reports failure through saveStatus and never rejects, so neither does
- * this, and the fire-and-forget callers need no handler.
+ * Await it whenever the next thing you do asks the server to act on the
+ * document. pump reports failure through saveStatus and never rejects, so this
+ * never rejects either.
  */
 export function flushSave(): Promise<void> {
   return pump();

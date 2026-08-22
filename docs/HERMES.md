@@ -56,13 +56,13 @@ an agent reports mysterious failures.
 ```json
 {
   "mcpServers": {
-    "jumpcut": {
+    "jumpstart": {
       "command": "node",
       "args": ["/path/to/descript-clone/apps/mcp/src/index.ts"]
     },
     "jumpstart-dev": {
       "command": "node",
-      "args": ["/Users/you/.jumpcut-agent/dev-index.ts"],
+      "args": ["/Users/you/.jumpstart-agent/dev-index.ts"],
       "env": { "JUMPSTART_REPO": "/path/to/descript-clone" }
     }
   }
@@ -77,8 +77,8 @@ invisible.
 ### 3. Install `jumpstart-dev` outside the repo
 
 ```bash
-mkdir -p ~/.jumpcut-agent
-cp -R /path/to/descript-clone/apps/mcp/src/* ~/.jumpcut-agent/
+mkdir -p ~/.jumpstart-agent
+cp -R /path/to/descript-clone/apps/mcp/src/* ~/.jumpstart-agent/
 ```
 
 An agent that can edit the repo can edit its own undo mechanism, and would then
@@ -138,7 +138,7 @@ verbatim from the same constant the in-app assistant uses so the two cannot drif
 >    fix on a broken tree.
 > 6. `restart_app`, then confirm with `editor_status` and `app_logs`.
 >
-> **Never edit** `~/.jumpcut-agent/`, the Hermes config, or the LaunchAgent.
+> **Never edit** `~/.jumpstart-agent/`, the Hermes config, or the LaunchAgent.
 > **Never run** `git push --force`, `git push --mirror`, `git filter-repo`, or
 > `rm -rf`.
 >

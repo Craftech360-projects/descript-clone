@@ -84,7 +84,19 @@ export async function generate(
     '-i', input,
     // Explicit scale rather than -1: the tile filter needs every input the same
     // size, and we must know tileW exactly to index into the sheet later.
-    '-vf', `fps=1/${plan.interval},scale=${plan.tileW}:${TILE_H},tile=${COLS}x${ROWS}`,
+    //
+    // But a bare `scale=W:H` with both dimensions given DISTORTS — it never
+    // letterboxes. tileW is derived from the project record, so any disagreement
+    // between that record and the real pixels came out as an anamorphic squeeze
+    // rather than anything anyone could spot as a bug: a portrait frame in a
+    // landscape tile just made everyone short and fat. `decrease` + `pad` keeps
+    // the tile exactly tileW x TILE_H — which the sheet indexing depends on —
+    // while degrading a mismatch to black bars instead of a stretch.
+    '-vf',
+    `fps=1/${plan.interval},` +
+      `scale=${plan.tileW}:${TILE_H}:force_original_aspect_ratio=decrease,` +
+      `pad=${plan.tileW}:${TILE_H}:(ow-iw)/2:(oh-ih)/2,` +
+      `tile=${COLS}x${ROWS}`,
     '-an',
     '-q:v', '6',
     '-y',

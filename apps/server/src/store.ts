@@ -238,9 +238,14 @@ export interface Project {
   posterUrl?: string;
   /**
    * The output frame — target resolution plus the zoom/pan that decides which part
-   * of the source fills it. Absent on projects saved before reframing existed, and
-   * on every project that has never left the source's own resolution; the client
-   * falls back to DEFAULT_FRAME via normalizeFrame.
+   * of the source fills it.
+   *
+   * Absent on projects saved before reframing existed, and on those that never
+   * left the source's own resolution. Absent normalizes to the 'source' preset —
+   * NOT to DEFAULT_FRAME, which is now a reel. That asymmetry is deliberate: a
+   * project created today is stamped with DEFAULT_FRAME at import (see the
+   * create route), while one that predates the default keeps the shape it was
+   * made at rather than being re-cropped on open.
    */
   frame?: FrameSettings;
   /**
@@ -431,6 +436,47 @@ async function migrate(project: Project): Promise<Project> {
       // reason to fail opening the project — fps is a nicety.
     }
   }
+
+  /**
+   * Re-probe a project whose stored size disagrees with what the media really
+   * displays at.
+   *
+   * `probe()` used to report a stream's STORED dimensions and ignore the
+   * container's rotation, so every vertical phone clip — stored landscape with a
+   * 90-degree Display Matrix — was recorded as landscape. Fixing the probe does
+   * nothing for the projects already on disk, and those numbers are read in
+   * fifteen places: the monitor's geometry, the render target, the caption
+   * canvas, the portrait layout. A project imported yesterday would stay
+   * stretched forever.
+   *
+   * So the correction is applied on OPEN, once, exactly like the fps backfill
+   * above. `thumbs` is dropped with it because the filmstrip's tile shape was
+   * computed from the wrong aspect and its route serves the cached sheets
+   * forever otherwise; clearing the descriptor is what lets it rebuild.
+   *
+   * Cheap in the normal case: one ffprobe, and only when the numbers differ.
+   */
+  if (project.hasVideo && project.width && project.height) {
+    try {
+      const info = await probe(project.sourcePath);
+      if (
+        info.width && info.height &&
+        (info.width !== project.width || info.height !== project.height)
+      ) {
+        console.log(
+          `[store] ${project.id}: stored ${project.width}x${project.height}, ` +
+            `media displays ${info.width}x${info.height} — correcting`,
+        );
+        const next = { ...project, width: info.width, height: info.height, thumbs: undefined };
+        await save(next);
+        return next;
+      }
+    } catch {
+      // Same reasoning as fps: a missing source or absent ffprobe must not stop
+      // a project opening.
+    }
+  }
+
   return project;
 }
 
@@ -457,8 +503,20 @@ export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'
 /** Give a project its cover frame if it has none, and remember it. */
 async function ensurePoster(project: Project): Promise<void> {
   if (project.posterUrl) return;
+  /**
+   * The cover is taken from clip 0, so it must be timed against CLIP 0.
+   *
+   * `project.duration` is the sum across every clip, while `sourcePath` is the
+   * first one alone. `coverTime` takes a tenth of what it is given, so on a
+   * multi-clip project it could seek past the end of the only file being read
+   * and ffmpeg would return nothing — a project with no cover, for no reason the
+   * user could see. Capped at 10s, so this only bit when clip 0 was short.
+   */
+  const clips = clipsOf(project);
+  const firstDuration = clips[0]?.sourceDuration ?? project.duration;
+
   const url = await poster
-    .ensure(project.sourcePath, project.id, project.duration, project.hasVideo)
+    .ensure(project.sourcePath, project.id, firstDuration, project.hasVideo)
     .catch(() => null);
   // Nothing on failure: a project with no cover shows its mark instead, and the
   // next listing tries again. Persisting a null would make that permanent.

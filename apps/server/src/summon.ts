@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 
 import { CONFIG } from './config.ts';
+import { displaySize } from './ffmpeg.ts';
 import * as store from './store.ts';
 import { clipsOf } from './store.ts';
 
@@ -556,16 +557,30 @@ export async function probeAny(
   ]);
   const data = JSON.parse(out) as {
     format?: { duration?: string };
-    streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+    streams?: Array<{
+      codec_type?: string;
+      width?: number;
+      height?: number;
+      side_data_list?: Array<{ rotation?: number }>;
+      tags?: { rotate?: string };
+    }>;
   };
   const video = data.streams?.find((s) => s.codec_type === 'video');
   const audio = data.streams?.find((s) => s.codec_type === 'audio');
+
+  // This probe exists separately from ffmpeg.ts's only because that one THROWS
+  // on media with no audio track, which a summoned file may legitimately be.
+  // The rotation rule is the same either way: a vertical clip pulled off a URL
+  // or out of a granted folder is stored landscape with a Display Matrix, and
+  // reporting the stored numbers describes it as landscape to the assistant.
+  const { width, height } = displaySize(video);
+
   return {
     duration: Number(data.format?.duration ?? 0) || 0,
     hasVideo: Boolean(video),
     hasAudio: Boolean(audio),
-    width: video?.width,
-    height: video?.height,
+    width,
+    height,
   };
 }
 

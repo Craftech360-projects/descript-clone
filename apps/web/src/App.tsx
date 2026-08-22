@@ -30,6 +30,8 @@ import Monitor from './shell/Monitor.tsx';
 import Transport from './shell/Transport.tsx';
 import Splitter from './shell/Splitter.tsx';
 import Rail from './shell/Rail.tsx';
+import Icon, { type IconName } from './ui/Icon.tsx';
+import { SectionOpen, sectionKey } from './ui/Field.tsx';
 import TranscribeDialog from './dialogs/TranscribeDialog.tsx';
 import ExportDialog from './dialogs/ExportDialog.tsx';
 import SettingsDialog from './dialogs/SettingsDialog.tsx';
@@ -116,6 +118,29 @@ import { wordAt } from '../../../packages/core/src/paragraphs.ts';
 import { setAgentBridge, type AgentBridge } from './agent/tools.ts';
 import { setChatProject } from './store/agent.ts';
 import { connectEditorBridge, reportProject } from './store/bridge.ts';
+
+/**
+ * The phone tool bar, ordered the way a cut actually happens: tidy the words,
+ * then shape the picture, then dress it, then the odds and ends.
+ *
+ * Labels and icons match the rail's own sections, and the keys come from the same
+ * `sectionKey` the sections use — so renaming a section cannot silently strand it
+ * behind a button that no longer opens anything.
+ */
+const MOBILE_TOOLS: Array<{ key: string; label: string; icon: IconName }> = (
+  [
+    { label: 'Clean up', icon: 'scissors' },
+    { label: 'Pauses', icon: 'clock' },
+    { label: 'Captions', icon: 'captions' },
+    { label: 'Frame', icon: 'crop' },
+    { label: 'Colour', icon: 'contrast' },
+    { label: 'Background music', icon: 'music' },
+    { label: 'Studio Sound', icon: 'sparkle' },
+    { label: 'Push-ins', icon: 'target' },
+    { label: 'Images', icon: 'image' },
+    { label: 'Advanced', icon: 'sliders' },
+  ] as Array<{ label: string; icon: IconName }>
+).map((t) => ({ ...t, key: sectionKey(t.label) }));
 
 const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
 
@@ -302,6 +327,53 @@ export default function App() {
   // Desktop never sees this — the .m-* elements are display:none outside the
   // mobile media query, and the m-view-* class matches no desktop rule.
   const [mobileTab, setMobileTab] = useState<'script' | 'tools'>('script');
+  /**
+   * Which rail section the phone has open — one at a time, see SectionOpen.
+   * null means the sheet is closed and the script has the screen to itself.
+   */
+  const [openSection, setOpenSection] = useState<string | null>(null);
+
+  /**
+   * Bring the section the tool bar just opened into view.
+   *
+   * Without this the bar is only half a feature: tapping "Captions" switched to
+   * the tools surface and showed it from the top — the Inspector tabs, the
+   * project header, "Tighten for reels", then Clean up — with Captions open
+   * somewhere below the fold. You still had to hunt for it, which is the cost the
+   * bar exists to remove.
+   *
+   * rAF because the section only stops being `hidden` after the render that
+   * opened it, and scrolling to an element with no height puts you in the wrong
+   * place. `block: 'start'` so the header you tapped for is the first thing
+   * under your thumb.
+   */
+  useEffect(() => {
+    if (!openSection) return;
+    /**
+     * Scroll the panel itself rather than calling scrollIntoView.
+     *
+     * scrollIntoView walks up for a scrollable ancestor, and here that walk
+     * happens while the sheet is still being laid out — it picked the document,
+     * moved nothing, and the section stayed a thousand pixels down. Measuring the
+     * two rects and moving the panel by the difference needs no guess about which
+     * ancestor scrolls, and works whether the sheet has settled or not.
+     *
+     * Two frames, not one: the first is the render that opens the section, the
+     * second is after the sheet has taken its height. Measuring in between gives
+     * an offset that is correct for a layout no longer on screen.
+     */
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(`[data-sect="${openSection}"]`);
+        const panel = el?.closest<HTMLElement>('.panel');
+        if (!el || !panel) return;
+        const delta = el.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+        panel.scrollTo({ top: panel.scrollTop + delta, behavior: 'smooth' });
+      });
+    });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [openSection]);
   const [asr, setAsr] = useState<AsrOptions | null>(null);
   const [fillerMode, setFillerMode] = useState<FillerMode>('hesitations');
   const [customFillers, setCustomFillers] = useState<string[]>(loadCustomFillers);
@@ -2696,19 +2768,39 @@ export default function App() {
           * The transcript and the rail cannot share a phone's width, so one is
           * on screen at a time and this row picks which. Grid placement comes
           * from the mobile media query; on desktop the bar is display:none. */}
-        <nav className="m-tabs" aria-label="Editor surface">
-          <button
-            className={mobileTab === 'script' ? 'm-tab on' : 'm-tab'}
-            onClick={() => setMobileTab('script')}
-          >
-            Script
-          </button>
-          <button
-            className={mobileTab === 'tools' ? 'm-tab on' : 'm-tab'}
-            onClick={() => setMobileTab('tools')}
-          >
-            Tools
-          </button>
+        {/*
+          * The phone tool bar: one labelled icon per rail section, scrolling
+          * sideways.
+          *
+          * It replaces a two-way Script/Tools switch, which cost a tap into a wall
+          * of eleven collapsed rows, then a scroll, then a tap to open the one you
+          * came for — three actions and a hunt to reach Captions. A scrolling row
+          * of labelled icons is what mobile editors do, and the reason is that the
+          * labels ARE the table of contents: finding a tool costs a glance.
+          *
+          * Tapping one opens that section as a sheet over the script; tapping it
+          * again closes it. The script is never swapped away, so the line you are
+          * working on stays readable while you change the thing.
+          */}
+        <nav className="m-tools" aria-label="Tools">
+          {MOBILE_TOOLS.map((t) => {
+            const on = openSection === t.key;
+            return (
+              <button
+                key={t.key}
+                className={on ? 'm-tool on' : 'm-tool'}
+                aria-pressed={on}
+                onClick={() => {
+                  const next = on ? null : t.key;
+                  setOpenSection(next);
+                  setMobileTab(next ? 'tools' : 'script');
+                }}
+              >
+                <Icon name={t.icon} size={19} />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
         </nav>
 
         {/* ---- phone-only: banners float over the workspace ----
@@ -2725,91 +2817,96 @@ export default function App() {
         )}
 
         {/* ---- the inspector for whatever is selected: the full-height right column ---- */}
-        <Rail
-          safeArea={safeArea}
-          onSafeArea={chooseSafeArea}
-          socialHasWords={words.length > 0}
-            project={project}
-            hasScript={!!doc}
-            selectedWords={selectedWords}
-            stats={stats}
-            verbatim={project?.verbatim ?? true}
-            asrProvider={project?.asrProvider ?? null}
-            cut={cut ?? editDefaults(caps)}
-            setCut={updateCut}
-            onCutDragStart={beginCutDrag}
-            onCutDragEnd={endCutDrag}
-            captions={captions}
-            setCaptions={updateCaptions}
-            onCaptionDragStart={beginCaptionDrag}
-            onCaptionDragEnd={endCaptionDrag}
-            studioSound={doc?.studioSound ?? false}
-            onToggleStudioSound={updateStudioSound}
-            frame={frame}
-            setFrame={updateFrame}
-            onFrameDragStart={beginFrameDrag}
-            onFrameDragEnd={endFrameDrag}
-            onPunchIn={punchInOnSelection}
-            punchBlocked={punchBlocked}
-            onMarkMove={markMove}
-            onRemoveMove={deletePunchIn}
-            onSetMove={setMove}
-            onFollowMove={followMove}
-            onClearFollow={(id) => setMovePath(id, [])}
-            markingMoveId={markingMoveId}
-            following={following}
-            onSeek={seek}
-            overlays={overlays}
-            imageUrls={imageUrls}
-            imageNames={imageNames}
-            onSetOverlay={setOverlay}
-            onRemoveOverlay={deleteImageOverlay}
-            onOverlayDragStart={beginOverlayDrag}
-            onOverlayDragEnd={endOverlayDrag}
-            editingOverlayId={editingOverlayId}
-            onEditOverlay={setEditingOverlayId}
-            onGenerateImage={generateImageForPrompt}
-            onImportImage={importImageFile}
-            onRetargetOverlayToWord={retargetOverlayToWord}
-            generatingImage={generating}
-            canGenerateImages={Boolean(caps?.images?.generate)}
-            onMoveImageHere={movableOverlay ? moveImageHere : undefined}
-            moveImageLabel={movableOverlay ? imageNames[movableOverlay.assetId] : undefined}
-            color={color}
-            setColor={updateColor}
-            onColorDragStart={beginColorDrag}
-            onColorDragEnd={endColorDrag}
-            customFonts={customFonts}
-            onImportFont={importFont}
-            onRemoveFont={removeFont}
-            fontBusy={fontBusy}
-            onImportMusic={importMusic}
-            onPickMusic={pickMusic}
-            musicProviders={caps.musicProviders ?? ['openverse']}
-            onUpdateMusic={updateMusic}
-            onRemoveMusic={removeMusic}
-            musicBusy={musicBusy}
-            fillerMode={fillerMode}
-            setFillerMode={setFillerMode}
-            customFillers={customFillers}
-            onAddCustomFiller={addCustomFiller}
-            onRemoveCustomFiller={removeCustomFiller}
-            retakeMin={retakeMin}
-            setRetakeMin={setRetakeMin}
-            fillerCount={doc ? countFillers(fillerMode === 'all', customFillers) : 0}
-            retakeCount={doc ? countRetakes(retakeMin) : 0}
-            onRemoveFillers={doFillers}
-            onRemoveRetakes={doRetakes}
-            onRestoreAll={doRestoreAll}
-            onTranscribe={() => setDialog('transcribe')}
-            onDeleteSelection={() => setSelectionDeleted(true)}
-            onRestoreSelection={() => setSelectionDeleted(false)}
-            onPlaySelection={playSelection}
-            busy={busy}
-            agentEnabled={caps.agent?.enabled ?? false}
-            agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
-            onOpenSettings={() => setSettingsOpen(true)}
-          />
+        {/* The provider turns the rail's sections into an accordion the phone
+            tool bar can drive. No provider on a desk, where each section keeps
+            its own state and any number may be open. */}
+        <SectionOpen.Provider value={{ key: openSection, set: setOpenSection }}>
+          <Rail
+            safeArea={safeArea}
+            onSafeArea={chooseSafeArea}
+            socialHasWords={words.length > 0}
+              project={project}
+              hasScript={!!doc}
+              selectedWords={selectedWords}
+              stats={stats}
+              verbatim={project?.verbatim ?? true}
+              asrProvider={project?.asrProvider ?? null}
+              cut={cut ?? editDefaults(caps)}
+              setCut={updateCut}
+              onCutDragStart={beginCutDrag}
+              onCutDragEnd={endCutDrag}
+              captions={captions}
+              setCaptions={updateCaptions}
+              onCaptionDragStart={beginCaptionDrag}
+              onCaptionDragEnd={endCaptionDrag}
+              studioSound={doc?.studioSound ?? false}
+              onToggleStudioSound={updateStudioSound}
+              frame={frame}
+              setFrame={updateFrame}
+              onFrameDragStart={beginFrameDrag}
+              onFrameDragEnd={endFrameDrag}
+              onPunchIn={punchInOnSelection}
+              punchBlocked={punchBlocked}
+              onMarkMove={markMove}
+              onRemoveMove={deletePunchIn}
+              onSetMove={setMove}
+              onFollowMove={followMove}
+              onClearFollow={(id) => setMovePath(id, [])}
+              markingMoveId={markingMoveId}
+              following={following}
+              onSeek={seek}
+              overlays={overlays}
+              imageUrls={imageUrls}
+              imageNames={imageNames}
+              onSetOverlay={setOverlay}
+              onRemoveOverlay={deleteImageOverlay}
+              onOverlayDragStart={beginOverlayDrag}
+              onOverlayDragEnd={endOverlayDrag}
+              editingOverlayId={editingOverlayId}
+              onEditOverlay={setEditingOverlayId}
+              onGenerateImage={generateImageForPrompt}
+              onImportImage={importImageFile}
+              onRetargetOverlayToWord={retargetOverlayToWord}
+              generatingImage={generating}
+              canGenerateImages={Boolean(caps?.images?.generate)}
+              onMoveImageHere={movableOverlay ? moveImageHere : undefined}
+              moveImageLabel={movableOverlay ? imageNames[movableOverlay.assetId] : undefined}
+              color={color}
+              setColor={updateColor}
+              onColorDragStart={beginColorDrag}
+              onColorDragEnd={endColorDrag}
+              customFonts={customFonts}
+              onImportFont={importFont}
+              onRemoveFont={removeFont}
+              fontBusy={fontBusy}
+              onImportMusic={importMusic}
+              onPickMusic={pickMusic}
+              musicProviders={caps.musicProviders ?? ['openverse']}
+              onUpdateMusic={updateMusic}
+              onRemoveMusic={removeMusic}
+              musicBusy={musicBusy}
+              fillerMode={fillerMode}
+              setFillerMode={setFillerMode}
+              customFillers={customFillers}
+              onAddCustomFiller={addCustomFiller}
+              onRemoveCustomFiller={removeCustomFiller}
+              retakeMin={retakeMin}
+              setRetakeMin={setRetakeMin}
+              fillerCount={doc ? countFillers(fillerMode === 'all', customFillers) : 0}
+              retakeCount={doc ? countRetakes(retakeMin) : 0}
+              onRemoveFillers={doFillers}
+              onRemoveRetakes={doRetakes}
+              onRestoreAll={doRestoreAll}
+              onTranscribe={() => setDialog('transcribe')}
+              onDeleteSelection={() => setSelectionDeleted(true)}
+              onRestoreSelection={() => setSelectionDeleted(false)}
+              onPlaySelection={playSelection}
+              busy={busy}
+              agentEnabled={caps.agent?.enabled ?? false}
+              agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
+        </SectionOpen.Provider>
 
       <footer className="tl">
         <Transport

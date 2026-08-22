@@ -2376,7 +2376,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 /* The phone-only elements. They are always in the DOM (App.tsx renders them
  * unconditionally so no JS media-query mirror is needed); CSS decides. */
-.m-tabs, .m-banners { display: none; }
+.m-tools, .m-banners { display: none; }
 
 /* Narrow (a phone, either orientation's portrait) OR short (a landscape
  * phone — 844×390 is WIDER than the desktop breakpoint but has no height for
@@ -2425,29 +2425,50 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   .app.m-view-script .rail { display: none; }
   .app.m-view-tools .script { display: none; }
 
-  /* ---- the switcher ---- */
-  .m-tabs {
+  /* ---- the tool bar ----
+   * A scrolling row of labelled icons, one per rail section. Grid area is the
+   * one the two-way switcher used to occupy.
+   *
+   * scroll-snap so a flick lands on a whole button rather than halfway through a
+   * label, and -webkit-overflow-scrolling for momentum on iOS. The scrollbar is
+   * hidden because a 3px bar under a row of touch targets is noise; the row is
+   * visibly cut off at the edge, which is the affordance that matters. */
+  .m-tools {
     grid-area: mtabs;
-    display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-1);
+    display: flex; gap: var(--s-1);
+    overflow-x: auto; overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
     padding: var(--s-1) var(--s-2);
     background: var(--chrome);
     border-top: 1px solid var(--line-soft);
     border-bottom: 1px solid var(--line-soft);
   }
-  .m-tab {
-    padding: 9px;
-    font-size: var(--t-ui); font-weight: 600; color: var(--dim);
-    background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  .m-tools::-webkit-scrollbar { display: none; }
+
+  .m-tool {
+    flex: 0 0 auto; scroll-snap-align: start;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; min-width: 62px; padding: 6px 8px;
+    font-size: 10.5px; font-weight: 550; letter-spacing: -.01em;
+    color: var(--dim);
+    background: none; border: 1px solid transparent; border-radius: var(--r-2);
+    white-space: nowrap;
   }
-  /* Solid gold for "this one", same as every selected thing in the app.
-   * The :hover variant is load-bearing, not polish: a tap leaves the button in
-   * :hover, and base.css's `button:hover:not(:disabled)` (0,2,1) would beat a
-   * bare `.m-tab.on` (0,2,0) — the selected tab then wore the grey hover fill
+  /* The label under the icon is what makes this scannable, so it must not be
+     dropped when a name is long — it is ellipsised at the button's width. */
+  .m-tool span {
+    max-width: 72px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .m-tool.on,
+  .m-tool.on:hover {
+    color: var(--accent-fg); background: var(--accent); border-color: var(--accent);
+  }
+  /* The :hover variant above is load-bearing, not polish: a tap leaves the
+   * button in :hover, and base.css's `button:hover:not(:disabled)` (0,2,1) beats
+   * a bare `.m-tool.on` (0,2,0) — the selected tool then wore the grey hover fill
    * under its gold-expecting dark text and was unreadable. */
-  .m-tabs .m-tab.on,
-  .m-tabs .m-tab.on:hover {
-    background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
-  }
 
   /* ---- banners ----
    * The in-script pair may be on the hidden surface, so the fixed copies from
@@ -2523,7 +2544,50 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
       'center content'
       'dock   dock';
   }
-  .m-tab { padding: 5px; }
+  .m-tool { min-width: 54px; padding: 4px 6px; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The tool sheet.
+ *
+ * Tapping a tool used to swap the whole content area for the rail — which on a
+ * phone is about 267px, of which the scrolling panel got 178. That is one
+ * control's worth of room, so "open Captions" showed you a sliver of Captions
+ * and left you scrolling anyway.
+ *
+ * A tool needs space, so it takes it: the panel becomes a bottom sheet over the
+ * dock, and the script and the picture stay where they were behind it. That is
+ * the shape every mobile editor uses for this, and it is right for the same
+ * reason a dialog is right — you are doing one thing, and the thing you were
+ * doing before is still there when you finish.
+ *
+ * Over the dock rather than over the picture: while you are setting captions or
+ * a crop, the frame is the one thing you need to keep seeing.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 599px) and (min-height: 521px) {
+  .app.m-view-tools .rail {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    height: 56vh; z-index: var(--z-hud);
+    background: var(--chrome);
+    border-top: 1px solid var(--line);
+    border-radius: var(--r-3) var(--r-3) 0 0;
+    box-shadow: 0 -12px 32px rgb(0 0 0 / .45);
+  }
+  /* The panel inside now has the sheet's height to scroll in, not 178px. */
+  .app.m-view-tools .rail .panel { max-height: none; }
+
+  /* The script stays put behind the sheet instead of being unmounted, so
+     closing the sheet does not re-render and re-scroll the transcript. */
+  .app.m-view-tools .script { display: block; }
+
+  /* The assistant button would sit on top of the sheet. */
+  .app.m-view-tools > .fab { display: none; }
+
+  /* The group captions inside the sheet are a table of contents for a list you
+     are no longer reading — you picked a tool, and the bar above already says
+     which. That is ~50px of a 473px sheet spent naming the thing you are
+     looking at. The rail's own tabs stay: Social has no other way in. */
+  .app.m-view-tools .rail .pgroup-head { display: none; }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -2577,7 +2641,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
   /* Two columns of tabs across the full width was a 400px-wide pair of buttons
      for a two-way choice. Half the width is still generous. */
-  .m-tabs { padding: var(--s-1) var(--s-2) 0; }
+  .m-tools { padding: var(--s-1) var(--s-2) 0; }
 
 }
 
@@ -2649,8 +2713,8 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   /* Export commits minutes of work — a mis-tap is expensive in both directions. */
   .titlebar .primary { min-height: 44px; }
 
-  /* The switcher decides which half of the editor you are looking at. */
-  .m-tab { min-height: 44px; }
+  /* Every tool in the bar is a landable target. */
+  .m-tool { min-height: 52px; }
 
   /* Toggles and the speed picker sit in the transport's second row. */
   .transport .toggle,

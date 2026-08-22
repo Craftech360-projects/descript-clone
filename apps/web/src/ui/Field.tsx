@@ -28,6 +28,27 @@ import Icon, { type IconName } from './Icon.tsx';
  * means the row is no longer one element. So: an explicit button/aria-expanded
  * disclosure, which is the same contract <details> implements, spelled out.
  */
+/**
+ * Lets something outside a Section decide which one is open.
+ *
+ * The phone tool bar needs to open a named section — "Captions", say — and the
+ * sections each held their own boolean, so nothing outside could reach them.
+ * A context rather than props threaded through eleven call sites, because the
+ * panel that renders them does not care about this and should not have to.
+ *
+ * It also makes the phone an accordion: setting one key closes the rest. That is
+ * the right behaviour on a small screen, where eleven open sections is a very
+ * long scroll and you only came here for one of them. On a desk there is no
+ * provider, so sections keep their own state and any number can be open at once.
+ */
+export const SectionOpen = createContext<{
+  key: string | null;
+  set: (key: string | null) => void;
+} | null>(null);
+
+/** Stable key for a section, derived from its label so nothing has to be typed twice. */
+export const sectionKey = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
 export function Section({ icon, label, value, toggle, children, defaultOpen }: {
   icon: IconName;
   label: string;
@@ -44,11 +65,20 @@ export function Section({ icon, label, value, toggle, children, defaultOpen }: {
   children: ReactNode;
   defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(Boolean(defaultOpen));
+  const [selfOpen, setSelfOpen] = useState(Boolean(defaultOpen));
   const bodyId = useId();
 
+  // Controlled when a provider is present (the phone), self-managed otherwise.
+  const shared = useContext(SectionOpen);
+  const key = sectionKey(label);
+  const open = shared ? shared.key === key : selfOpen;
+  const setOpen = (next: boolean) => {
+    if (shared) shared.set(next ? key : null);
+    else setSelfOpen(next);
+  };
+
   return (
-    <section className={`sect${open ? ' open' : ''}`}>
+    <section className={`sect${open ? ' open' : ''}`} data-sect={key}>
       <div className="sect-head">
         <button
           type="button"

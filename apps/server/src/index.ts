@@ -241,6 +241,7 @@ app.get('/api/capabilities', (c) =>
         model.provider === 'mock' ||
         (model.provider === 'elevenlabs' && CONFIG.hasElevenLabsAsr()) ||
         (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()) ||
+        (model.provider === 'deepgram' && CONFIG.hasDeepgramAsr()) ||
         (model.provider === 'apple' && CONFIG.hasAppleSpeech()),
     })),
     asrDefaults: defaultAsrOptions(),
@@ -2027,6 +2028,7 @@ const server = serve({ fetch: app.fetch, port: CONFIG.port, hostname: CONFIG.hos
     CONFIG.hasElevenLabsAsr() ? 'ElevenLabs Scribe' : '',
     CONFIG.hasSarvamAsr() ? 'Sarvam Saaras v3' : '',
     CONFIG.hasAppleSpeech() ? 'Apple on-device (no key, no diarization)' : '',
+    CONFIG.hasDeepgramAsr() ? 'Deepgram Nova-3' : '',
   ].filter(Boolean).join(' + ') || 'disabled (mock ASR)';
   console.log(`asr     ${asr}`);
   console.log(

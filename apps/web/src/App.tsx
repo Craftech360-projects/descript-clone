@@ -2778,6 +2778,7 @@ export default function App() {
       </footer>
 
       <TranscribeDialog
+        onOpenSettings={() => setSettingsOpen(true)}
         open={dialog === 'transcribe'}
         onClose={() => setDialog(null)}
         project={project}

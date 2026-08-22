@@ -2287,6 +2287,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--warn-fg); font-size: var(--t-small); line-height: 1.5;
 }
 
+/* A warning that offers the fix needs somewhere to put the button. */
+.warn-act { margin-top: var(--s-2); }
+
 /* ---- Connect Hermes ---- */
 .set-rule { margin: var(--s-5) 0 var(--s-4); border: 0; border-top: 1px solid var(--line); }
 .set-section { margin: 0 0 var(--s-3); font-size: var(--t-ui); font-weight: 600; color: var(--text); }

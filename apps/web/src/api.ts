@@ -294,12 +294,17 @@ export interface Capabilities {
   hasAsr: boolean;
   asrModels: Array<{
     id: string;
-    provider: 'elevenlabs' | 'sarvam' | 'mock';
+    // Kept in step with ASR_MODELS in apps/server/src/config.ts. This union had
+    // drifted — 'apple' was added server-side and never here — which nothing
+    // catches, since the repo runs type-stripping rather than a type checker.
+    provider: 'elevenlabs' | 'sarvam' | 'deepgram' | 'apple' | 'mock';
     label: string;
     hint: string;
     verbatim: boolean;
     verified: boolean;
     available: boolean;
+    /** What it needs before it can run, phrased for a person. May be absent on older servers. */
+    requires?: string;
   }>;
   asrDefaults: AsrOptions;
   editDefaults: CutSettings;

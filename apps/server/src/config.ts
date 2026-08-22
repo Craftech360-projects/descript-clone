@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 /** The ElevenLabs speech-to-text endpoint. One call: the body is the audio. */
 export const ASR_ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
 export const SARVAM_ASR_ENDPOINT = 'https://api.sarvam.ai';
+export const DEEPGRAM_ASR_ENDPOINT = 'https://api.deepgram.com/v1/listen';
 
 /**
  * Transcription models the user can pick between in the Transcribe panel.
@@ -51,6 +52,15 @@ export const ASR_MODELS = [
   {
     id: 'scribe_v1',
     provider: 'elevenlabs',
+    /**
+     * What this model needs before it can run, in words a person can act on.
+     *
+     * The Transcribe panel used to derive this with a ternary over the provider
+     * id, which meant every model that was not Sarvam claimed to need
+     * ELEVENLABS_API_KEY — including the on-device one, which needs no key at all
+     * and cannot be fixed by adding one. Requirements belong beside the model.
+     */
+    requires: 'an ElevenLabs API key',
     label: 'ElevenLabs Scribe',
     hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings + diarization. Filler removal needs this.',
     verbatim: true,
@@ -59,6 +69,7 @@ export const ASR_MODELS = [
   {
     id: 'saaras_v3',
     provider: 'sarvam',
+    requires: 'a Sarvam API key',
     label: 'Sarvam Saaras v3',
     hint: 'Indic-language ASR with verbatim mode. Phrase timings are distributed across words for editing.',
     verbatim: true,
@@ -67,14 +78,25 @@ export const ASR_MODELS = [
   {
     id: 'apple_speech',
     provider: 'apple',
+    requires: 'macOS 26 or newer on this Mac — no key, and no way to add one',
     label: 'Apple On-Device (Mac)',
     hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings, no key, no upload. No speaker labels.',
     verbatim: true,
     verified: true,
   },
   {
+    id: 'nova_3',
+    provider: 'deepgram',
+    requires: 'a Deepgram API key',
+    label: 'Deepgram Nova-3',
+    hint: 'Verbatim with filler_words on: keeps "um"/"uh". Word timings + diarization. Fast, and works on any Mac.',
+    verbatim: true,
+    verified: false,
+  },
+  {
     id: 'mock',
     provider: 'mock',
+    requires: 'nothing',
     label: 'Mock (no API cost)',
     hint: 'Fake words, real timings. Exercises the whole pipeline for free.',
     verbatim: true,
@@ -136,6 +158,18 @@ export const CONFIG = {
   /** Sarvam API key for Saaras v3 speech-to-text. Runtime-editable like the ElevenLabs key. */
   get sarvamApiKey() {
     return process.env.SARVAM_API_KEY || process.env.__BAKED_SARVAM_KEY__ || '';
+  },
+
+  /**
+   * Deepgram API key for Nova-3 speech-to-text. Runtime-editable like the rest.
+   *
+   * Worth having specifically for Macs that cannot run the on-device model:
+   * SpeechTranscriber needs macOS 26, which rules out every Intel Mac mini, and
+   * without a cloud provider those machines fall back to the mock and silently
+   * produce fake words.
+   */
+  get deepgramApiKey() {
+    return process.env.DEEPGRAM_API_KEY || '';
   },
 
   /**
@@ -215,7 +249,12 @@ export const CONFIG = {
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
     if (process.env.ASR_PROVIDER === 'mock') return false;
-    return Boolean(this.elevenLabsKey) || Boolean(this.sarvamApiKey) || appleSpeechReady();
+    return (
+      Boolean(this.elevenLabsKey) ||
+      Boolean(this.sarvamApiKey) ||
+      Boolean(this.deepgramApiKey) ||
+      appleSpeechReady()
+    );
   },
 
   /**
@@ -235,6 +274,10 @@ export const CONFIG = {
 
   hasSarvamAsr(): boolean {
     return Boolean(this.sarvamApiKey) && process.env.ASR_PROVIDER !== 'mock';
+  },
+
+  hasDeepgramAsr(): boolean {
+    return Boolean(this.deepgramApiKey) && process.env.ASR_PROVIDER !== 'mock';
   },
 
   /** Whether the Grok assistant is configured — it needs an xAI key and nothing else. */

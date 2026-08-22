@@ -12,7 +12,7 @@ interface Props {
 }
 
 /** The order the rows appear in; ids match the server's MANAGED_KEYS. */
-const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'sarvam', 'gemini', 'jamendo'];
+const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'sarvam', 'deepgram', 'gemini', 'jamendo'];
 
 /**
  * The app's settings: its API keys, and who is allowed to drive it.

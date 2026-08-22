@@ -1247,11 +1247,15 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* The filter goes on this wrapper, never on the button: it would take the border
  * and the focus ring with it, so the "chosen" gold would be graded too — and on
  * the Mono chip it would come out grey, which is the one thing it must not do. */
+/* 4:5 and CONTAIN, for the reason .dc-poster gives: this chip is a swatch you
+ * pick a colour grade off, and under 16:9 + cover a vertical frame was cropped
+ * to a horizontal band across its middle. You were choosing a look from a strip
+ * of whatever happened to be at the centre of the picture. */
 .grade-chip-img {
   display: block; overflow: hidden; border-radius: 3px;
-  aspect-ratio: 16 / 9; background: var(--void);
+  aspect-ratio: 4 / 5; background: var(--void);
 }
-.grade-chip-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.grade-chip-img img { width: 100%; height: 100%; object-fit: contain; display: block; }
 /* Stand-in for a project whose poster the server has not built yet. A ramp
  * rather than a flat colour, so a contrast or a lift is still visible on it. */
 .grade-chip-ramp {
@@ -1743,18 +1747,29 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .dcard.renaming:hover .dc-poster img { transform: none; }
 
 /* True black behind the frame — a poster is a piece of picture, and the theme
- * does not tint picture. 16:9 regardless of the source so the grid stays a grid
- * when a vertical video lands in it; the frame letterboxes inside. */
+ * does not tint picture.
+ *
+ * ONE tile shape regardless of the source, so the grid stays a grid when a
+ * vertical video lands next to a horizontal one. But the shape is 4:5, not 16:9,
+ * because this editor's subject is vertical video: a 9:16 poster letterboxed
+ * into a 16:9 tile is a thumbnail about a third of the tile's width, which is
+ * not enough of a picture to recognise your own footage by.
+ *
+ * And it CONTAINS rather than covers. The old rule said "the frame letterboxes
+ * inside" and then spelt it `object-fit: cover`, which is the opposite — cover
+ * crops. A vertical poster in a 16:9 tile was centre-cropped to a horizontal
+ * sliver, so every reel on the dashboard was a band of whatever happened to be
+ * across the middle of the frame. Contain is what the comment always meant. */
 .dc-poster {
   position: relative;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 4 / 5;
   background: var(--void);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
 .dc-poster img {
   width: 100%; height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
   /* Nudged, not zoomed: a hair of scale on hover reads as the card lifting
    * without the frame ever losing its edges. */
@@ -2411,4 +2426,131 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   min-width: 0;
   font-size: 11px;
   padding: 2px 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * REELS · laying out for a vertical programme
+ *
+ * Everything above this block was written when the output was assumed to be
+ * landscape. That assumption is visible the moment the frame is 9:16: the centre
+ * column is the grid's `1fr`, so it takes every pixel the two splitters leave,
+ * and `containBox` then fits a tall narrow picture inside a wide short box. The
+ * picture ends up sized by the column's HEIGHT while the column keeps its width,
+ * and the difference — often half the window — is filled with mat.
+ *
+ * `App` now publishes `data-frame="portrait|landscape|square"` on `.app`, from
+ * the same `frameSize` the renderer uses. These rules read it.
+ *
+ * The fix is not to shrink the picture; it is to stop the centre column claiming
+ * width it cannot use, and hand that width to the transcript — which is the
+ * surface you actually work in, and the one whose measure was capped at 640px
+ * while the mat got the rest.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The width guard is not optional, and the arithmetic is the reason.
+ *
+ * The default grid survives any window because its centre column is `1fr`, which
+ * can be squeezed to nothing. The portrait grid replaces that with tracks that
+ * have FLOORS — 440 script + 1 + 280 monitor + 1 + 372 rail = 1094px of minimum.
+ * Applied unguarded at a 951px window it overflowed by 143px and pushed the rail
+ * clean off the right edge (measured, in the browser, exactly that).
+ *
+ * So the reels layout is an enhancement that switches on only where it fits, and
+ * below 1120px the original landscape grid — which cannot overflow — is left to
+ * do its job. */
+@media (min-width: 1120px) {
+  .app[data-frame='portrait'] {
+    /* The centre column stops being `1fr` and becomes "as much as a 9:16 picture
+     * can use, and no more". The script pane takes the slack as `1fr`, so
+     * widening the window widens the thing being read. `--w-script` survives as
+     * the MINIMUM so the splitter still has an effect — dragging it sets the
+     * floor the script will not go below. */
+    grid-template-columns:
+      minmax(var(--w-script, 440px), 1fr)
+      1px
+      minmax(280px, var(--monitor-max-portrait))
+      1px
+      var(--w-rail, 372px);
+  }
+}
+
+/* The measure cap exists so a line of transcript never runs too long to track
+ * back to. In portrait there is more width to spend, so spend some of it — but
+ * on the line, not on the mat. 760px keeps the line inside the 45–90 character
+ * band that typographic practice puts comfortable reading in. */
+.app[data-frame='portrait'] .page {
+  max-width: 760px;
+}
+
+/* A vertical picture is tall, and the stage's vertical padding is what decides
+ * how much of it survives. Give the height back. */
+.app[data-frame='portrait'] .monitor {
+  padding: var(--s-3) var(--s-3) var(--s-2);
+}
+
+/* With the column capped, the mat is now a thin surround rather than a field —
+ * so it can afford to be quieter and let the picture carry the eye. */
+.app[data-frame='portrait'] .stage {
+  background: var(--n-2);
+}
+
+/* ── the phone stack, told about portrait ──────────────────────────────────
+ * The mobile layout gives the monitor `minmax(150px, 32vh)`, a number chosen
+ * for a landscape picture. A 9:16 frame fitted into 32vh is a sliver about
+ * 0.56 x that height wide, stranded in mat. A vertical programme on a vertical
+ * screen should use the height it has. */
+@media (max-width: 820px) {
+  .app[data-frame='portrait'] {
+    grid-template-rows: 48px minmax(220px, 46vh) auto minmax(0, 1fr) 232px;
+  }
+}
+
+/* Square sits between the two: it cannot use a wide column either, but it needs
+ * less height than a reel. */
+@media (min-width: 1180px) {
+  .app[data-frame='square'] {
+    grid-template-columns:
+      minmax(var(--w-script, 440px), 1fr)
+      1px
+      minmax(320px, 620px)
+      1px
+      var(--w-rail, 372px);
+  }
+}
+
+/* The boot gate's failure state.
+ *
+ * "Loading workspace…" used to be the only thing this screen could ever say, so
+ * an unreachable API server showed an ellipsis forever. A dead end needs three
+ * things: what went wrong, what is usually behind it, and a way out. */
+.boot-fail {
+  max-width: 40ch;
+  text-align: center;
+  display: grid;
+  gap: var(--s-3);
+  justify-items: center;
+  color: var(--text);
+}
+.boot-fail h2 {
+  font-size: var(--t-lg);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+.boot-why {
+  color: var(--cut-fg);
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+}
+.boot-hint {
+  color: var(--faint);
+  font-size: var(--t-ui);
+  line-height: var(--lh-normal);
+}
+.boot-hint code {
+  font-family: var(--font-mono);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  padding: 1px var(--s-1);
+  color: var(--dim);
 }

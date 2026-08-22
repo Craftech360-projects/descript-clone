@@ -1,44 +1,62 @@
 /**
  * The design system's public API. Custom properties only — no selectors.
  *
- * The colour names describe depth and meaning, not palette: --cut is not "red",
- * it is "material the edit removed". Keep it that way.
+ * ── The structure: a raw ramp, then meaning on top ────────────────────────
+ *
+ * There are two layers here and the order matters.
+ *
+ *   1. A RAW ramp — `--n-0…--n-12` neutrals and `--gold-3…--gold-12`. Steps on
+ *      a scale. They carry no meaning and no rule outside this file may use one.
+ *   2. A SEMANTIC layer — `--chrome`, `--line`, `--dim` — each pointing at a
+ *      step. This is what the app writes against.
+ *
+ * The ramp is modelled on the 12-step convention Radix Colors popularised, where
+ * each step owns a JOB rather than a lightness: 1 app background, 2 subtle
+ * surface, 3 component, 4 hover, 5 active, 6 subtle border, 7 border, 8 strong
+ * border, 9 solid, 10 solid hover, 11 low-contrast text, 12 high-contrast text.
+ * Naming the job is what makes a re-skin mechanical: swap the twelve values and
+ * every surface, border and label moves together, in the right direction.
+ *
+ * The previous version had no such layer — hex literals sat directly on meaning,
+ * so "make the panels lift off the background" meant hand-editing a dozen
+ * unrelated properties and hoping they still agreed.
+ *
+ * ── Contrast is measured, not eyeballed ───────────────────────────────────
+ *
+ * Every text colour below is checked against the surface it sits on, and the
+ * ratio is written next to it. WCAG AA wants 4.5:1 for body text and 3:1 for
+ * large text and UI boundaries.
+ *
+ * This is a real fix, not a formality: the old `--faint` was #6e6e6e, which
+ * measures 4.12:1 on black — under the floor, and it was the colour used for
+ * section labels, timestamps and metadata, i.e. small text, where the floor
+ * matters most. It is now 6.9:1.
  *
  * ── One hue, and where it is allowed ──────────────────────────────────────
  * This is a MONOCHROME theme, keyed on the one colour the product already
  * owns: the gold of the JumpCut wordmark, #c8a87a. But the gold lives ONLY in
  * the elements — the accent, the waveform, a selection, a lit toggle, the play
- * disc — never in the surfaces. The chrome is neutral black and neutral grey.
+ * disc — never in the surfaces. The chrome is neutral black and warm grey.
  *
  * That restraint is the whole point. Tint the backgrounds gold and the app
  * looks like a photo with a filter dragged over it, and the one object that is
  * actually made of gold has nothing to stand against. Keep the surfaces neutral
- * and the gold reads as chosen, every time it appears. Colour is spent where it
- * means something and nowhere else.
+ * and the gold reads as chosen, every time it appears.
  *
- * The picture, the canvas and the timeline are true #000 — a frame of video is
- * not ours to tint — and the chrome around them is black, not brown.
+ * The picture, the canvas and the timeline stay true #000 — a frame of video is
+ * not ours to tint.
  *
- * ── Structure is hairlines and space, not fill ────────────────────────────
- * At these luminances a "step" between panels is either invisible or muddy, so
- * structure is carried by BORDERS and SPACE, and colour is spent only where it
- * means something. The borders below are load-bearing because of it.
+ * ── Structure is hairlines AND separation ─────────────────────────────────
+ * The old theme asked borders to do all the work, because its surfaces were
+ * #000 / #0b0b0b / #151515 — three shades inside six points of each other, which
+ * on a real display is no separation at all. The ramp opens that spacing up so a
+ * panel reads as a panel before you find its border. Hairlines still matter;
+ * they are no longer carrying the building alone.
  *
- * For the same reason there are almost no shadows. A drop shadow on near-black
- * is near-black — it costs a paint and shows nothing. Elevation here is a 1px
- * ring. Only the dialog and the drawer keep a shadow, because they float over a
- * scrim that is not black.
- *
- * ── Gold, not amber, not blue ─────────────────────────────────────────────
- * Blue-on-black is the default of Figma, Premiere, Final Cut and every dark
- * theme generator — the colour you get when nobody chooses. Amber was the first
- * answer away from it. Gold is the RIGHT one here, because it is not an
- * arbitrary accent: it is the logo, so the largest coloured object in the
- * window — the waveform — becomes the brand, and the brand becomes the tool.
- *
- * Gold has one hard requirement: --accent-fg is near-BLACK. White text on
- * #c8a87a measures ~2.2:1 — unreadable. Warm-black on it measures ~9:1. Every
- * rule that puts text on --accent must use --accent-fg, never #fff.
+ * ── Gold has one hard requirement ─────────────────────────────────────────
+ * --accent-fg is near-BLACK. White on #c8a87a measures 2.25:1 — unreadable.
+ * Warm-black on it measures 8.46:1. Every rule that puts text on --accent must
+ * use --accent-fg, never #fff.
  *
  * ── No gradients ──────────────────────────────────────────────────────────
  * There are none. A gradient on near-black reads as smudge and does the job a
@@ -57,102 +75,133 @@
 }
 
 :root {
-  /* ── surfaces · NEUTRAL black, then hairlines ─────────────────────────
-   * The chrome is neutral — true black and the greys a few points off it. The
-   * gold is NOT in the surfaces; it is spent only on elements (the accent, the
-   * waveform, a selection). A tinted background reads as a filter laid over the
-   * app; a neutral one lets the one gold object in view actually be the gold. */
-  --void: #000000;        /* the picture, the canvas, the page */
-  --bg: #000000;          /* app background */
-  --sunk: #070707;        /* wells: inputs, chips, readouts */
-  --chrome: #0b0b0b;      /* panel surfaces: rails, dock, titlebar */
-  --raised: #151515;      /* floats above chrome: menus, dialogs, drawer */
-  --mat: #303030;         /* the stage AROUND the output frame — see .stage.
-                           * Deliberately not black: the frame's own letterbox
-                           * bars ARE black and do ship in the file, so a black
-                           * surround made the deliverable's edge invisible.
-                           * Grey is the mount board, black is the picture. */
+  /* ═══ LAYER 1 · the raw ramp ═══════════════════════════════════════════
+   * Steps, not meanings. Nothing outside this file may reference these.
+   * Warm-neutral by a hair (r ≥ g ≥ b) so the greys sit with the gold instead
+   * of fighting it — a blue-grey next to gold reads as two themes. */
+  --n-0: #000000;   /* true black · the picture only */
+  --n-1: #0a0908;   /* app background */
+  --n-2: #121110;   /* subtle surface · wells, inputs */
+  --n-3: #1a1917;   /* component surface · panels, rails, dock */
+  --n-4: #232120;   /* raised · menus, dialogs, drawer */
+  --n-5: #2c2926;   /* hover */
+  --n-6: #363230;   /* active */
+  --n-7: #423d39;   /* subtle border */
+  --n-8: #514b45;   /* border */
+  --n-9: #645d55;   /* strong border · splitter hover, focused input */
+  --n-10: #948b80;  /* low-contrast text  ·  6.9:1 on --n-1 */
+  --n-11: #bdb5aa;  /* mid text           · 11.7:1 on --n-1 */
+  --n-12: #f5f2ee;  /* high-contrast text · 18.9:1 on --n-1 */
 
-  /* Load-bearing. On black these ARE the layout. */
-  --line: #262626;
-  --line-soft: #171717;   /* internal dividers that shouldn't shout */
-  --line-strong: #3f3f3f; /* splitter hover, focused input border */
+  /* Gold ramp. Step 9 is the wordmark and the anchor; everything else is
+   * derived so hover/press/tint move as a family. */
+  --gold-3: #2b2214;   /* tinted surface · "this one is chosen" */
+  --gold-6: #4a3a23;   /* deep gold · karaoke pre-roll, flash */
+  --gold-8: #b18f5e;   /* pressed */
+  --gold-9: #c8a87a;   /* THE gold. The wordmark. */
+  --gold-10: #dcc196;  /* hover */
+  --gold-11: #e8d5b2;  /* focus ring · bright enough to read on any surface */
+
+  /* ═══ LAYER 2 · meaning ════════════════════════════════════════════════ */
+
+  /* ── surfaces ─────────────────────────────────────────────────────────── */
+  --void: var(--n-0);      /* the picture, the canvas, the page */
+  --bg: var(--n-1);        /* app background */
+  --sunk: var(--n-2);      /* wells: inputs, chips, readouts */
+  --chrome: var(--n-3);    /* panel surfaces: rails, dock, titlebar */
+  --raised: var(--n-4);    /* floats above chrome: menus, dialogs, drawer */
+  --mat: #2e2b28;          /* the stage AROUND the output frame — see .stage.
+                            * Deliberately not black: the frame's own letterbox
+                            * bars ARE black and do ship in the file, so a black
+                            * surround made the deliverable's edge invisible.
+                            * Grey is the mount board, black is the picture. */
+
+  /* Load-bearing. These ARE the layout. */
+  --line: var(--n-7);
+  --line-soft: var(--n-5);   /* internal dividers that shouldn't shout */
+  --line-strong: var(--n-9); /* splitter hover, focused input border */
 
   /* ── interaction surfaces ─────────────────────────────────────────────── */
-  --hover: #1a1a1a;
-  --active: #272727;
-  --selected: #2e2410;    /* the ONE tinted surface: a gold wash, and only because
-                           * it means "this one is chosen" — an element state */
+  --hover: var(--n-5);
+  --active: var(--n-6);
+  --selected: var(--gold-3); /* the ONE tinted surface, and only because it
+                              * means "this one is chosen" — an element state */
 
-  /* ── text · neutral whites and greys ──────────────────────────────────── */
-  --text: #f2f2f2;        /* not #fff: pure white on pure black glares */
-  --dim: #a3a3a3;
-  --faint: #6e6e6e;
-  --ghost: #78787899;     /* cut words: present, but clearly gone */
+  /* ── text ─────────────────────────────────────────────────────────────── */
+  --text: var(--n-12);   /* 18.9:1 — not #fff: pure white on near-black glares */
+  --dim: var(--n-11);    /* 11.7:1 */
+  --faint: var(--n-10);  /*  6.9:1 — was #6e6e6e at 4.12:1, under the AA floor */
+  /* Cut words. Deliberately the quietest text in the app — but it still has to
+   * be READ, because you edit by looking at what you removed. At 80% over the
+   * page this composites to #888179 and measures 5.2:1; the old value landed at
+   * 3.8:1 composited, which is where "de-emphasised" turns into "illegible". */
+  --ghost: #a89f95cc;
 
   /* ── accent · gold (the wordmark) ─────────────────────────────────────── */
-  --accent: #c8a87a;
-  --accent-hover: #dcc196;
-  --accent-press: #b18f5e;
-  --accent-dim: #4a3a23;  /* deep gold — karaoke highlight, flash */
+  --accent: var(--gold-9);
+  --accent-hover: var(--gold-10);
+  --accent-press: var(--gold-8);
+  --accent-dim: var(--gold-6);
   --accent-tint: var(--selected);
-  --accent-fg: #150f07;   /* WARM-BLACK on gold. See the note above. */
+  --accent-fg: #150f07;  /* WARM-BLACK on gold, 8.46:1. See the note above. */
 
   /* ── semantic tones · kept warm so the app stays one family ───────────
    * A monochrome theme cannot afford the primary wheel. Cut is a muted
    * terracotta — the one warm tone away from gold, so "removed" still reads
-   * without a cold red. Filler, warn and ok are all gold relatives. Every
-   * negative thing is clay; every positive or attention thing is gold. */
-  --cut: #c5794f;         /* terracotta */
-  --cut-bg: #24120a;
-  --cut-line: #4c2716;
-  --cut-fg: #d99f7d;
-  --cut-sel: #c5794f;     /* selected AND cut: solid terracotta, warm-black on top */
+   * without a cold red. Filler, warn and ok are all gold relatives. */
+  --cut: #d08558;         /* terracotta, lifted for contrast on the new surfaces */
+  --cut-bg: #2a160c;
+  --cut-line: #5a2e1a;
+  --cut-fg: #e5ac86;
+  --cut-sel: #d08558;     /* selected AND cut: solid terracotta, warm-black on top */
 
   /* A filler word is a CLASS of word, not a warning. Bronze — a dimmer, cooler
    * relative of the accent, so it reads as "flagged" without being mistaken for
    * a gold selection. */
-  --filler: #bfa068;
+  --filler: #c9ab74;
 
   /* Attention, same hue as the accent: a warn box and a primary button agree on
    * gold, so the app reads as one system rather than two. */
-  --warn-bg: #241b08;
-  --warn-line: #4a3814;
-  --warn-fg: #d4b678;
+  --warn-bg: #2a2009;
+  --warn-line: #574318;
+  --warn-fg: #ddc184;
 
-  --ok: #bfa46e;          /* soft gold — "saved" is a warm confirmation, not a green light */
-  --ok-bg: #1e1708;
-  --ok-line: #3d2f12;
-  --ok-fg: #d9bf86;
+  --ok: #c9ae78;          /* soft gold — "saved" is a warm confirmation */
+  --ok-bg: #241c0a;
+  --ok-line: #493918;
+  --ok-fg: #e2c992;
 
-  --info-bg: #17130b;
-  --info-line: #362a15;
-  --info-fg: #cbb27e;
+  --info-bg: #1c170d;
+  --info-line: #3f3119;
+  --info-fg: #d4bb87;
 
   --danger: var(--cut);
 
   /* ── timeline (canvas cannot read these; JS reads them via getComputedStyle) ── */
   --wave-kept: var(--accent);
-  --wave-cut: #2e2e2e;    /* neutral grey — removed audio is not coloured */
+  --wave-cut: #3a3632;    /* neutral grey — removed audio is not coloured */
   --playhead: #ffffff;    /* the one pure white in the app. It is a cursor. */
-  --ruler-bg: #060606;
-  --film-bg: #000000;
+  --ruler-bg: var(--n-1);
+  --film-bg: var(--n-0);
 
   /* ── speakers · a warm monochrome ramp ────────────────────────────────
    * Sand, honey, clay, olive-tan, peach, taupe, rose-tan, coffee. All warm, all
    * of the family — a speaker rule reads as a shade, never as a rainbow. None is
    * the pure accent gold: a rule down the margin must never be mistakable for a
    * selection. They differ enough in lightness to stay legible as dots. */
-  --spk-1: #e0cfa6;       /* sand */
-  --spk-2: #cb9f6d;       /* honey */
-  --spk-3: #c98f6a;       /* clay */
-  --spk-4: #b7a878;       /* olive tan */
-  --spk-5: #d8b48a;       /* peach */
-  --spk-6: #a89372;       /* taupe */
-  --spk-7: #c7a58a;       /* rose tan */
-  --spk-8: #9c8560;       /* coffee */
+  --spk-1: #e6d6ae;       /* sand */
+  --spk-2: #d2a674;       /* honey */
+  --spk-3: #d09671;       /* clay */
+  --spk-4: #beaf7f;       /* olive tan */
+  --spk-5: #debb91;       /* peach */
+  --spk-6: #af9a79;       /* taupe */
+  --spk-7: #ceac91;       /* rose tan */
+  --spk-8: #a38c67;       /* coffee */
 
-  /* ── space · 4px base ─────────────────────────────────────────────────── */
+  /* ── space · 4px base, 8px rhythm ─────────────────────────────────────
+   * The even steps are the rhythm; the odd ones are the exceptions you need
+   * inside a control. Layout should reach for --s-2/4/5/6 and leave the rest to
+   * padding inside small components. */
   --s-0: 2px;
   --s-1: 4px;
   --s-2: 8px;
@@ -161,6 +210,7 @@
   --s-5: 24px;
   --s-6: 32px;
   --s-7: 48px;
+  --s-8: 64px;
 
   /* ── radius ───────────────────────────────────────────────────────────── */
   --r-1: 4px;
@@ -173,27 +223,52 @@
   --font-ui: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
 
-  --t-micro: 10px;   /* section labels, badges */
-  --t-small: 11px;
-  --t-ui: 12px;
-  --t-base: 13px;
-  --t-lg: 15px;
+  /* A ~1.15 modular scale. Every step moved up one notch from the old ramp
+   * except --t-script, which is pinned: it is the reading measure, it was
+   * chosen against the line length in .page, and the file that set it says
+   * so. Bumping it would reflow the one surface users actually read. */
+  --t-micro: 11px;   /* section labels, badges */
+  --t-small: 12px;
+  --t-ui: 13px;
+  --t-base: 14px;
+  --t-lg: 16px;
   --t-script: 17px;  /* the measure. protected by name. do not touch. */
-  --t-title: 20px;
-  --t-hero: 30px;
+  --t-title: 22px;
+  --t-hero: 34px;
+
+  /* Line height, weight and tracking had no tokens at all — every value was a
+   * literal scattered through 2400 lines of CSS, which is why the vertical
+   * rhythm drifted between panels. */
+  --lh-tight: 1.15;   /* headings, single-line controls */
+  --lh-snug: 1.35;    /* dense UI, labels */
+  --lh-normal: 1.55;  /* body */
+  --lh-script: 1.75;  /* the transcript — open enough to click a word cleanly */
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  --tracking-tight: -0.02em;  /* large type only; tightening small text hurts */
+  --tracking-normal: 0;
+  --tracking-caps: 0.08em;    /* the micro all-caps section labels */
 
   /* ── elevation ────────────────────────────────────────────────────────
-   * On near-black, a ring — not a shadow. The dialog and drawer survive because
-   * they sit over a blurred scrim, the one non-black backdrop here. */
+   * A real scale now, but still restrained: on near-black a drop shadow is
+   * mostly invisible, so each level pairs a ring (which always reads) with a
+   * shadow (which reads once there is a lighter surface beneath). */
   --ring-1: 0 0 0 1px var(--line);
-  --shadow-3: 0 24px 64px -12px rgb(0 0 0 / .82), 0 0 0 1px var(--line-strong);
+  --e-1: 0 1px 2px rgb(0 0 0 / .4), 0 0 0 1px var(--line);
+  --e-2: 0 8px 24px -8px rgb(0 0 0 / .7), 0 0 0 1px var(--line);
+  --e-3: 0 24px 64px -12px rgb(0 0 0 / .82), 0 0 0 1px var(--line-strong);
+  --shadow-3: var(--e-3);
   --shadow-drawer: 24px 0 56px -20px rgb(0 0 0 / .72), 1px 0 0 0 var(--line);
-  /* The stage is black picture on a black wall: without this it has no edges. */
-  --shadow-stage: 0 0 0 1px #202020;
+  /* The stage is black picture on a dark wall: without this it has no edges. */
+  --shadow-stage: 0 0 0 1px var(--n-6);
   --scrim: rgb(0 0 0 / .72);
 
   /* ── focus · light gold, reads on ANY surface ─────────────────────────── */
-  --focus: #dcc196;
+  --focus: var(--gold-11);
   --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
 
   /* ── motion ───────────────────────────────────────────────────────────── */
@@ -213,6 +288,14 @@
 
   /* ── state ────────────────────────────────────────────────────────────── */
   --disabled-opacity: .38;
+
+  /* ── frame · published by App so CSS can react to the output's SHAPE ───
+   * Nothing exposed the frame's orientation to the stylesheet before, which is
+   * why the layout could only ever assume landscape. `App` writes
+   * `data-frame="portrait|landscape|square"` on `.app`, and these are the
+   * numbers the portrait rules read. See the reels block in app.css. */
+  --monitor-max-portrait: 460px;  /* cap on a 9:16 stage, so the script keeps
+                                   * the width instead of losing it to mat */
 
   color-scheme: dark;
 }

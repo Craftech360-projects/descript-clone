@@ -85,10 +85,23 @@ export const FRAME_PRESETS = {
   square: { width: 1080, height: 1080, label: 'Square', hint: 'Feed posts' },
 } as const;
 
+/**
+ * New projects start as a REEL — 1080x1920, vertical.
+ *
+ * 'source' (keep whatever shape was imported) is the neutral choice and the
+ * wrong one for this editor's actual use: the work here is short vertical video,
+ * and a default that matches the destination means the frame you compose against
+ * is the frame that ships. Landscape footage dropped into a reel is cover-fitted
+ * by `frameFilterStages`, so nothing is lost — the crop is visible immediately
+ * and adjustable by pan and zoom, rather than discovered at export.
+ *
+ * Change one line here to move the whole app's default shape; every consumer
+ * reads this, and `normalizeFrame` backfills it for documents that predate it.
+ */
 export const DEFAULT_FRAME: FrameSettings = {
-  preset: 'source',
-  width: 0,
-  height: 0,
+  preset: 'reel',
+  width: FRAME_PRESETS.reel.width,
+  height: FRAME_PRESETS.reel.height,
   zoom: 1,
   x: 0,
   y: 0,
@@ -133,6 +146,17 @@ export function clampPan(x: number, y: number): { x: number; y: number } {
  */
 export function normalizeFrame(input?: Partial<FrameSettings> | null): FrameSettings {
   const f = input ?? {};
+  /**
+   * A MISSING preset reads as 'source', deliberately not as DEFAULT_FRAME's.
+   *
+   * These two answer different questions. DEFAULT_FRAME is "what shape should a
+   * new project be?" — a reel. This is "what did a record that stored nothing
+   * mean?" — and the only safe reading of silence is "nobody chose, so do not
+   * touch the media". Wiring this to DEFAULT_FRAME.preset would re-crop every
+   * project saved before the default changed, on open, without asking.
+   *
+   * New projects get the default stamped in at import instead.
+   */
   const preset: FramePreset =
     f.preset === 'reel' || f.preset === 'youtube' || f.preset === 'square' || f.preset === 'custom'
       ? f.preset

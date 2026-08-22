@@ -46,6 +46,57 @@ export const LOCAL_PREFIX = 'local:';
 export const isLocalModel = (id: string): boolean => id.startsWith(LOCAL_PREFIX);
 export const stripPrefix = (id: string): string => id.slice(LOCAL_PREFIX.length);
 
+/**
+ * The tools a local model gets — a subset, deliberately.
+ *
+ * Measured on this machine with Ollama 0.32 and qwen2.5:7b: handed ONE tool it
+ * calls it correctly and says nothing else. Handed all 63 (34KB of schema) it
+ * stops calling tools at all and answers in prose — in the observed case it
+ * offered to transcribe a project that was already transcribed.
+ *
+ * That is not a plumbing failure and not really a model failure either: tool
+ * selection degrades with breadth, and a 7B model choosing between sixty-three
+ * options is being asked something a frontier model finds easy and it does not.
+ * Hosted models keep the full set; local models get the editing verbs someone
+ * actually asks for out loud, which is where the value is anyway.
+ *
+ * Ordered roughly by how often a person says the sentence that triggers them.
+ */
+const CORE_TOOLS = [
+  'get_project_context',
+  'read_transcript',
+  'find_in_transcript',
+  'remove_fillers',
+  'remove_retakes',
+  'delete_text',
+  'restore_text',
+  'correct_word',
+  'select_text',
+  'set_pause_cap',
+  'split_at_playhead',
+  'set_captions',
+  'set_speed',
+  'seek',
+  'undo',
+  'export_video',
+];
+
+/**
+ * Narrow a tool list for a local model. Anything unrecognised is dropped rather
+ * than passed through, so this stays a whitelist as the tool set grows.
+ */
+export function narrowTools(tools: unknown): unknown {
+  if (!Array.isArray(tools)) return tools;
+  const keep = new Set(CORE_TOOLS);
+  const narrowed = tools.filter((t) => {
+    const name = (t as { function?: { name?: string } })?.function?.name;
+    return typeof name === 'string' && keep.has(name);
+  });
+  // If the shapes ever change and nothing matches, sending everything is a
+  // better failure than sending nothing.
+  return narrowed.length > 0 ? narrowed : tools;
+}
+
 interface Found {
   baseUrl: string;
   models: string[];
@@ -135,6 +186,70 @@ export function registerLocalAgent(app: Hono): void {
 }
 
 /**
+ * Rescue a tool call a small model emitted as PROSE.
+ *
+ * Observed with qwen2.5:7b: asked to cut long pauses it answered with the
+ * content field set to
+ *
+ *     nostalgically {"name": "set_pause_cap", "arguments": {"ms": 500}}
+ *
+ * — the right call, in the wrong channel, with a stray word in front. The model
+ * decided correctly and then failed at protocol, which is the characteristic
+ * small-model failure and a silly reason to lose a turn.
+ *
+ * Deliberately narrow: it fires only when the model returned NO real tool calls,
+ * it requires a name the tool list actually contains, and anything it cannot
+ * parse cleanly is left alone as ordinary text. A false positive here would
+ * invent an edit nobody asked for, so the bar is "unambiguous or nothing".
+ */
+export function salvageToolCall(message: any, tools: unknown): any {
+  if (!message || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0)) return message;
+  const content = typeof message.content === 'string' ? message.content : '';
+  if (!content.includes('"name"')) return message;
+
+  const names = new Set(
+    (Array.isArray(tools) ? tools : [])
+      .map((t: any) => t?.function?.name)
+      .filter((n: unknown): n is string => typeof n === 'string'),
+  );
+
+  // Scan for balanced JSON objects rather than regexing nested braces.
+  for (let i = content.indexOf('{'); i !== -1; i = content.indexOf('{', i + 1)) {
+    let depth = 0;
+    for (let j = i; j < content.length; j++) {
+      if (content[j] === '{') depth++;
+      else if (content[j] === '}') depth--;
+      if (depth !== 0) continue;
+
+      try {
+        const parsed = JSON.parse(content.slice(i, j + 1));
+        if (parsed && typeof parsed.name === 'string' && names.has(parsed.name)) {
+          const args = parsed.arguments ?? parsed.parameters ?? {};
+          return {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: `salvaged_${parsed.name}`,
+                type: 'function',
+                function: {
+                  name: parsed.name,
+                  arguments: typeof args === 'string' ? args : JSON.stringify(args),
+                },
+              },
+            ],
+          };
+        }
+      } catch {
+        /* not JSON, or not the shape we want — keep scanning */
+      }
+      break;
+    }
+  }
+  return message;
+}
+
+/**
  * One turn against the local model. Same contract as the Grok branch: in goes
  * the conversation plus tools, out comes one assistant message for the client
  * to execute.
@@ -159,7 +274,13 @@ export async function chat(
       headers: { 'Content-Type': 'application/json' },
       // No streaming: the client's loop wants one complete message per turn, and
       // a local model on a laptop is fast enough that the wait is not the problem.
-      body: JSON.stringify({ model, messages, tools, tool_choice: 'auto', stream: false }),
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: narrowTools(tools),
+        tool_choice: 'auto',
+        stream: false,
+      }),
       // Generous: a 7B model on CPU can take a while for the first token, and
       // failing a turn that was merely slow is worse than waiting.
       signal: AbortSignal.timeout(180_000),
@@ -180,7 +301,7 @@ export async function chat(
 
     const message = data?.choices?.[0]?.message;
     if (!message) return { error: 'The local model returned no message.', status: 502 };
-    return { message };
+    return { message: salvageToolCall(message, narrowTools(tools)) };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // A timeout here is almost always the model still loading into memory.

@@ -151,6 +151,48 @@ line of it. The recoverability comes from the mirror and the snapshots.
 
 ---
 
+## Installing the Mac app
+
+Two DMGs, and they are **not** interchangeable:
+
+| File | For |
+|---|---|
+| `Transcript Editor-0.1.0-arm64.dmg` | Apple Silicon (M1/M2/M3…) |
+| `Transcript Editor-0.1.0-x64.dmg` | Intel |
+
+Both are built from `desktop/mac`:
+
+```bash
+npm run dist        # arm64
+npm run dist:intel  # x64
+```
+
+They can be built on one machine — a Mac Silicon host cross-compiles the Intel
+app fine. Build them **one at a time**: the media binaries are per-architecture
+and `npm run tools` deletes them before reinstalling so the arch flags take
+effect. `afterPack.cjs` refuses to package a mismatch, so a mistake here fails the
+build rather than shipping.
+
+The apps are **not notarised**, so macOS quarantines them on first open:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Transcript Editor.app"
+```
+
+### On-device transcription needs macOS 26
+
+`SpeechTranscriber` does not exist before macOS 26 — it is a hard compile error
+below that, not a warning — and macOS 26 supports very few Intel Macs. So on an
+Intel Mac mini you will almost certainly have no on-device speech.
+
+The app says so rather than pretending: the Transcribe panel reports that no
+transcription is configured, warns that pressing the button produces *invented
+words*, and offers an **Add a key** button. Add **Deepgram**, ElevenLabs or Sarvam
+and it transcribes for real. Deepgram Nova-3 is a good default — it keeps
+`um`/`uh` (which filler removal needs) and does diarization.
+
+Burned-in captions work on either machine; the caption helper builds for macOS 11.
+
 ## Which mode to run in
 
 | | Editing video | Changing features |

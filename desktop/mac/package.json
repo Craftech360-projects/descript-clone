@@ -48,7 +48,8 @@
       "category": "public.app-category.video",
       "identity": null,
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   },
   "//": [

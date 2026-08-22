@@ -53,12 +53,27 @@ export function candidatePaths(): string[] {
   return out;
 }
 
+/**
+ * Find the bridge, preferring one that is actually ALIVE.
+ *
+ * There can legitimately be more than one: the installed app keeps its bridge in
+ * Application Support, a repo checkout keeps one in ./data, and someone doing
+ * both has two. Returning the first READABLE file meant a stale entry from an app
+ * that exited last week shadowed a server running right now — every tool then
+ * reported "not running" while the editor sat there open.
+ *
+ * So collect them all, and return the first that answers `looksAlive`. If none
+ * do, fall back to the first readable one anyway: that is what makes
+ * editor_status able to say "last seen on port 8787" instead of "no bridge file",
+ * which is a more useful thing to tell someone.
+ */
 export async function read(): Promise<Bridge | null> {
+  const found: Bridge[] = [];
   for (const path of candidatePaths()) {
     try {
       const d = JSON.parse(await readFile(path, 'utf8')) as Partial<Bridge>;
       if (typeof d.port === 'number' && typeof d.token === 'string') {
-        return {
+        found.push({
           enabled: d.enabled === true,
           host: d.host ?? '127.0.0.1',
           port: d.port,
@@ -68,13 +83,25 @@ export async function read(): Promise<Bridge | null> {
           pid: d.pid ?? 0,
           startedAt: d.startedAt ?? '',
           token: d.token,
-        };
+        });
       }
     } catch {
       // Not here, or unreadable. Try the next.
     }
   }
-  return null;
+  return pickBridge(found);
+}
+
+/**
+ * Choose between the bridges we found. Pure, so it can be tested without a
+ * machine that happens to have the right apps installed.
+ *
+ * Alive wins over position. If none are alive, the first is returned anyway so
+ * editor_status can say "last seen on port 8787" rather than "no bridge file" —
+ * a more useful thing to tell someone whose app has crashed.
+ */
+export function pickBridge(found: Bridge[]): Bridge | null {
+  return found.find(looksAlive) ?? found[0] ?? null;
 }
 
 /**

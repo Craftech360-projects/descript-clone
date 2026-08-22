@@ -77,7 +77,7 @@ function run(cmd: string, args: string[], cwd = repoRoot()): Promise<Ran> {
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s || '(no output)' }] });
 
 /** Pull the counts out of node --test's TAP tail rather than dumping 500 lines at a model. */
-function summarizeTap(out: string): string {
+export function summarizeTap(out: string): string {
   const num = (k: string) => Number(new RegExp(`^# ${k} (\\d+)$`, 'm').exec(out)?.[1] ?? -1);
   const pass = num('pass');
   const fail = num('fail');
@@ -87,9 +87,37 @@ function summarizeTap(out: string): string {
   const head = `${num('tests')} tests, ${pass} pass, ${fail} fail, ${num('skipped')} skipped.`;
   if (!fail) return `${head} Green.`;
 
-  // The failing NAMES and their assertion messages are what a fix starts from.
-  const why = [...out.matchAll(/^\s+error: (.+)$/gm)].map((m) => m[1]).slice(0, 12);
-  return [head, '', 'Failing:', ...failures.map((f) => `  ${f}`), '', ...why.map((w) => `  ${w}`)].join('\n');
+  /**
+   * The assertion messages, which are where a fix actually starts.
+   *
+   * node --test writes them as YAML block scalars — `error: |-` followed by the
+   * real text indented beneath. Matching `error: (.+)` therefore captures the
+   * literal "|-" and throws the message away, handing the agent a failing test
+   * name with no reason. Take the indented block instead.
+   */
+  const why: string[] = [];
+  for (const m of out.matchAll(/^(\s+)error: (\|-?|>-?)?\s*(.*)$/gm)) {
+    const [, indent, block, inline] = m;
+    if (!block) {
+      if (inline) why.push(inline.replace(/^'|'$/g, ''));
+      continue;
+    }
+    // Everything indented deeper than the `error:` key belongs to its value.
+    const rest = out.slice(m.index! + m[0].length + 1).split('\n');
+    const body: string[] = [];
+    for (const line of rest) {
+      if (line.trim() && !line.startsWith(indent + ' ')) break;
+      if (line.trim()) body.push(line.trim());
+    }
+    if (body.length) why.push(body.join(' — '));
+  }
+
+  return [
+    head,
+    '',
+    'Failing:',
+    ...failures.map((f, i) => `  ${f}${why[i] ? `\n      ${why[i]}` : ''}`),
+  ].join('\n');
 }
 
 export function buildDevServer(): McpServer {
@@ -161,8 +189,34 @@ export function buildDevServer(): McpServer {
       inputSchema: {},
     },
     async () => {
-      // A dangling commit git fsck can find, in case the tree held something
-      // uncommitted that the revert is about to disturb. Costs nothing.
+      /**
+       * Uncommitted work is the common case, and reverting HEAD would be wrong.
+       *
+       * The loop is: checkpoint, edit, test, and if red go back. At the "if red"
+       * moment the bad edit is usually still in the WORKING TREE — so `git revert
+       * HEAD` would undo the checkpoint that was taken before the edit, leaving
+       * the broken change in place and destroying the good commit. It would look
+       * like it worked, and the next test run would still be red.
+       *
+       * Say so, and name the tool that actually helps.
+       */
+      const dirty = (await run('git', ['status', '--porcelain'])).out;
+      if (dirty) {
+        return text(
+          [
+            'The broken change is not committed yet, so there is no commit to revert.',
+            'Reverting HEAD here would undo your checkpoint and keep the bad edit.',
+            '',
+            'To throw the working changes away and go back to the last commit:',
+            '  git_reset_to with sha "HEAD"',
+            '',
+            'Uncommitted files:',
+            dirty,
+          ].join('\n'),
+        );
+      }
+
+      // A dangling commit git fsck can find, in case anything is disturbed.
       const stash = await run('git', ['stash', 'create']);
       const head = (await run('git', ['log', '-1', '--oneline'])).out;
       const r = await run('git', ['revert', '--no-edit', 'HEAD']);

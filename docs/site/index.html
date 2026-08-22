@@ -1,0 +1,639 @@
+<title>Jumpstart</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+/*
+ * The palette is the app's own: the gold from its wordmark on a warm near-black.
+ * Committed to a single dark world on purpose — this is a video editor, it lives
+ * on dark, and a light version would be a different product's site. Every colour
+ * is painted explicitly so the page holds on any host ground.
+ */
+:root {
+  --ink:        #0b0b0e;
+  --ink-2:      #101015;
+  --surface:    #16161c;
+  --surface-2:  #1d1d25;
+  --line:       #282833;
+  --line-soft:  #1e1e27;
+
+  --text:       #eceae6;
+  --dim:        #a9a29a;
+  --faint:      #8a837b;   /* 5.4:1 on --ink */
+
+  --gold:       #c8a87a;   /* THE gold — the app's wordmark */
+  --gold-hi:    #dcc196;
+  --gold-dim:   #8a7455;
+  --gold-ink:   #150f07;   /* warm black ON gold, 8.4:1 */
+
+  --cut:        #94776a;   /* struck-through: muted, still 4.8:1 */
+  --ok:         #7fa87f;
+
+  --w:          1120px;
+  --r:          10px;
+}
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.wrap { width: min(100% - 48px, var(--w)); margin-inline: auto; }
+
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+
+.display {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
+}
+
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+a { color: var(--gold); text-decoration-color: color-mix(in srgb, var(--gold) 40%, transparent); text-underline-offset: 3px; }
+a:hover { color: var(--gold-hi); }
+
+/* ─── top bar ─────────────────────────────────────────────────────────── */
+header {
+  position: sticky; top: 0; z-index: 50;
+  background: color-mix(in srgb, var(--ink) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.bar { display: flex; align-items: center; gap: 20px; height: 62px; }
+.mark { font-weight: 700; font-size: 17px; letter-spacing: -0.02em; color: var(--gold); }
+.bar nav { margin-left: auto; display: flex; gap: 26px; font-size: 14px; }
+.bar nav a { color: var(--dim); text-decoration: none; }
+.bar nav a:hover { color: var(--text); }
+@media (max-width: 720px) { .bar nav { display: none; } }
+
+/* ─── hero ────────────────────────────────────────────────────────────── */
+.hero { padding: 92px 0 68px; position: relative; }
+.hero::before {
+  content: ""; position: absolute; inset: -20% 0 40% 0; pointer-events: none;
+  background: radial-gradient(60% 50% at 50% 0%, color-mix(in srgb, var(--gold) 9%, transparent), transparent 70%);
+}
+.hero > * { position: relative; }
+.hero h1 { font-size: clamp(46px, 7.4vw, 88px); margin: 20px 0 0; }
+.hero h1 em { font-style: italic; color: var(--gold); }
+.lede {
+  font-size: clamp(18px, 2.1vw, 21px); color: var(--dim);
+  max-width: 62ch; margin: 24px 0 0;
+}
+
+/* ─── the demo: the whole product in one box ──────────────────────────── */
+.demo {
+  margin-top: 44px;
+  border: 1px solid var(--line); border-radius: 14px;
+  background: linear-gradient(180deg, var(--surface), var(--ink-2));
+  overflow: hidden;
+}
+.demo-top {
+  display: flex; align-items: center; gap: 14px;
+  padding: 13px 18px; border-bottom: 1px solid var(--line-soft);
+  background: var(--surface-2);
+}
+.dots { display: flex; gap: 6px; }
+.dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); display: block; }
+.demo-title { font-size: 13px; color: var(--faint); }
+.demo-dur { margin-left: auto; font-size: 13px; color: var(--dim); }
+.demo-dur b { color: var(--gold); font-weight: 500; }
+
+.demo-body { display: grid; grid-template-columns: 1fr 268px; gap: 0; }
+@media (max-width: 860px) { .demo-body { grid-template-columns: 1fr; } }
+
+.script { padding: 30px 32px 26px; font-size: 19px; line-height: 2.05; }
+@media (max-width: 560px) { .script { padding: 22px 20px; font-size: 17px; } }
+.script .w { transition: color .28s ease, opacity .28s ease; }
+.script .w.gone {
+  color: var(--cut);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  opacity: .75;
+}
+
+.demo-side {
+  border-left: 1px solid var(--line-soft);
+  padding: 26px 24px; display: flex; flex-direction: column; gap: 18px;
+  background: color-mix(in srgb, var(--ink) 50%, transparent);
+}
+@media (max-width: 860px) { .demo-side { border-left: 0; border-top: 1px solid var(--line-soft); } }
+
+/* the 9:16 frame */
+.phone {
+  aspect-ratio: 9 / 16; width: 100%; max-width: 176px; margin-inline: auto;
+  border-radius: 14px; border: 1px solid var(--line);
+  background:
+    linear-gradient(200deg, #2a2620 0%, #17171c 55%, #101014 100%);
+  position: relative; overflow: hidden;
+}
+.phone .safe {
+  position: absolute; inset: 9% 6% 16% 6%;
+  border: 1px dashed color-mix(in srgb, var(--gold) 34%, transparent);
+  border-radius: 5px;
+}
+.phone .cap {
+  position: absolute; left: 9%; right: 9%; bottom: 22%;
+  text-align: center; font-size: 10.5px; font-weight: 700; line-height: 1.3;
+  color: #fff; text-shadow: 0 0 3px #000, 0 1px 2px #000;
+}
+.phone .cap span.hot { color: var(--gold-hi); }
+.phone .lab {
+  position: absolute; bottom: 7px; left: 0; right: 0; text-align: center;
+  font-size: 9px; letter-spacing: .1em; color: var(--faint); text-transform: uppercase;
+}
+
+.tighten {
+  width: 100%; cursor: pointer; font: inherit; font-size: 15px; font-weight: 600;
+  padding: 11px 16px; border-radius: var(--r);
+  background: var(--gold); color: var(--gold-ink); border: 1px solid var(--gold);
+  transition: background .15s ease, transform .06s ease;
+}
+.tighten:hover { background: var(--gold-hi); }
+.tighten:active { transform: translateY(1px); }
+.tighten:disabled { opacity: .45; cursor: default; }
+.tighten:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
+
+.counts { font-size: 13px; color: var(--faint); display: flex; flex-direction: column; gap: 5px; }
+.counts b { color: var(--dim); font-weight: 500; }
+
+/* ─── sections ────────────────────────────────────────────────────────── */
+section { padding: 78px 0; border-top: 1px solid var(--line-soft); }
+section h2 { font-size: clamp(30px, 4vw, 42px); margin-top: 12px; }
+.sub { color: var(--dim); max-width: 60ch; margin: 16px 0 0; }
+
+.grid { display: grid; gap: 18px; margin-top: 40px; }
+.g3 { grid-template-columns: repeat(3, 1fr); }
+.g2 { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 860px) { .g3, .g2 { grid-template-columns: 1fr; } }
+
+.card {
+  border: 1px solid var(--line); border-radius: var(--r);
+  padding: 24px 22px; background: var(--surface);
+}
+.card h3 { font-size: 17px; margin-bottom: 8px; }
+.card p { margin: 0; color: var(--dim); font-size: 15px; line-height: 1.6; }
+.card .tag {
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--gold);
+  letter-spacing: .08em; text-transform: uppercase; display: block; margin-bottom: 12px;
+}
+
+/* measured numbers */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line-soft);
+  border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; margin-top: 40px; }
+@media (max-width: 780px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+.stat { background: var(--surface); padding: 26px 20px; }
+.stat .n { font-family: "Instrument Serif", serif; font-size: 40px; color: var(--gold); line-height: 1; }
+.stat .k { font-size: 13px; color: var(--faint); margin-top: 10px; line-height: 1.45; }
+
+/* honest limits — the aesthetic risk: lead with what it can't do */
+.limits { border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; margin-top: 40px; }
+.limit { display: grid; grid-template-columns: 210px 1fr; gap: 22px; padding: 20px 24px; border-top: 1px solid var(--line-soft); }
+.limit:first-child { border-top: 0; }
+@media (max-width: 700px) { .limit { grid-template-columns: 1fr; gap: 6px; } }
+.limit dt { font-weight: 600; font-size: 15px; color: var(--text); }
+.limit dd { margin: 0; color: var(--dim); font-size: 15px; }
+
+/* tool pills */
+.tools { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 30px; }
+.tools span {
+  font-family: "IBM Plex Mono", monospace; font-size: 12px;
+  border: 1px solid var(--line); border-radius: 5px; padding: 5px 9px;
+  color: var(--faint); background: var(--surface);
+}
+.tools span.on { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 34%, transparent); }
+
+.split { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: start; }
+@media (max-width: 880px) { .split { grid-template-columns: 1fr; gap: 34px; } }
+
+.plat { display: flex; align-items: baseline; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line-soft); font-size: 15px; }
+.plat:first-child { border-top: 0; }
+.plat b { min-width: 96px; font-weight: 600; }
+.plat span { color: var(--dim); }
+.pill { font-family: "IBM Plex Mono", monospace; font-size: 11px; padding: 2px 7px; border-radius: 4px; letter-spacing: .04em; }
+.pill.yes { color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 34%, transparent); }
+.pill.part { color: var(--gold); border: 1px solid color-mix(in srgb, var(--gold) 34%, transparent); }
+
+pre {
+  background: var(--ink-2); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 18px 20px; overflow-x: auto; margin: 22px 0 0;
+  font-family: "IBM Plex Mono", monospace; font-size: 13.5px; line-height: 1.7; color: var(--dim);
+}
+pre b { color: var(--gold); font-weight: 500; }
+
+footer { border-top: 1px solid var(--line-soft); padding: 44px 0 60px; color: var(--faint); font-size: 14px; }
+.foot { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+.foot .mark { font-size: 15px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .script .w { transition: none; }
+}
+</style>
+
+<header>
+  <div class="wrap bar">
+    <span class="mark">Jumpstart</span>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#ai">The assistant</a>
+      <a href="#measured">Measured</a>
+      <a href="#limits">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <span class="eyebrow">Transcript-based video editing</span>
+    <h1 class="display">Delete the word.<br>The video <em>gets shorter.</em></h1>
+    <p class="lede">
+      Jumpstart cuts short vertical video by cutting its transcript. Every word carries its own
+      timecode, so striking one out removes exactly that slice of picture and sound — reversibly,
+      without touching the source file.
+    </p>
+
+    <div class="demo">
+      <div class="demo-top">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span class="demo-title mono">interview-take-3.mp4</span>
+        <span class="demo-dur mono">output <b id="dur">0:19</b></span>
+      </div>
+      <div class="demo-body">
+        <p class="script" id="script"></p>
+        <div class="demo-side">
+          <div class="phone">
+            <div class="safe"></div>
+            <div class="cap"><span class="hot">so what</span> we found</div>
+            <div class="lab">1080 × 1920</div>
+          </div>
+          <button class="tighten" id="go">Tighten for reels</button>
+          <div class="counts" id="counts"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <span class="eyebrow">The mechanic</span>
+      <h2 class="display">One press, three sweeps, one undo</h2>
+      <p class="sub">
+        Fillers, false starts and dead air are three different problems with three different
+        detectors. Tighten runs all of them and commits once — so taking it back is a single
+        Ctrl+Z, not an archaeology expedition.
+      </p>
+
+      <div class="grid g3">
+        <div class="card">
+          <span class="tag">Fillers</span>
+          <h3>Matched by shape, not a word list</h3>
+          <p>“um”, “uhh”, “mmm” are caught by pattern, so length doesn’t matter. Discourse markers —
+             “you know”, “I mean” — are flagged but never cut for you. That’s a voice decision.</p>
+        </div>
+        <div class="card">
+          <span class="tag">False starts</span>
+          <h3>No model involved</h3>
+          <p>When you restart a sentence, the words repeat. Longest-first n-gram matching finds the
+             repeat and keeps the last take. It’s arithmetic on the transcript, not a judgement call.</p>
+        </div>
+        <div class="card">
+          <span class="tag">Pauses</span>
+          <h3>With a floor, learned the hard way</h3>
+          <p>Capping every silence at 500&nbsp;ms made 65 of 175 cuts freeze the picture <em>longer</em>
+             than the gap they removed. A minimum trim fixed it: 175 cuts became 110, frozen picture
+             21.2s → 13.3s.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <span class="eyebrow">Vertical first</span>
+        <h2 class="display">Built for the 9:16 frame</h2>
+        <p class="sub">
+          New projects open as a reel. Reframe to YouTube or square when you need to, with zoom and
+          pan over a cover fit rather than letterboxing.
+        </p>
+        <p class="sub">
+          Safe-area guides show where Instagram, TikTok and YouTube put their own furniture over your
+          picture — so a caption you spent ten minutes positioning isn’t hidden behind a username.
+          They’re preview only, never burned in.
+        </p>
+        <p class="sub">
+          Captions are timed against the <em>output</em>, so they follow the cut by construction.
+          Style them — font, size, karaoke highlight, outline, box, position — export as SRT, VTT or
+          ASS, or burn them in.
+        </p>
+      </div>
+      <div>
+        <div class="card">
+          <span class="tag">Also in the box</span>
+          <h3>Push-ins that follow the subject</h3>
+          <p>Mark a region, zoom in for a stretch, with ease ramps at each end. A push-in can track a
+             moving subject using cross-correlation over frames the preview already decoded — no ML
+             model, no service, no GPU.</p>
+        </div>
+        <div class="card" style="margin-top:18px">
+          <h3>Studio Sound</h3>
+          <p>Highpass, mud dip, presence lift, de-ess, denoise, gentle compression and EBU R128
+             loudness — with a tone-matched live preview so you hear it before you commit.</p>
+        </div>
+        <div class="card" style="margin-top:18px">
+          <h3>Music that won’t get you a strike</h3>
+          <p>Search Openverse (no key needed) or Jamendo. Non-commercial and no-derivatives licences
+             are excluded, because ducking and trimming a track <em>is</em> a derivative work. Every
+             result carries its attribution.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ai">
+    <div class="wrap">
+      <span class="eyebrow">The assistant</span>
+      <h2 class="display">Seventy tools, and you can hand them to anything</h2>
+      <p class="sub">
+        Jumpy sits in the app and drives it the way you would. The same seventy tools are exposed
+        over MCP, so Claude Code, a Hermes agent, or any MCP client can cut your video — using the
+        identical undo history, so an agent’s edit and yours are indistinguishable afterwards.
+      </p>
+
+      <div class="tools">
+        <span class="on">remove_fillers</span><span class="on">remove_retakes</span><span class="on">delete_text</span>
+        <span class="on">set_captions</span><span class="on">set_frame</span><span class="on">add_push_in</span>
+        <span class="on">search_music</span><span class="on">generate_image</span><span class="on">export_video</span>
+        <span>read_transcript</span><span>find_in_transcript</span><span>correct_word</span>
+        <span>set_color</span><span>split_clip</span><span>track_subject</span>
+        <span>write_post</span><span>undo</span><span>… 53 more</span>
+      </div>
+
+      <div class="grid g3" style="margin-top:34px">
+        <div class="card">
+          <span class="tag">Bring your own model</span>
+          <h3>Claude, Grok, or local</h3>
+          <p>Claude runs on an API key <em>or</em> a Claude subscription you already pay for. Local
+             models work through Ollama, LM Studio or llama.cpp — auto-discovered, no key at all.</p>
+        </div>
+        <div class="card">
+          <span class="tag">Folder memory</span>
+          <h3>Copy that sounds like your channel</h3>
+          <p>Tell a folder what it’s for once. The same local model wrote “Listen to a silly crow
+             story” without that brief, and “Cheeko’s first try at a rhyming game” with it.</p>
+        </div>
+        <div class="card">
+          <span class="tag">Agent-ready</span>
+          <h3>It can change its own code</h3>
+          <p>A second MCP server exposes tests, git checkpoints, revert and restart — deliberately in
+             a separate process, so an agent that breaks the app still has the tools to fix it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="measured">
+    <div class="wrap">
+      <span class="eyebrow">Measured, not estimated</span>
+      <h2 class="display">Numbers we actually checked</h2>
+      <p class="sub">
+        Every figure here came from running it, and the reasoning is in the source comments next to
+        the code it justifies.
+      </p>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="n mono">324<span style="font-size:20px"> MB</span></div>
+          <div class="k">Render memory — flat at 40 cuts <em>and</em> 400. The earlier filter graph hit 2.9&nbsp;GB and never finished.</div>
+        </div>
+        <div class="stat">
+          <div class="n mono">581</div>
+          <div class="k">Tests, run with <span class="mono">node --test</span> — no framework, no API key, no network.</div>
+        </div>
+        <div class="stat">
+          <div class="n mono">41<span style="font-size:20px"> ms</span></div>
+          <div class="k">Median gap between caption cues on a real 14-minute transcript. 275 of 307 were under half a second, so they get closed.</div>
+        </div>
+        <div class="stat">
+          <div class="n mono">0</div>
+          <div class="k">Runtime dependencies in the core library. The cut, caption and framing logic is pure functions.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <span class="eyebrow">Privacy</span>
+        <h2 class="display">It can run with the network off</h2>
+        <p class="sub">
+          On a Mac running macOS&nbsp;26, transcription happens on the machine — free, no key, and
+          <em>verbatim</em>, which is the part that matters: a transcript that tidied away your
+          “um”s can’t be used to remove them.
+        </p>
+        <p class="sub">
+          Pair that with a local model and nothing leaves the machine at all — cuts, captions,
+          colour, framing, tracking and render are already local. When you do use a cloud
+          transcriber, the audio is the request body: no storage hop, no bucket, no public URL.
+        </p>
+      </div>
+      <div>
+        <div class="plat"><b>Transcription</b><span>ElevenLabs · Deepgram · Sarvam · Apple on-device</span></div>
+        <div class="plat"><b>Diarization</b><span>All but Apple on-device, which returns no speakers</span></div>
+        <div class="plat"><b>Assistant</b><span>Claude · Grok · any local OpenAI-compatible model</span></div>
+        <div class="plat"><b>Images</b><span>Generated with Gemini, or import your own with no key</span></div>
+        <pre>$ <b>npm test</b>
+# tests 582
+# pass  581
+# fail  0</pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="limits">
+    <div class="wrap">
+      <span class="eyebrow">Before you ask</span>
+      <h2 class="display">What it doesn’t do</h2>
+      <p class="sub">
+        This is the section most product pages leave out. These are real limits, stated plainly,
+        because finding them yourself after an afternoon of work is worse.
+      </p>
+
+      <dl class="limits">
+        <div class="limit">
+          <dt>You can’t type new words</dt>
+          <dd>A typed word has no timing, so there’s no audio for it. You can fix a word’s
+              <em>spelling</em> — which fixes the captions — and the editor marks it, so it never
+              pretends the audio changed. Real overdub needs text-to-speech, which isn’t built.</dd>
+        </div>
+        <div class="limit">
+          <dt>No layered tracks</dt>
+          <dd>Several source clips in one sequence: yes, reorder and split them. Parallel video
+              layers: no. It’s a sequence, not a multitrack timeline.</dd>
+        </div>
+        <div class="limit">
+          <dt>Nothing gets published</dt>
+          <dd>It drafts your title, description and hashtags. It does not upload to Instagram,
+              TikTok or YouTube — there’s no platform integration at all.</dd>
+        </div>
+        <div class="limit">
+          <dt>Filler removal needs a verbatim transcript</dt>
+          <dd>Whisper-family models normalise “um” away before you ever see it. The transcribe panel
+              flags a non-verbatim model rather than letting you discover it later.</dd>
+        </div>
+        <div class="limit">
+          <dt>One person, one machine</dt>
+          <dd>State is files plus an in-process cache, so run exactly one instance. Auth is a single
+              shared token with no users, scopes or expiry. That’s right for a personal editor and
+              explicitly not a team product.</dd>
+        </div>
+        <div class="limit">
+          <dt>Windows and Android are partial</dt>
+          <dd>macOS is built and shipping. Windows compiles but is unproven. Android runs the real
+              architecture but needs you to build ffmpeg for it first.</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <span class="eyebrow">Where it runs</span>
+      <h2 class="display">Mac app, browser, or a machine in the corner</h2>
+      <div class="grid g2" style="margin-top:34px">
+        <div class="card">
+          <h3>As a Mac app <span class="pill yes">shipping</span></h3>
+          <p>A signed-for-your-machine DMG for Apple Silicon or Intel. Bundles its own ffmpeg and the
+             on-device speech helper, so there’s nothing to install alongside it.</p>
+        </div>
+        <div class="card">
+          <h3>As your own server <span class="pill yes">shipping</span></h3>
+          <p>Run it on a Mac mini and reach it from anywhere over a private network — same app, same
+             library, from a laptop or a phone. Docker image included.</p>
+        </div>
+        <div class="card">
+          <h3>On Windows <span class="pill part">unproven</span></h3>
+          <p>The build config is there and the shell is identical to the Mac one, but no recent build
+             has been verified.</p>
+        </div>
+        <div class="card">
+          <h3>On Android <span class="pill part">partial</span></h3>
+          <p>The server runs in-process via nodejs-mobile with a WebView UI. You have to compile
+             ffmpeg for it yourself before it can import or render.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span class="mark">Jumpstart</span>
+    <span>Edit video by editing its transcript.</span>
+    <span style="margin-left:auto" class="mono">581 tests · 70 tools · 0 core dependencies</span>
+  </div>
+</footer>
+
+<script>
+/*
+ * The hero demo. The transcript is the product, so the page opens with one you
+ * can actually operate: press Tighten and the fillers, the false start and the
+ * long pauses strike through while the duration drops.
+ *
+ * Words are tagged rather than styled inline so the "gone" state is one class,
+ * and the counts come from the data instead of being typed twice and drifting.
+ */
+const LINE = [
+  ["So", 0], ["um,", 1], ["what", 0], ["we", 0], ["found", 0], ["was", 0],
+  ["—", 2], ["what", 3], ["we", 3], ["found", 3], ["was", 3],
+  ["that", 0], ["uh,", 1], ["basically", 0], ["people", 0], ["just,", 0],
+  ["um,", 1], ["they", 0], ["don't", 0], ["read", 0], ["the", 0], ["manual.", 0],
+  ["—", 2], ["Like,", 1], ["ever.", 0], ["Not", 0], ["once.", 0], ["Um,", 1],
+  ["so", 0], ["we", 0], ["stopped", 0], ["writing", 0], ["one.", 0],
+  ["—", 2], ["Uh,", 1], ["honestly?", 0],
+  ["Best", 0], ["decision", 0], ["we", 0], ["made", 0], ["all", 0], ["year.", 0],
+];
+// 0 keep · 1 filler · 2 pause · 3 false start (the abandoned first take)
+
+const script = document.getElementById('script');
+const dur = document.getElementById('dur');
+const go = document.getElementById('go');
+
+LINE.forEach(([word, kind], i) => {
+  const el = document.createElement('span');
+  el.className = 'w';
+  el.dataset.kind = kind;
+  el.textContent = word;
+  script.append(el, document.createTextNode(' '));
+});
+
+let cut = false;
+const words = [...script.querySelectorAll('.w')];
+
+/*
+ * Counts derived from LINE, not typed into the markup. Two places holding the
+ * same number is two places to forget — and a demo whose caption disagrees with
+ * what you can see strike through is worse than no caption.
+ */
+const tally = { 1: 0, 2: 0, 3: 0 };
+LINE.forEach(([, k]) => { if (k) tally[k]++; });
+// A false start is one RUN of abandoned words, not one per word.
+const runs = LINE.reduce((n, [, k], i) => n + (k === 3 && LINE[i - 1]?.[1] !== 3 ? 1 : 0), 0);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+document.getElementById('counts').innerHTML = [
+  `<span><b>${tally[1]}</b> ${plural(tally[1], 'filler word').replace(/^\d+ /, '')}</span>`,
+  `<span><b>${runs}</b> ${plural(runs, 'false start').replace(/^\d+ /, '')}</span>`,
+  `<span><b>${tally[2]}</b> ${plural(tally[2], 'long pause').replace(/^\d+ /, '')}</span>`,
+].join('');
+
+function setDur(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  dur.textContent = m + ':' + String(s).padStart(2, '0');
+}
+
+go.addEventListener('click', () => {
+  cut = !cut;
+  const doomed = words.filter((w) => w.dataset.kind !== '0');
+
+  if (cut) {
+    // Stagger so the eye can follow which words went, rather than a single blink.
+    doomed.forEach((w, i) => setTimeout(() => w.classList.add('gone'), i * 55));
+    go.textContent = 'Undo';
+    animateDur(19, 13, doomed.length * 55 + 200);
+  } else {
+    doomed.forEach((w) => w.classList.remove('gone'));
+    go.textContent = 'Tighten for reels';
+    animateDur(13, 19, 320);
+  }
+});
+
+function animateDur(from, to, ms) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { setDur(to); return; }
+  const t0 = performance.now();
+  const step = (now) => {
+    const p = Math.min(1, (now - t0) / ms);
+    setDur(from + (to - from) * (1 - Math.pow(1 - p, 3)));
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+</script>

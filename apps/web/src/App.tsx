@@ -97,6 +97,7 @@ import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../.
 import { DEFAULT_FRAME, frameLayout, frameSize } from '../../../packages/core/src/frame.ts';
 import SafeAreaOverlay from './shell/SafeAreaOverlay.tsx';
 import FloatingAssistant from './agent/FloatingAssistant.tsx';
+import { agentModel } from './store/agent.ts';
 import {
   MIN_MOVE_SEC,
   boxToPunch,
@@ -219,6 +220,12 @@ export default function App() {
    * happened to stop.
    */
   const [folders, setFolders] = useState<Folder[]>([]);
+  /**
+   * The last music search, so attach_music can resolve an id the model was
+   * shown. Kept in a ref rather than state: nothing renders from it, and a
+   * re-render per search would be churn for a lookup table.
+   */
+  const musicHits = useRef<MusicResult[]>([]);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
 
   const loadFolders = useCallback(
@@ -2080,6 +2087,69 @@ export default function App() {
         await pickMusic(results[0]);
         return `Added "${results[0].title}" by ${results[0].artist} as background music.`;
       },
+      /**
+       * Search and hand back the OPTIONS rather than silently taking the first.
+       *
+       * addMusic picks the top hit, which is right when someone says "put some
+       * music on" and wrong when they say "give me more options" — and a bed is
+       * a taste decision, so a shortlist is the honest default.
+       */
+      searchMusic: async (query, instrumental, limit) => {
+        const provider = caps?.musicProviders?.[0];
+        const run = (q: string) => api.music.search(q, { instrumental, provider });
+
+        /**
+         * Fall back to fewer words when a phrase finds nothing.
+         *
+         * Jumpy is told to search for the FEELING of a piece, which produces
+         * queries like "gentle playful ukulele" — and measured against
+         * Openverse, that returns zero results while "ukulele" returns three.
+         * The catalogue matches titles and tags, not descriptions, so every
+         * extra word narrows it towards nothing.
+         *
+         * Dropping the leading adjectives keeps the noun that actually names an
+         * instrument or a genre, which is the word the catalogue knows. Better
+         * than telling the model to write worse queries, and far better than
+         * reporting "no music found" for a library that has plenty.
+         */
+        let { results } = await run(query);
+        const words = query.trim().split(/\s+/);
+        for (let drop = 1; results.length === 0 && drop < words.length; drop++) {
+          const shorter = words.slice(drop).join(' ');
+          results = (await run(shorter)).results;
+        }
+
+        musicHits.current = results;
+        return results.slice(0, limit).map((r) => ({
+          id: r.id,
+          title: r.title,
+          artist: r.artist,
+          durationSec: r.durationSec,
+          license: r.license,
+          needsCredit: Boolean(r.attribution?.trim()),
+        }));
+      },
+
+      attachMusic: async (id, volume) => {
+        if (!project) return 'No project is open.';
+        const hit = musicHits.current.find((r) => r.id === id);
+        if (!hit) return 'That id is not from the last search. Run search_music again.';
+        await pickMusic(hit);
+        if (typeof volume === 'number') await setMusicVolume(Math.max(0, Math.min(1, volume)));
+        return `Attached "${hit.title}" by ${hit.artist}.`;
+      },
+
+      writePost: async (target) => {
+        if (!project) throw new Error('No project is open.');
+        const r = await api.social(project.id, { model: agentModel(), target });
+        return { ...r.draft, usedMemory: r.usedBrief, folder: r.folder };
+      },
+
+      lookAtFrame: async (atSeconds) => {
+        if (!project) throw new Error('No project is open.');
+        return api.projectFrame(project.id, { atSeconds, captions });
+      },
+
       generateImage: async (prompt) => {
         if (!project) throw new Error('No project is open.');
         const fresh = await api.images.generate(project.id, prompt);

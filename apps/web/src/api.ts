@@ -487,6 +487,12 @@ export const api = {
       body: JSON.stringify({ folderId }),
     }).then(json<Project>),
 
+  /** One finished frame as a data URL — what the assistant looks at. */
+  projectFrame: (id: string, body: { atSeconds?: number; captions?: CaptionSettings }) =>
+    post(`/api/projects/${id}/frame`, body).then(
+      json<{ image: string; atSeconds: number; width: number; note: string }>,
+    ),
+
   /** Write the post. The folder's brief is applied server-side. */
   social: (id: string, body: { model: string; target: string }) =>
     post(`/api/projects/${id}/social`, body).then(

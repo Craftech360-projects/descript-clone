@@ -191,6 +191,18 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
       stroke_width: { type: 'number', description: 'Outline thickness in px. 0 is none.' },
       backdrop: { type: 'string', enum: ['none', 'shadow', 'box'], description: 'What sits behind the text.' },
       max_chars: { type: 'integer', description: 'Characters per caption line before it wraps.' },
+      /**
+       * Placement was missing entirely, so "move the subtitle to the top" — one
+       * of the first things anyone asks — could not be done at all.
+       *
+       * Fractions of the frame rather than pixels, because that is how the
+       * document stores them and what keeps a placement correct at any output
+       * size. x/y are the CENTRE of the caption box, matching the drag handle.
+       */
+      x: { type: 'number', description: 'Horizontal centre of the caption block, 0 (left edge) to 1 (right). 0.5 is centred.' },
+      y: { type: 'number', description: 'Vertical centre, 0 (top) to 1 (bottom). The default 0.85 is low — on Instagram Reels that sits under the platform\'s own caption bar, so 0.5-0.7 is safer.' },
+      box_width: { type: 'number', description: 'Width of the caption box as a fraction of the frame, 0.2 to 1. Narrower wraps onto more lines.' },
+      box_height: { type: 'number', description: 'Height of the caption box as a fraction of the frame. Extra height spaces the lines apart.' },
     },
   ),
   tool(
@@ -427,6 +439,39 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'Export a subtitle file timed to the current edit, and save it to the user\'s machine. A sidecar file, not burned-in captions — for that use set_captions.',
     { format: { type: 'string', enum: ['srt', 'vtt', 'ass'], description: 'Default "srt".' } },
   ),
+  tool(
+    'search_music',
+    'Search the music library for a bed. Read the transcript first and search for the FEELING of the piece, not its subject: a video about a toddler tasting fruit wants "gentle playful ukulele", not "fruit". Returns tracks with an id to pass to attach_music. Everything here is free to use; some tracks require a credit line, which is reported.',
+    {
+      query: { type: 'string', description: 'Mood and instrumentation — "warm acoustic guitar", "slow ambient piano", "upbeat funk".' },
+      instrumental: { type: 'boolean', description: 'Exclude tracks with vocals. Default true — words under speech fight the speech.' },
+      limit: { type: 'integer', description: 'How many to return. Default 8.' },
+    },
+    ['query'],
+  ),
+  tool(
+    'attach_music',
+    'Attach a track found by search_music as the background bed, by its id. Replaces any existing bed. Set the level with set_music_volume — under speech, 0.15 to 0.3 is usually right.',
+    {
+      id: { type: 'string', description: 'The id from a search_music result.' },
+      volume: { type: 'number', description: 'Level 0 to 1. Defaults to 0.25, which sits under a voice.' },
+    },
+    ['id'],
+  ),
+  tool(
+    'write_post',
+    'Write a title, description and hashtags for this video, using the transcript and the memory written on its folder. The folder memory is what makes the copy specific — if the project is not in a folder, say so rather than pretending the result is tailored.',
+    {
+      target: { type: 'string', enum: ['reels', 'tiktok', 'shorts', 'generic'], description: 'Where it is being posted. Default "reels".' },
+    },
+  ),
+  tool(
+    'look_at_frame',
+    'LOOK at a single finished frame — the picture as it will actually ship, with the crop, the colour grade and the burned captions applied. Use it to CHECK your own work after changing something visual, or when the user asks how something looks. It costs a render of one frame, so reach for it after a change rather than before.',
+    {
+      at_seconds: { type: 'number', description: 'Where on the OUTPUT timeline to look. Defaults to a moment where a caption is on screen.' },
+    },
+  ),
   tool('list_fonts', 'List the caption fonts available — the three built-ins plus any the user has imported.'),
   tool(
     'custom_filler_words',
@@ -576,7 +621,18 @@ Trim with start_sec/end_sec whenever the user means a moment rather than the who
 /** The tool names, for the client executor map to assert against. */
 export const AGENT_TOOL_NAMES = AGENT_TOOLS.map((t) => t.function.name);
 
-export const AGENT_SYSTEM_PROMPT = `You are the built-in AI assistant for JumpCut, a transcript-based video and audio editor (a Descript-style app). The user drives the whole app through chat with you — they should be able to do everything by talking to you, without touching the rest of the interface.
+export const AGENT_SYSTEM_PROMPT = `You are Jumpy, the assistant built into JumpCut — a transcript-based video editor for short vertical video. The user drives the whole app by talking to you: they should be able to do everything through chat without touching the rest of the interface, and that is the point of you.
+
+You have a tool for every control the interface has. Use them rather than describing what the user could click.
+
+Some habits that make you useful rather than merely capable:
+
+- ACT, then report. "Removed 24 filler words" beats "I can remove the filler words for you — shall I?". Ask first only when the instruction is genuinely ambiguous or the action is destructive and unasked-for.
+- Chain the obvious follow-ups. "Add subtitles" means turn captions on; it is also worth checking they are not sitting where the platform draws its own caption bar. "Add music" means find something that fits, attach it, and set it low enough to sit under a voice.
+- Read before you write. find_in_transcript and read_transcript are cheap; guessing which words the user means is not.
+- When asked for MUSIC, search for the FEELING of the piece rather than its subject. A video about a toddler tasting fruit wants "gentle playful ukulele", not "fruit". Offer a shortlist when the user is choosing, attach directly when they have already decided.
+- When you change something VISUAL and the result is not obvious from the numbers — a caption position, a crop, a colour grade — use look_at_frame and check your own work before saying it is done.
+- Say plainly when something cannot be done and why. A wrong promise costs more than an admitted limit.
 
 How the editor works:
 - A project is one or more media files. Editing happens on the TRANSCRIPT: deleting words removes that audio/video from the output; the media itself is never destroyed, so every edit is reversible.

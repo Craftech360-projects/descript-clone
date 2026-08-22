@@ -3,8 +3,9 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { writeFile, rename, unlink } from 'node:fs/promises';
+import { writeFile, rename, unlink, mkdir, readFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { join, extname } from 'node:path';
@@ -64,6 +65,7 @@ import {
   type FrameSettings,
 } from '../../../packages/core/src/frame.ts';
 import {
+  colorFilterStages,
   normalizeColor,
   resolveColor,
   type ColorSettings,
@@ -1544,6 +1546,159 @@ app.post('/api/projects/:id/render', async (c) => {
   });
 
   return c.json({ jobId: job.id }, 202);
+});
+
+/**
+ * Run one ffmpeg command to completion. For the single-frame look, which needs
+ * neither progress nor cancellation — the whole point is that it is over before
+ * anyone would think to stop it.
+ */
+function runFfmpegOnce(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CONFIG.ffmpegPath, args, { windowsHide: true });
+    let err = '';
+    child.stderr.on('data', (c) => { err = (err + String(c)).slice(-1000); });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.trim().slice(0, 300)}`)),
+    );
+  });
+}
+
+/**
+ * Which caption tile is on screen at `at` on the output clock.
+ *
+ * The strip is one tile per caption STATE — a gap, a cue, or a word within a cue
+ * when karaoke is on — so the index is a walk, not arithmetic. Returns 0 (the
+ * leading gap) when nothing is being said, which is the honest picture.
+ */
+function tileIndexAt(cues: Array<{ start: number; end: number; words: unknown[] }>, at: number, karaoke: boolean): number {
+  let index = 0;
+  let clock = 0;
+  for (const cue of cues) {
+    if (cue.start > clock + 0.001) {
+      if (at < cue.start) return index;
+      index += 1;
+      clock = cue.start;
+    }
+    if (at < cue.end) {
+      if (!karaoke || cue.words.length === 0) return index;
+      const words = cue.words as Array<{ start: number }>;
+      for (let i = 0; i < words.length; i++) {
+        const next = i === words.length - 1 ? cue.end : words[i + 1].start;
+        if (at < next) return index + i;
+      }
+      return index + Math.max(0, words.length - 1);
+    }
+    index += !karaoke || cue.words.length === 0 ? 1 : Math.max(1, cue.words.length);
+    clock = cue.end;
+  }
+  return index;
+}
+
+/**
+ * ONE finished frame, as an image — what the assistant looks at.
+ *
+ * Not a screenshot of the app. A screenshot shows the editor's chrome, which is
+ * not the thing anyone is asking about; this renders the DELIVERED picture at a
+ * moment — the crop, the grade and the burned caption — so "does the subtitle
+ * sit under the platform's caption bar" is answerable by looking rather than by
+ * reasoning about numbers.
+ *
+ * Cheap on purpose: one frame, scaled down, no audio, no encode of a programme.
+ * The caption tile is composited exactly as the export does it, so what the
+ * model sees is what would ship.
+ */
+app.post('/api/projects/:id/frame', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project.hasVideo) return c.json({ error: 'This project has no picture to look at.' }, 400);
+
+  const body = await c.req.json<{ atSeconds?: number; captions?: CaptionSettings }>().catch(() => ({}));
+
+  const captions = normalizeCaptions({ ...normalizeCaptions(project.captions), ...(body.captions ?? {}) });
+  const frameSettings = normalizeFrame(project.frame);
+  const source = { width: project.width ?? 1920, height: project.height ?? 1080 };
+  const outSize = frameSize(frameSettings, source);
+
+  const clips = store.clipsOf(project);
+  const at = Math.max(0, Math.min(project.duration - 0.05, Number(body.atSeconds ?? 0) || 0));
+  // Which file that moment lives in — a multi-clip project's timeline is not any
+  // single file's timeline.
+  const clip = clips.find((cl) => at >= cl.offset && at < cl.offset + cl.duration) ?? clips[0];
+  const withinClip = (clip.sourceStart ?? 0) + (at - clip.offset);
+
+  const dir = join(CONFIG.mediaDir, 'tmp');
+  await mkdir(dir, { recursive: true }).catch(() => {});
+  const out = join(dir, `frame-${project.id}-${Date.now()}.jpg`);
+
+  const filters: string[] = [];
+  const resolved = resolveFrame(frameSettings, source);
+  if (resolved) filters.push(...frameFilterStages(resolved));
+  const grade = resolveColor(normalizeColor(project.color));
+  if (grade) filters.push(...colorFilterStages(grade));
+  // Small: the model is judging placement and colour, not pixel detail, and a
+  // 4K still costs tokens for nothing.
+  filters.push(`scale=${Math.min(540, outSize.width)}:-2`);
+
+  try {
+    await runFfmpegOnce([
+      '-hide_banner', '-v', 'error', '-y',
+      '-ss', String(withinClip),
+      '-i', clip.sourcePath,
+      '-frames:v', '1',
+      ...(filters.length ? ['-vf', filters.join(',')] : []),
+      '-q:v', '4',
+      out,
+    ]);
+
+    let framePath = out;
+    // The caption, composited the same way the export does it, so the answer is
+    // about the delivered picture rather than an approximation of it.
+    if (captions.enabled && captionImagesReady() && project.transcript) {
+      const transcript = project.transcript;
+      if (!transcript) throw new Error('no transcript');
+      const edl = compileEdl(transcript, EDIT_DEFAULTS);
+      const cues = toCues(transcript, edl, { maxChars: captions.maxChars });
+      const strip = await captionImage.build(cues, captions, outSize, CONFIG.mediaDir, `look-${project.id}`);
+      if (strip) {
+        try {
+          const withCaps = out.replace(/\.jpg$/, '-cc.jpg');
+          await runFfmpegOnce([
+            '-hide_banner', '-v', 'error', '-y',
+            '-i', out,
+            // The tile that is on screen at this moment. Always taking cap-00001
+            // would show whatever the first caption happened to be, which is a
+            // different lie from showing none.
+            '-i', join(strip.dir, `cap-${String(tileIndexAt(cues, at, captions.karaoke)).padStart(5, '0')}.png`),
+            '-filter_complex',
+            `[1:v]scale=iw*${(Math.min(540, outSize.width) / outSize.width).toFixed(4)}:-1[c];[0:v][c]overlay=x=${Math.round(strip.x * (Math.min(540, outSize.width) / outSize.width))}:y=${Math.round(strip.y * (Math.min(540, outSize.width) / outSize.width))}`,
+            '-frames:v', '1', '-q:v', '4', withCaps,
+          ]);
+          framePath = withCaps;
+        } catch {
+          // A caption that would not composite is not a reason to refuse the
+          // look — the picture underneath is still the answer to most questions.
+        } finally {
+          await captionImage.cleanup(strip);
+        }
+      }
+    }
+
+    const bytes = await readFile(framePath);
+    await unlink(out).catch(() => {});
+    if (framePath !== out) await unlink(framePath).catch(() => {});
+
+    return c.json({
+      image: `data:image/jpeg;base64,${bytes.toString('base64')}`,
+      atSeconds: at,
+      width: Math.min(540, outSize.width),
+      note: `Frame at ${at.toFixed(1)}s of the finished ${outSize.width}x${outSize.height} picture.`,
+    });
+  } catch (e) {
+    await unlink(out).catch(() => {});
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
 });
 
 /**

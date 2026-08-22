@@ -127,6 +127,16 @@ export interface AgentBridge {
   exportCaptions(format: string): Promise<string>;
   cancelJob(): Promise<string>;
   addMusic(query: string, instrumental: boolean): Promise<string>;
+  /** Search and RETURN the options, so the user can be offered a choice. */
+  searchMusic(query: string, instrumental: boolean, limit: number): Promise<
+    Array<{ id: string; title: string; artist: string; durationSec: number; license: string; needsCredit: boolean }>
+  >;
+  /** Attach one of those by id. */
+  attachMusic(id: string, volume?: number): Promise<string>;
+  /** Title, description and hashtags, using the folder's memory. */
+  writePost(target: string): Promise<{ title: string; description: string; hashtags: string[]; usedMemory: boolean; folder: string | null }>;
+  /** One finished frame as an image, for the model to actually look at. */
+  lookAtFrame(atSeconds?: number): Promise<{ image: string; note: string }>;
   /** Loop, length, or "as long as the finished video". Returns what changed. */
   setMusicOptions(opts: { loop?: boolean; durationSec?: number | null; fit?: boolean }): Promise<string>;
   /**
@@ -690,6 +700,26 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     if (str(args.backdrop)) patch.backdrop = str(args.backdrop) as CaptionSettings['backdrop'];
     if (typeof args.max_chars === 'number') patch.maxChars = args.max_chars;
 
+    /**
+     * Placement, clamped rather than trusted.
+     *
+     * A model that reads "move it to the top" and sends y: 0 would push the box
+     * half off the frame, since x/y are its CENTRE. Clamping to a margin keeps
+     * every instruction landing somewhere visible, which is better than
+     * refusing and making the user phrase it again.
+     */
+    const frac = (v: unknown, lo: number, hi: number): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : undefined;
+
+    const x = frac(args.x, 0.05, 0.95);
+    if (x !== undefined) patch.x = x;
+    const y = frac(args.y, 0.05, 0.95);
+    if (y !== undefined) patch.y = y;
+    const bw = frac(args.box_width, 0.2, 1);
+    if (bw !== undefined) patch.boxWidth = bw;
+    const bh = frac(args.box_height, 0.04, 0.6);
+    if (bh !== undefined) patch.boxHeight = bh;
+
     // A family libass cannot resolve burns as the fallback face, which looks like
     // the setting was ignored rather than refused — so it is checked against what
     // is actually installed instead of being taken on trust.
@@ -984,6 +1014,69 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     const query = str(args.query);
     if (!query) return 'Provide a query.';
     return requireBridge().addMusic(query, bool(args.instrumental) ?? true);
+  },
+
+  search_music: async (args) => {
+    const query = str(args.query);
+    if (!query) return 'Provide a query — the FEELING of the piece, not its subject.';
+    const results = await requireBridge().searchMusic(
+      query,
+      bool(args.instrumental) ?? true,
+      Math.max(1, Math.min(20, numOr(args.limit, 8))),
+    );
+    if (results.length === 0) return `Nothing found for "${query}". Try a different mood.`;
+    return [
+      `${results.length} tracks for "${query}":`,
+      ...results.map(
+        (r) =>
+          `- ${r.id} · "${r.title}" by ${r.artist} · ${Math.round(r.durationSec)}s · ${r.license}` +
+          `${r.needsCredit ? ' (needs a credit line)' : ''}`,
+      ),
+      'Attach one with attach_music using its id.',
+    ].join('\n');
+  },
+
+  attach_music: async (args) => {
+    const id = str(args.id);
+    if (!id) return 'Provide the id of a track from search_music.';
+    const volume = typeof args.volume === 'number' ? args.volume : undefined;
+    return requireBridge().attachMusic(id, volume);
+  },
+
+  write_post: async (args) => {
+    const r = await requireBridge().writePost(str(args.target) ?? 'reels');
+    return [
+      r.usedMemory
+        ? `Written with the "${r.folder}" folder's memory.`
+        : r.folder
+          ? `The "${r.folder}" folder has no memory yet, so this is from the transcript alone — it will read like a summary. Ask the user what this channel is.`
+          : 'This project is not in a folder, so there was no memory to write from.',
+      '',
+      `TITLE: ${r.title}`,
+      `DESCRIPTION: ${r.description}`,
+      `HASHTAGS: ${r.hashtags.join(' ')}`,
+    ].join('\n');
+  },
+
+  look_at_frame: async (args) => {
+    const at = typeof args.at_seconds === 'number' ? args.at_seconds : undefined;
+    const r = await requireBridge().lookAtFrame(at);
+
+    /**
+     * Marked with an IMAGE: prefix so the backend can turn it into a real image
+     * block rather than a paragraph describing one.
+     *
+     * runTool's contract is a string, and widening it to a union would touch
+     * every executor and all three backends for one tool. A sentinel on the one
+     * result that carries pixels is the smaller change, and the shape is checked
+     * where it is unpacked.
+     *
+     * Backends that cannot see get the trailing text, which still says what was
+     * looked at and when — degraded, not broken.
+     */
+    const m = /^data:([a-z/+.-]+);base64,(.+)$/i.exec(r.image);
+    if (!m) return r.note;
+    return `IMAGE:${m[1]};base64,${m[2]}\n${r.note}`;
   },
 
   set_music_volume: async (args) => {

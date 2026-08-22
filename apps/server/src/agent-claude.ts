@@ -310,6 +310,27 @@ function buildTools(conn: Conn) {
       zodShapeFor(spec),
       async (args) => {
         const result = await callBrowser(conn, spec.function.name, args as Record<string, unknown>);
+
+        /**
+         * A tool that returns a PICTURE returns it as a picture.
+         *
+         * look_at_frame renders one finished frame so the model can check its
+         * own work — a caption's position, a crop, a grade. Handing that back as
+         * a data-URL string would be words about an image rather than the image,
+         * which is the one thing that makes the tool worth having. The browser
+         * side marks such a result with an IMAGE: prefix; everything else is
+         * ordinary text and takes the path it always did.
+         */
+        const image = /^IMAGE:([a-z/+.-]+);base64,([\s\S]+?)\n([\s\S]*)$/i.exec(result);
+        if (image) {
+          return {
+            content: [
+              { type: 'image' as const, data: image[2], mimeType: image[1] },
+              { type: 'text' as const, text: image[3] },
+            ],
+          };
+        }
+
         return { content: [{ type: 'text' as const, text: result }] };
       },
     ),

@@ -82,17 +82,17 @@ export default function FloatingAssistant(p: {
       <button
         className={`fab ${open ? 'fab-on' : ''}`}
         onClick={() => setOpen((v) => !v)}
-        aria-label={open ? 'Close the assistant' : 'Ask the assistant'}
+        aria-label={open ? 'Close Jumpy' : 'Ask Jumpy'}
         aria-expanded={open}
-        title="Assistant"
+        title="Jumpy — the assistant"
       >
         <Icon name={open ? 'close' : 'sparkle'} size={18} />
       </button>
 
       {open && (
-        <div className="fab-panel" role="dialog" aria-label="Assistant">
+        <div className="fab-panel" role="dialog" aria-label="Jumpy">
           <div className="fab-head">
-            <strong>Assistant</strong>
+            <strong>Jumpy</strong>
             <span className="fab-model">{model ? model.replace(/^local:/, '') : 'no model'}</span>
           </div>
 
@@ -135,8 +135,8 @@ export default function FloatingAssistant(p: {
                 }
               }}
               rows={2}
-              placeholder="Ask about what is on screen…"
-              aria-label="Message the assistant"
+              placeholder="Ask Jumpy…"
+              aria-label="Message Jumpy"
               disabled={busy}
             />
             <button className="primary" onClick={send} disabled={busy || !text.trim()}>

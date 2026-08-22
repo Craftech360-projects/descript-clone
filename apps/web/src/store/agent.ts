@@ -85,6 +85,11 @@ function push(entry: ChatEntry): void {
   set({ entries: [...state.entries, entry] });
 }
 
+/** The model currently chosen, for callers outside React (the tool bridge). */
+export function agentModel(): string {
+  return state.model;
+}
+
 export function setModel(model: string): void {
   set({ model });
 }

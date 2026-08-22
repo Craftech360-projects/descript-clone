@@ -291,7 +291,7 @@ export default function Rail(p: Props) {
           className={`rail-tab ${tab === 'chat' ? 'on' : ''}`}
           onClick={() => setTab('chat')}
         >
-          Assistant
+          Jumpy
         </button>
       </div>
       {tab === 'chat' ? (

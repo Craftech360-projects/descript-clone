@@ -1110,7 +1110,7 @@ export default function App() {
       return r;
     });
 
-  const doRender = () =>
+  const doRender = (preset = 'source') =>
     run('render', async () => {
       // The server renders from ITS copy of the deleted set, so the edit has to
       // have LANDED before we ask for pixels — awaited, not fired off. Without
@@ -1118,6 +1118,8 @@ export default function App() {
       // previous document: the words you just cut were still in the file.
       await flushSave();
       const { jobId } = await api.render(project!.id, {
+        // Where the file is going: fixes the output shape and the loudness target.
+        preset,
         ...cut!,
         burnCaptions: captions.enabled,
         captions,

@@ -367,6 +367,11 @@ export interface ProjectChat {
 
 /** Everything the Export panel lets the user decide. */
 export interface RenderSettings extends CutSettings {
+  /**
+   * Where the file is going: an export preset id. Fixes the output size and the
+   * loudness target, and beats the stored frame — see packages/core/export-preset.
+   */
+  preset?: string;
   /** Burn captions into the picture. Video only — pixels, not a sidecar track. */
   burnCaptions: boolean;
   /** Look and placement. Sent so a render uses what is on screen right now,

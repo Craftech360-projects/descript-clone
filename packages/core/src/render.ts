@@ -73,6 +73,14 @@ export interface RenderOptions {
    */
   studioSound?: boolean;
   /**
+   * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
+   * the level as mixed.
+   *
+   * Passed as the built filter rather than a number so packages/core keeps one
+   * place that knows how loudnorm is spelt — see export-preset.ts.
+   */
+  loudness?: string | null;
+  /**
    * Reframe the picture to a target resolution, cropping to fill it. Already
    * resolved to concrete pixels by the caller — resolveFrame returns null when the
    * setting would change nothing, and that null is why a project that never opens
@@ -268,7 +276,21 @@ export interface BgMusicRender {
  *    With it off, the program stays at unity and only the music carries the gain
  *    the user dialled in.
  */
-function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRender): string[] {
+function bgMusicMixLines(
+  programLabel: string,
+  musicIndex: number,
+  bg: BgMusicRender,
+  /**
+   * The export preset's loudnorm stage, applied AFTER the bed is mixed in.
+   *
+   * It cannot run before. Normalising the voice and then summing music on top
+   * gives a file whose integrated loudness is whatever the sum happens to be —
+   * measured on this project, a -14 target landed at -15.6 because the bed was
+   * added after the measurement. The target is a claim about the DELIVERED file,
+   * so it has to be the last thing that touches the mix.
+   */
+  loudness?: string | null,
+): string[] {
   const vol = Math.max(0, bg.volume);
   const dur = bg.durationSec;
   // Zero when the bed plays to the last frame: there is nothing after it to ease
@@ -296,7 +318,11 @@ function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRe
     // that Studio Sound may already have normalised to TP -1.5, so a loud bed can
     // push the sum past full scale. alimiter catches only those peaks — below the
     // ceiling it is transparent, so a quiet bed sounds exactly as it did.
-    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0,alimiter=limit=-1.0dB:level=disabled[outa];`,
+    // loudnorm sits between the sum and the limiter: it needs the finished mix to
+    // measure, and the limiter stays last so it can still catch a stray peak.
+    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0` +
+      `${loudness ? `,${loudness},aresample=48000` : ''}` +
+      `,alimiter=limit=-1.0dB:level=disabled[outa];`,
   ];
 }
 
@@ -336,7 +362,7 @@ function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRe
  *    to resample anyway, so without this the bug appears only on music-free
  *    renders — which is exactly the sort of thing that ships.
  */
-export function studioSoundStages(): string[] {
+export function studioSoundStages(loudness?: string | null): string[] {
   return [
     'highpass=f=85',
     'afftdn=nr=12:nf=-30:tn=1',
@@ -344,9 +370,27 @@ export function studioSoundStages(): string[] {
     'equalizer=f=220:t=q:w=1.0:g=-2',
     'equalizer=f=3200:t=q:w=1.2:g=3',
     'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
-    'loudnorm=I=-16:TP=-1.5:LRA=11',
+    // -16 is the speech-broadcast number and the right default for a voice. When
+    // an export preset names a target instead, THAT one runs here rather than
+    // after — two loudnorm passes in one chain is not twice as normalised, it is
+    // one pass measuring a signal the other already moved.
+    loudness ?? 'loudnorm=I=-16:TP=-1.5:LRA=11',
     'aresample=48000',
   ];
+}
+
+/**
+ * Loudness on its own, for an export that names a destination without asking for
+ * the voice chain.
+ *
+ * Normalisation used to live only inside studioSoundStages, so the only way to
+ * hit a platform's target was to accept denoise, de-essing, EQ and compression
+ * with it. Those are a creative choice; arriving at the right level is not.
+ */
+export function loudnessOnlyStages(loudness: string): string[] {
+  // aresample for the same reason it is in the chain above: loudnorm leaves the
+  // stream at 192kHz and AAC then silently lands on 96kHz.
+  return [loudness, 'aresample=48000'];
 }
 
 /**
@@ -550,7 +594,19 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // Before atempo: the enhancer's compressor and loudness measurement want the
   // voice at its natural rate, and atempo does not change level enough to undo
   // the normalisation.
-  if (options.studioSound) audioStages.push(...studioSoundStages());
+  /**
+   * Where the loudness target runs depends on whether there is a bed.
+   *
+   * With music, normalising here would measure the voice ALONE and the bed would
+   * then be summed on top — so the delivered file misses the target by however
+   * loud the bed is. Measured: a -14 target landed at -15.6. With a bed the
+   * stage moves into the mix chain instead; see bgMusicMixLines.
+   */
+  const loudnessAfterMix = Boolean(options.loudness && bgMusic);
+  const programLoudness = loudnessAfterMix ? null : options.loudness;
+
+  if (options.studioSound) audioStages.push(...studioSoundStages(programLoudness));
+  else if (programLoudness) audioStages.push(...loudnessOnlyStages(programLoudness));
   if (retime) audioStages.push(`atempo=${f(speed)}`);
 
   // With no images the halves rejoin into one chain, in the order they were in
@@ -588,10 +644,14 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // asked of the caller — the EDL and the speed are what decide it, and both are
   // already in hand, so the two cannot disagree.
   if (bgMusic) {
-    lines.push(...bgMusicMixLines(programLabel, 1, {
-      programSec: outputDuration(edl, speed),
-      ...bgMusic,
-    }));
+    lines.push(
+      ...bgMusicMixLines(
+        programLabel,
+        1,
+        { programSec: outputDuration(edl, speed), ...bgMusic },
+        loudnessAfterMix ? options.loudness : null,
+      ),
+    );
   }
 
   const args = [
@@ -660,6 +720,14 @@ export interface SequenceRenderOptions {
    * studioSoundStages.
    */
   studioSound?: boolean;
+  /**
+   * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
+   * the level as mixed.
+   *
+   * Passed as the built filter rather than a number so packages/core keeps one
+   * place that knows how loudnorm is spelt — see export-preset.ts.
+   */
+  loudness?: string | null;
   /**
    * Reframe the picture to a target resolution, cropping to fill it. Already
    * resolved to concrete pixels by the caller — resolveFrame returns null when the
@@ -851,19 +919,29 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       lines.push(`[vc]${[...stages, ...postImageStages].join(',')}[outv];`);
     }
   }
+  // Same rule as the single-clip path: with a bed, the target has to be measured
+  // on the finished sum, not on the voice before the bed is added.
+  const seqLoudnessAfterMix = Boolean(options.loudness && bgMusic);
+  const seqProgramLoudness = seqLoudnessAfterMix ? null : options.loudness;
+
   if (wantsAudioStage) {
     const aStages: string[] = [];
-    if (options.studioSound) aStages.push(...studioSoundStages());
+    if (options.studioSound) aStages.push(...studioSoundStages(seqProgramLoudness));
+    else if (seqProgramLoudness) aStages.push(...loudnessOnlyStages(seqProgramLoudness));
     if (retime) aStages.push(`atempo=${f(speed)}`);
     lines.push(`[ac]${aStages.join(',')}${programLabel};`);
   }
   // The music bed rides on top of the joined program: its input index is the
   // clip count, since the clips occupy inputs 0..n-1. programSec as above.
   if (bgMusic) {
-    lines.push(...bgMusicMixLines(programLabel, clips.length, {
-      programSec: outputDuration(edl, speed),
-      ...bgMusic,
-    }));
+    lines.push(
+      ...bgMusicMixLines(
+        programLabel,
+        clips.length,
+        { programSec: outputDuration(edl, speed), ...bgMusic },
+        seqLoudnessAfterMix ? options.loudness : null,
+      ),
+    );
   }
 
   const inputs = clips.flatMap((c) => ['-i', c.input]);

@@ -34,6 +34,7 @@ import {
 } from './music-search.ts';
 import { canGenerateImages, extensionFor, generateImage } from './image-gen.ts';
 import { nearestAspectRatio } from '../../../packages/core/src/image-prompt.ts';
+import { loudnessStage, presetFor } from '../../../packages/core/src/export-preset.ts';
 
 import {
   normalizeCaptions,
@@ -1273,7 +1274,17 @@ app.post('/api/projects/:id/render', async (c) => {
   // the record, per field, so an Export fired mid-debounce reframes to what is on
   // screen. The SOURCE it is resolved against is the stitched canvas on a
   // multi-clip project (render.width/height) and the file's own size otherwise.
-  const frameSettings = normalizeFrame({ ...project.frame, ...(options.frame ?? {}) });
+  /**
+   * A preset names the shape it wants, and that beats the stored frame — picking
+   * "Instagram Reels" and getting a 16:9 file because the project was left on
+   * `source` would make the preset a decoration.
+   */
+  const presetSize = presetFor(String(options.preset ?? 'source')).size;
+  const frameSettings = normalizeFrame({
+    ...project.frame,
+    ...(presetSize ? { preset: 'custom' as const, width: presetSize.width, height: presetSize.height } : {}),
+    ...(options.frame ?? {}),
+  });
   const sourceSize = {
     width: render?.width ?? project.width ?? 1920,
     height: render?.height ?? project.height ?? 1080,
@@ -1440,6 +1451,10 @@ app.post('/api/projects/:id/render', async (c) => {
         // settings win over the stored flag for the same reason the music ones do:
         // an Export fired mid-debounce should use the toggle on screen.
         studioSound: Boolean(options.studioSound ?? project.studioSound),
+        // Where this file is going. The preset's loudness target runs whether or
+        // not Studio Sound is on — arriving at the right level is not a creative
+        // choice the way the voice chain is. See export-preset.ts.
+        loudness: loudnessStage(String(options.preset ?? 'source')),
         // The crop into the target resolution. Absent = the picture keeps the
         // source's shape, and the video graph is emitted as it was before.
         frame,

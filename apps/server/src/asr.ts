@@ -8,6 +8,7 @@ import {
   type AsrModelId,
 } from './config.ts';
 import type { Word } from '../../../packages/core/src/types.ts';
+import * as appleSpeech from './apple-speech.ts';
 
 /** Everything the Transcribe panel lets the user decide. */
 export interface AsrOptions {
@@ -35,7 +36,12 @@ export const ASR_DEFAULTS: AsrOptions = {
 
 /** The first usable real provider keeps existing ElevenLabs installs unchanged. */
 export function defaultAsrOptions(): AsrOptions {
+  // ElevenLabs still leads when its key is present: it is the only provider here
+  // that is BOTH verbatim and diarized, and losing speaker labels is a visible
+  // downgrade. On-device wins over Sarvam for an English-first editor, and over
+  // nothing at all — it is verbatim, free, and needs no key.
   if (CONFIG.hasElevenLabsAsr()) return ASR_DEFAULTS;
+  if (CONFIG.hasAppleSpeech()) return { ...ASR_DEFAULTS, model: 'apple_speech', diarize: false };
   if (CONFIG.hasSarvamAsr()) return { ...ASR_DEFAULTS, model: 'saaras_v3' };
   return ASR_DEFAULTS;
 }
@@ -73,6 +79,9 @@ export async function transcribe(
     // there is no progress to report and a fake one would be a lie.
     return mockTranscribe(duration);
   }
+  if (options.model === 'apple_speech' && CONFIG.hasAppleSpeech()) {
+    return appleTranscribe(audioPath, options, onProgress);
+  }
   if (options.model === 'saaras_v3' && CONFIG.hasSarvamAsr()) {
     return sarvamTranscribe(audioPath, options, onProgress);
   }
@@ -80,8 +89,9 @@ export async function transcribe(
     return elevenLabsTranscribe(audioPath, options, onProgress);
   }
   // A saved on-import preference may name a provider whose key was later
-  // removed. With one real key left, that provider is the only useful choice.
+  // removed. With one real provider left, that provider is the only useful choice.
   if (CONFIG.hasSarvamAsr()) return sarvamTranscribe(audioPath, { ...options, model: 'saaras_v3' }, onProgress);
+  if (CONFIG.hasAppleSpeech()) return appleTranscribe(audioPath, { ...options, model: 'apple_speech' }, onProgress);
   return elevenLabsTranscribe(audioPath, options, onProgress);
 }
 
@@ -392,6 +402,46 @@ const MOCK_SCRIPT: Array<[string, string]> = [
   ['SPEAKER_00', 'Exactly'], ['SPEAKER_00', 'that'], ['SPEAKER_00', 'is'], ['SPEAKER_00', 'the'],
   ['SPEAKER_00', 'whole'], ['SPEAKER_00', 'insight'],
 ];
+
+// ---------------------------------------------------------------------------
+// Apple on-device speech (macOS 26+)
+// ---------------------------------------------------------------------------
+
+/**
+ * The local provider. No key, no upload, no cost — and verbatim, which is the
+ * property the filler remover needs and the reason this is worth a third code
+ * path at all.
+ *
+ * It returns no speaker labels. Rather than fake them, the words come back
+ * without a `speaker` and the editor simply shows no margin — `Word.speaker` is
+ * optional precisely so a provider may decline to guess.
+ */
+async function appleTranscribe(
+  audioPath: string,
+  options: AsrOptions,
+  onProgress?: (p: AsrProgress) => void,
+): Promise<AsrResult> {
+  onProgress?.({ progress: -1, stage: 'Starting on-device speech' });
+
+  const { words } = await appleSpeech.transcribe(audioPath, options.language, (p) =>
+    onProgress?.({ progress: p.progress, stage: p.stage }),
+  );
+
+  if (words.length === 0) {
+    throw new Error(
+      'On-device speech returned no words. If the media has no speech that is the ' +
+        'right answer; otherwise check the server log for the helper\'s own error.',
+    );
+  }
+
+  const declared = ASR_MODELS.find((m) => m.id === 'apple_speech');
+
+  return {
+    words,
+    provider: 'apple_speech',
+    verbatim: declared?.verbatim ?? true,
+  };
+}
 
 function mockTranscribe(duration: number): AsrResult {
   const n = MOCK_SCRIPT.length;

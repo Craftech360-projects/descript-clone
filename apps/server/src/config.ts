@@ -26,6 +26,27 @@ export const SARVAM_ASR_ENDPOINT = 'https://api.sarvam.ai';
  * report verbatim:false, i.e. that normalize away the fillers this product
  * exists to remove. Losing them costs the product nothing it was using.
  */
+/**
+ * Whether on-device speech is usable, as a plain synchronous boolean.
+ *
+ * Deciding this properly means touching the filesystem (is the helper built?)
+ * and possibly the toolchain (is swiftc here?), which is async — but `hasAsr()`
+ * is read inside request handlers that cannot await. So the async probe runs
+ * once at startup and parks its answer here.
+ *
+ * It starts FALSE rather than unknown: before the probe has run, claiming a
+ * provider exists would offer the user a model that might not.
+ */
+let appleSpeechAvailable = false;
+
+export function appleSpeechReady(): boolean {
+  return appleSpeechAvailable;
+}
+
+export function setAppleSpeechReady(value: boolean): void {
+  appleSpeechAvailable = value;
+}
+
 export const ASR_MODELS = [
   {
     id: 'scribe_v1',
@@ -40,6 +61,14 @@ export const ASR_MODELS = [
     provider: 'sarvam',
     label: 'Sarvam Saaras v3',
     hint: 'Indic-language ASR with verbatim mode. Phrase timings are distributed across words for editing.',
+    verbatim: true,
+    verified: true,
+  },
+  {
+    id: 'apple_speech',
+    provider: 'apple',
+    label: 'Apple On-Device (Mac)',
+    hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings, no key, no upload. No speaker labels.',
     verbatim: true,
     verified: true,
   },
@@ -166,7 +195,19 @@ export const CONFIG = {
 
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
-    return (Boolean(this.elevenLabsKey) || Boolean(this.sarvamApiKey)) && process.env.ASR_PROVIDER !== 'mock';
+    if (process.env.ASR_PROVIDER === 'mock') return false;
+    return Boolean(this.elevenLabsKey) || Boolean(this.sarvamApiKey) || appleSpeechReady();
+  },
+
+  /**
+   * On-device speech is the one provider with no credential to check, so its
+   * availability is a fact about the MACHINE rather than about configuration.
+   * The real probe is async (it may have to compile a helper); this synchronous
+   * getter reads a flag that `refreshAppleSpeech` sets at boot, because
+   * `hasAsr()` is called from request handlers that cannot await.
+   */
+  hasAppleSpeech(): boolean {
+    return appleSpeechReady() && process.env.ASR_PROVIDER !== 'mock';
   },
 
   hasElevenLabsAsr(): boolean {

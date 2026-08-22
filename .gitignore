@@ -13,8 +13,18 @@ media/cache/*
 # video. Derived data, rebuildable from the source in one ffmpeg pass.
 media/jobs/*
 media/thumbs/*
+# Posters are generated cover frames — pictures OF the user's own footage. They
+# were never ignored, which is how four of them ended up committed to a public
+# repo. Generated media does not belong in git, and frames of someone's private
+# video very much do not.
+media/posters/*
 !media/**/.gitkeep
 *.log
 
 # Runtime API keys set from the dashboard (settings.ts). Plaintext secrets — never commit.
 .jumpcut-secrets.json
+
+# Compiled on first use from native/apple-speech/main.swift — a checked-in
+# binary that spawns is a thing users are right to be suspicious of.
+apps/server/native/apple-speech/jumpcut-stt
+apps/server/native/caption-render/jumpcut-captions

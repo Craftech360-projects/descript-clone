@@ -15,7 +15,7 @@ import java.net.URL
  * thread, and polls /api/health until the server answers.
  *
  * The direct analog of desktop/win/main.cjs — same env contract
- * (PORT/MEDIA_DIR/WEB_DIST/FFMPEG_PATH/FFPROBE_PATH/SETTINGS_PATH), same
+ * (PORT/MEDIA_DIR/DATA_DIR/WEB_DIST/FFMPEG_PATH/FFPROBE_PATH/SETTINGS_PATH), same
  * free-port + health-poll lifecycle. The Android-only additions are TMPDIR
  * (bionic has no /tmp, and ffmpeg.ts writes its filter scripts to os.tmpdir()),
  * HOME and XDG_CACHE_HOME (fontconfig's cache, for burned captions).
@@ -87,6 +87,9 @@ class NodeRuntime(private val context: Context) {
         return mapOf(
             "PORT" to port.toString(),
             "MEDIA_DIR" to mediaDir.absolutePath,
+            // Projects, jobs and folder memories. See the note in desktop/mac/main.cjs:
+            // without this the server computes a path relative to its own bundle.
+            "DATA_DIR" to File(context.filesDir, "data").absolutePath,
             "WEB_DIST" to File(projectDir, "web").absolutePath,
             "FFMPEG_PATH" to "$nativeDir/libffmpeg.so",
             "FFPROBE_PATH" to "$nativeDir/libffprobe.so",

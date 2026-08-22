@@ -25,6 +25,7 @@ import { registerSummon } from './summon.ts';
 import { registerSocial } from './social.ts';
 import * as folders from './folders.ts';
 import * as preferences from './preferences.ts';
+import * as auth from './auth.ts';
 import { readPage } from './read-page.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
@@ -105,6 +106,7 @@ await jobs.init();
 await fonts.init();
 await folders.init();
 await preferences.init();
+await auth.init();
 
 const app = new Hono();
 
@@ -113,12 +115,60 @@ const app = new Hono();
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
 /**
- * CORS_ORIGIN pins the browser origin allowed to call this API. Unset keeps the
- * wildcard, which is right for local dev and wrong the moment this is public:
- * every route here is unauthenticated, so `*` lets any page on the internet
- * drive a stranger's projects and spend their ASR credit.
+ * CORS_ORIGIN pins the browser origin allowed to call this API.
+ *
+ * This comment used to end "every route here is unauthenticated, so `*` lets any
+ * page on the internet drive a stranger's projects" — true when it was written,
+ * and no longer: see auth.ts. CORS was never the control that mattered, because
+ * it restrains browsers and not curl, but with a credential in front it is now
+ * the second layer rather than the only one.
+ *
+ * `credentials: true` is required for the session cookie to be legal on a
+ * cross-origin call at all. SameSite=Strict still stops it being SENT
+ * cross-site, which is the actual CSRF defence — this only stops the browser
+ * discarding a legitimate same-site response.
  */
-app.use('/*', cors(process.env.CORS_ORIGIN ? { origin: process.env.CORS_ORIGIN } : undefined));
+app.use(
+  '/*',
+  cors(
+    process.env.CORS_ORIGIN
+      ? { origin: process.env.CORS_ORIGIN, credentials: true }
+      : undefined,
+  ),
+);
+
+/**
+ * The credential check, registered BEFORE the media static handler below and
+ * before every /api route — order is the whole point, since a static handler
+ * that runs first would serve the file and never consult this.
+ */
+app.use('/*', async (c, next) => {
+  const url = new URL(c.req.url);
+  const verdict = auth.authorize(
+    {
+      path: url.pathname,
+      authorization: c.req.header('authorization') ?? null,
+      cookie: c.req.header('cookie') ?? null,
+      query: url.searchParams.get('token'),
+    },
+    auth.currentToken(),
+    { enabled: auth.authEnabled(), autoIssue: auth.isLoopbackHost(CONFIG.host) },
+  );
+
+  if (!verdict.ok) {
+    if (verdict.clearCookie) c.header('set-cookie', auth.cookieHeader('', 0));
+    return c.json({ error: verdict.message }, verdict.status);
+  }
+
+  if ('issue' in verdict && verdict.issue) {
+    c.header('set-cookie', auth.cookieHeader(verdict.issue));
+    // A token that arrived in the query string is redirected away so it does not
+    // linger in the address bar, in history, or in a screenshot.
+    if ('redirect' in verdict && verdict.redirect) return c.redirect(verdict.redirect, 302);
+  }
+
+  await next();
+});
 
 /**
  * Serve uploads and renders out of the media directory itself, rather than
@@ -1938,8 +1988,26 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500);
 });
 
-const server = serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
-  console.log(`server  http://localhost:${info.port}`);
+/**
+ * Is this bind address one only this machine can reach?
+ *
+ * Used for one thing: deciding whether the startup banner owes the operator a
+ * warning. `::` and `0.0.0.0` are the two ways to say "every interface", and a
+ * named host is assumed routable because a person who typed one meant it.
+ */
+function isLoopback(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+const server = serve({ fetch: app.fetch, port: CONFIG.port, hostname: CONFIG.host }, (info) => {
+  // Print the address we ACTUALLY bound. The old line said "localhost" while
+  // binding every interface, so the one place a person looks to find out where
+  // their editor is listening told them the reassuring answer rather than the
+  // real one.
+  console.log(`server  http://${CONFIG.host}:${info.port}`);
+  if (!isLoopback(CONFIG.host)) {
+    console.log(`        reachable from the network — every route on this port is`);
+  }
   const asr = [
     CONFIG.hasElevenLabsAsr() ? 'ElevenLabs Scribe' : '',
     CONFIG.hasSarvamAsr() ? 'Sarvam Saaras v3' : '',

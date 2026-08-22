@@ -7,6 +7,10 @@ services:
     environment:
       PORT: 8787
       MEDIA_DIR: /data
+      # Not web-served; see the Dockerfile note.
+      DATA_DIR: /data/state
+      # Required: the server binds 127.0.0.1 unless told otherwise.
+      HOST: 0.0.0.0
       WEB_DIST: ./apps/web/dist
       # Unset to run the mock ASR provider: the full pipeline, zero cost.
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}

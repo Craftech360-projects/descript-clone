@@ -100,6 +100,25 @@ export type AsrProviderId = (typeof ASR_MODELS)[number]['provider'];
 export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
 
+  /**
+   * Which interface to listen on. Loopback by default.
+   *
+   * This used to be unset, and @hono/node-server's default is to bind `::` —
+   * EVERY interface. So an editor started on a laptop was reachable from any
+   * machine on the same cafe wifi, and the startup line said "http://localhost"
+   * while it did so, which is not a small imprecision but the opposite of the
+   * truth. There is no authentication on most of this API (see auth.ts for what
+   * there is now), transcripts sit behind a plain GET, and POST /api/settings/keys
+   * rewrites every credential the app holds. None of that is safe to offer a
+   * network, and nobody running `npm run app` was choosing to.
+   *
+   * Docker and any other deliberate multi-host deployment must set HOST=0.0.0.0,
+   * which the Dockerfile and compose file now do. That is the right shape: a
+   * container publishing a port has already made the decision explicitly, and a
+   * developer on a laptop has not.
+   */
+  host: process.env.HOST ?? '127.0.0.1',
+
   // The credential fields below are GETTERS, not captured values, so a key set at
   // runtime from the dashboard (which writes process.env — see settings.ts) takes
   // effect on the very next request without a restart. The Claude SDK reads

@@ -15,9 +15,11 @@ import { CONFIG } from './config.ts';
  * SDK reads `process.env` directly — so neither captures a stale value.
  *
  * ⚠️ Two honest limitations, stated here and in the UI:
- *   1. This API is unauthenticated (see the CORS note in index.ts). A key-setting
- *      route means anyone who can reach the server can change keys. That is fine
- *      for a local, single-user desktop app and wrong the moment it is exposed.
+ *   1. Anyone holding the app's token can change these keys. That used to read
+ *      "this API is unauthenticated", which it no longer is (auth.ts) — but the
+ *      token is a single shared credential with no scopes, so a caller who can
+ *      list projects can also rewrite every key. Treat holding it as holding the
+ *      keys, because it is.
  *   2. Keys are stored in PLAINTEXT on disk, exactly as a .env file would be. The
  *      file lives OUTSIDE the media directory, so it is never served over /media.
  */

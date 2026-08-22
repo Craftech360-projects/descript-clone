@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, readdir, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { CONFIG } from './config.ts';
 import { probe } from './ffmpeg.ts';
@@ -293,18 +293,95 @@ export interface Project {
   createdAt: string;
 }
 
-const projectsDir = join(CONFIG.mediaDir, 'projects');
+/**
+ * Where project records live — the DATA directory, not the media one.
+ *
+ * A function rather than a module-level const on purpose. The const form is
+ * evaluated at import, so a test (or an embedder) that sets DATA_DIR after this
+ * module is first required would be silently ignored and would write to the
+ * wrong place while every assertion passed. folders.ts uses the function form
+ * for exactly this reason; match it.
+ */
+const projectsDir = () => join(CONFIG.dataDir, 'projects');
+/** Where these used to live, back when every transcript was web-readable. See init(). */
+const legacyProjectsDir = () => join(CONFIG.mediaDir, 'projects');
+
 const cache = new Map<string, Project>();
 
 export async function init(): Promise<void> {
-  await mkdir(projectsDir, { recursive: true });
+  await mkdir(projectsDir(), { recursive: true });
   await mkdir(join(CONFIG.mediaDir, 'uploads'), { recursive: true });
   await mkdir(join(CONFIG.mediaDir, 'renders'), { recursive: true });
+  await migrateOutOfMedia();
+}
+
+/**
+ * Move project records out of the statically-served media directory.
+ *
+ * They were written to media/projects/, and index.ts serves media/* — so
+ * GET /media/projects/<uuid>.json returned the whole record to anyone who could
+ * reach the port: every word of the transcript, the source path, the saved
+ * assistant conversation. Measured before this change: 213KB and 215 words over
+ * a plain unauthenticated GET.
+ *
+ * folders.ts already fixed the same bug for folder memories and left the note
+ * that this was the pattern; projects and jobs were simply never moved with it.
+ *
+ * Failure policy is per-file and forgiving: a record that cannot be moved is
+ * LEFT WHERE IT IS and the loop continues. A half-migrated library that still
+ * opens beats a clean failure that loses everything, and the next boot retries.
+ */
+async function migrateOutOfMedia(): Promise<void> {
+  const from = legacyProjectsDir();
+  const to = projectsDir();
+  if (from === to) return;
+
+  const files = await readdir(from).catch(() => [] as string[]);
+  let moved = 0;
+
+  for (const name of files) {
+    if (!name.endsWith('.json')) continue;
+    const src = join(from, name);
+    const dst = join(to, name);
+
+    // Never clobber a record already at the new path — it is the newer one.
+    try {
+      await readFile(dst, 'utf8');
+      await unlink(src).catch(() => {});
+      continue;
+    } catch {
+      // Not there yet. Move it.
+    }
+
+    try {
+      await rename(src, dst);
+    } catch {
+      // EXDEV: MEDIA_DIR and DATA_DIR on different volumes. Rare, but the person
+      // who splits them is exactly the person who would hit it.
+      try {
+        await copyFile(src, dst);
+        await unlink(src).catch(() => {});
+      } catch {
+        continue;
+      }
+    }
+
+    // writeFile's `mode` only applies when it CREATES a file, so a record that
+    // arrived here by rename still carries its old 0644. Set it explicitly or
+    // the migration moves the file without fixing the permission that made it
+    // readable in the first place.
+    await chmod(dst, 0o600).catch(() => {});
+    moved++;
+  }
+
+  if (moved > 0) console.log(`projects migrated out of the web-served media directory (${moved})`);
 }
 
 export async function save(project: Project): Promise<void> {
   cache.set(project.id, project);
-  await writeFile(join(projectsDir, `${project.id}.json`), JSON.stringify(project, null, 2));
+  await writeFile(join(projectsDir(), `${project.id}.json`), JSON.stringify(project, null, 2), {
+    mode: 0o600,
+  });
 }
 
 export async function get(id: string): Promise<Project | null> {
@@ -313,7 +390,7 @@ export async function get(id: string): Promise<Project | null> {
 
   try {
     const project = JSON.parse(
-      await readFile(join(projectsDir, `${id}.json`), 'utf8'),
+      await readFile(join(projectsDir(), `${id}.json`), 'utf8'),
     ) as Project;
     // Migrate BEFORE caching. Callers mutate the object this returns and then
     // save it, so a post-cache migration would be silently dropped.
@@ -364,7 +441,7 @@ export async function remove(id: string): Promise<boolean> {
   }
 
   cache.delete(id);
-  await unlink(join(projectsDir, `${id}.json`)).catch(() => {});
+  await unlink(join(projectsDir(), `${id}.json`)).catch(() => {});
   return true;
 }
 
@@ -482,7 +559,7 @@ async function migrate(project: Project): Promise<Project> {
 
 /** The media library listing. Peaks, transcript and chat are omitted — big, and not needed here. */
 export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript' | 'chat'>>> {
-  const files = await readdir(projectsDir).catch(() => [] as string[]);
+  const files = await readdir(projectsDir()).catch(() => [] as string[]);
   const projects = await Promise.all(
     files.filter((f) => f.endsWith('.json')).map((f) => get(f.replace('.json', ''))),
   );

@@ -92,6 +92,14 @@ function startServer(port, userData) {
       ELECTRON_RUN_AS_NODE: '1',
       PORT: String(port),
       MEDIA_DIR: path.join(userData, 'media'),
+      // Projects, jobs, folder memories, preferences and the bridge token.
+      // WITHOUT this, config.ts falls back to a path relative to its own bundled
+      // file, which once packaged resolves OUTSIDE the app — /Applications/data
+      // on Mac, C:\ on Windows. /Applications happens to be group-writable by
+      // admin users, so it silently succeeded and scattered private state into a
+      // shared location that survives deleting the app. Same reasoning as
+      // MEDIA_DIR and SETTINGS_PATH above; this line was simply missed.
+      DATA_DIR: path.join(userData, 'data'),
       WEB_DIST: path.join(res, 'web'),
       FFMPEG_PATH: ffmpegPath,
       FFPROBE_PATH: ffprobePath,

@@ -177,16 +177,32 @@ if (targetPlatform !== 'win32') chmodSync(join(sdkDst, native, cli), 0o755);
  * Both are skipped on non-Mac targets, and --no-swift opts out entirely.
  */
 if (targetPlatform === 'darwin' && !flag('no-swift', false)) {
-  const macosTarget = `${targetArch === 'x64' ? 'x86_64' : 'arm64'}-apple-macos26.0`;
+  const cpu = targetArch === 'x64' ? 'x86_64' : 'arm64';
   const nativeOut = join(out, 'native');
   mkdirSync(nativeOut, { recursive: true });
 
+  /**
+   * Each helper gets the OLDEST macOS it can actually run on, not one blanket
+   * minimum.
+   *
+   * These are not the same number and using one for both costs a real feature.
+   * SpeechTranscriber genuinely does not exist before macOS 26 — compiling it for
+   * 15 is a hard error, not a warning — so the ASR helper has no choice. But the
+   * caption renderer is CoreText, which is ancient, and pinning it to 26 as well
+   * would mean an Intel Mac stuck on Sequoia lost burned captions for no reason
+   * whatsoever. Captions are the feature this project exists to get right.
+   *
+   * So an older Mac gets a working app that simply has no on-device ASR, and
+   * apple-speech.ts's platformSupported() already reports that honestly rather
+   * than offering a model that fails at click time.
+   */
   const helpers = [
-    ['apple-speech', 'jumpcut-stt', 'Apple on-device transcription'],
-    ['caption-render', 'jumpcut-captions', 'burned-in captions'],
+    ['apple-speech', 'jumpcut-stt', 'Apple on-device transcription', '26.0'],
+    ['caption-render', 'jumpcut-captions', 'burned-in captions', '11.0'],
   ];
 
-  for (const [dir, bin, what] of helpers) {
+  for (const [dir, bin, what, minMacos] of helpers) {
+    const macosTarget = `${cpu}-apple-macos${minMacos}`;
     const src = join(repo, 'apps', 'server', 'native', dir, 'main.swift');
     if (!existsSync(src)) throw new Error(`Missing ${src} — cannot build the helper for ${what}.`);
     console.log(`• compiling ${bin} (${macosTarget})`);

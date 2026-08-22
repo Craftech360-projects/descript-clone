@@ -955,6 +955,50 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * within one Field do not. */
 .sect-body > .field + .field { margin-top: var(--s-3); }
 
+/* ---- tighten for reels ----
+ *
+ * The one action that spans three of the sections below it, so it sits ABOVE
+ * them and outside the ruled list — a row in that list is a thing you open, and
+ * this is a thing you press.
+ *
+ * Not painted .primary, though it is the most-used control in this panel. The
+ * gold is Export's, and a panel with two primaries has none: the button that
+ * spends minutes of render and produces the file has to be the loudest thing on
+ * screen. This one earns its place by being first and full-width instead.
+ */
+.tighten {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding-bottom: var(--s-3);
+}
+.tighten-go { width: 100%; }
+
+/* Same paint as the app's own notice, because it is the same kind of message:
+ * what just happened, dismissed by clicking it. */
+.tighten-report {
+  padding: var(--s-2) 10px; border-radius: var(--r-2);
+  background: var(--info-bg); border: 1px solid var(--info-line); color: var(--info-fg);
+  font-size: var(--t-small); line-height: 1.6;
+  cursor: pointer;
+}
+
+/* The preview, in the dialog. One box per step so the counts are countable at a
+ * glance rather than parsed out of a sentence — deciding whether to sweep a take
+ * is deciding about those three numbers and nothing else. */
+.tighten-list {
+  list-style: none; padding: 0;
+  display: flex; flex-direction: column; gap: var(--s-1);
+  /* Pulled back against .dl-body's 24px gap: "This will:" is this list's LABEL,
+   * and a label a full paragraph-break away from its list stops reading as one.
+   * Everything below it keeps the dialog's own rhythm. */
+  margin: calc(var(--s-5) * -1 + var(--s-2)) 0 0;
+}
+.tighten-list li {
+  padding: var(--s-2) var(--s-3);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  font-size: var(--t-ui); color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The one big number: what you are actually making. */
 .hero {
   display: flex; flex-direction: column; gap: var(--s-0);
@@ -1282,6 +1326,49 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--faint); font-size: 14px; line-height: 1;
 }
 .chip button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+
+/* ---- saved caption styles ----
+ *
+ * A wrapping row of names, above the dozen controls they stand in for. Names
+ * rather than rendered swatches: a caption look is type on top of MOVING
+ * footage, so a 60px thumbnail of it would show two illegible words over one
+ * frame of one video — it would be decoration pretending to be information. The
+ * name is what you called it, and the monitor behind the panel is already
+ * showing the real thing the moment you click.
+ *
+ * The chip is two buttons in one shell — pick, and delete — so the delete is a
+ * real target rather than a modifier-click, and so neither is nested inside the
+ * other (a button inside a button is not a thing HTML has).
+ */
+.cap-styles { display: flex; flex-direction: column; gap: var(--s-2); }
+.style-chips {
+  display: flex; flex-wrap: wrap; gap: var(--s-1);
+  list-style: none; padding: 0; margin: 0;
+}
+.style-chip {
+  display: inline-flex; align-items: stretch;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-full);
+  overflow: hidden;
+}
+.style-chip:hover { border-color: var(--line-strong); }
+/* Gold border and tinted fill for the look currently ON, which is the same
+ * "this one is chosen" the grade chips and the open section use. */
+.style-chip.on { border-color: var(--accent); background: var(--accent-tint); }
+.style-pick {
+  padding: 3px var(--s-2); max-width: 15ch;
+  background: none; border: none; border-radius: 0;
+  font-size: var(--t-small); color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.style-pick:hover:not(:disabled) { background: var(--hover); border-color: transparent; color: var(--text); }
+.style-chip.on .style-pick { color: var(--text); }
+.style-x {
+  display: grid; place-items: center;
+  width: 20px; padding: 0;
+  background: none; border: none; border-radius: 0;
+  color: var(--faint); font-size: 14px; line-height: 1;
+}
+.style-x:hover:not(:disabled) { background: var(--hover); border-color: transparent; color: var(--cut); }
 
 /* The caption font control: the dropdown, then a row of text-button actions —
  * import always, remove only while an imported font is selected. The actions read

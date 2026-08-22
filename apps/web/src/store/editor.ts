@@ -45,6 +45,11 @@ import {
 } from '../../../../packages/core/src/overlay.ts';
 import { detectFillers } from '../../../../packages/core/src/fillers.ts';
 import { detectRetakes } from '../../../../packages/core/src/retakes.ts';
+import {
+  planTighten,
+  type TightenOptions,
+  type TightenPlan,
+} from '../../../../packages/core/src/tighten.ts';
 import type { Transcript, Word } from '../../../../packages/core/src/types.ts';
 
 /**
@@ -767,6 +772,72 @@ export function restoreAll(): number {
     nextSelection: null,
   });
   return ids.size;
+}
+
+// ── tighten for reels ─────────────────────────────────────────────────────────
+//
+// The three sweeps above, applied together as ONE decision. Everything that
+// decides anything is in packages/core/tighten.ts — planTighten is pure and
+// tested; this is only the two calls that read the live document and commit the
+// result.
+//
+// It has to live in the store rather than in the panel because of the undo
+// requirement, and that is the whole reason it is not just three calls in a row.
+// removeFillers, removeRetakes and endCutDrag each commit their own entry, so
+// composing them would put THREE steps on the stack for one press of one button
+// and make backing it out a guessing game about how many Cmd+Zs gets you back to
+// the raw transcript. `apply` is module-private, so a single batch patch can
+// only be built from in here. Same argument, same shape, as runImportChain
+// below.
+
+/** What Tighten would do to the live document, without touching it. */
+export function planTightenNow(settings: Omit<TightenOptions, 'cut'>): TightenPlan | null {
+  const { doc } = state;
+  if (!doc) return null;
+  return planTighten(doc.words, { ...settings, cut: doc.cut });
+}
+
+/**
+ * Cut the fillers, cut the false starts, cap the pauses — one history entry.
+ *
+ * The plan is recomputed here rather than taken from the caller's preview. The
+ * two agree in every ordinary case (nothing else can touch the document while a
+ * modal preview is open), but the assistant CAN edit while the panel is idle,
+ * and a stale plan would delete word ids that no longer mean what they meant.
+ * Recomputing costs a sub-millisecond pass and makes the returned plan a report
+ * of what actually happened rather than of what was once going to.
+ */
+export function tightenForReels(settings: Omit<TightenOptions, 'cut'>): TightenPlan | null {
+  const { doc } = state;
+  if (!doc) return null;
+
+  const plan = planTighten(doc.words, { ...settings, cut: doc.cut });
+  const patches: DocPatch[] = [];
+
+  // Two word patches rather than one, because fillers carry isFiller as well as
+  // deleted — the script paints them as the class of word they are instead of as
+  // an anonymous cut, exactly as removeFillers does. The two id sets are
+  // disjoint by construction (see TightenPlan.retakeIds), so nothing here
+  // depends on the order they are applied in.
+  if (plan.fillerIds.length > 0) {
+    patches.push(buildWordPatch(doc.words, plan.fillerIds, { deleted: true, isFiller: true }));
+  }
+  if (plan.retakeIds.length > 0) {
+    patches.push(buildWordPatch(doc.words, plan.retakeIds, { deleted: true }));
+  }
+  if (plan.maxGapMs !== null && plan.maxGapMs !== doc.cut.maxGapMs) {
+    patches.push({ kind: 'cut', prev: doc.cut, next: { ...doc.cut, maxGapMs: plan.maxGapMs } });
+  }
+
+  if (patches.length === 0) return plan;
+
+  apply({ kind: 'batch', patches }, {
+    // What Cmd+Z announces. One name for the whole batch, because one button
+    // press is what caused it.
+    label: 'Tighten for reels',
+    nextSelection: null,
+  });
+  return plan;
 }
 
 // ── the on-import chain ───────────────────────────────────────────────────────

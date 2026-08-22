@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CONFIG } from './config.ts';
 import type { MediaInfo } from './ffmpeg.ts';
@@ -48,18 +48,65 @@ export function thumbsDir(): string {
   return join(CONFIG.mediaDir, 'thumbs');
 }
 
-export function planThumbs(info: MediaInfo): { interval: number; tileW: number; count: number } | null {
+/**
+ * The widest a tile may be drawn.
+ *
+ * Sizing purely by HEIGHT is right for landscape and wrong for vertical, which
+ * is now the default shape here: a 9:16 frame at TILE_H=64 comes out 36px wide
+ * and draws at about 30, which is legible as a ruler and useless as a picture.
+ * Capping the WIDTH instead lets a portrait tile grow taller than 64 until it is
+ * wide enough to recognise a shot in.
+ *
+ * 96 rather than something larger because the strip has to stay a strip: at one
+ * tile every couple of seconds a 15-minute programme is hundreds of them, and
+ * the sheets are downloaded before anything can be drawn.
+ */
+const MAX_TILE_W = 96;
+/** Ceiling on the height a portrait tile may claim, so sheets stay reasonable. */
+const MAX_TILE_H = 128;
+
+export function planThumbs(
+  info: MediaInfo,
+): { interval: number; tileW: number; tileH: number; count: number } | null {
   if (!info.hasVideo || !info.width || !info.height || info.duration <= 0) return null;
 
   const interval = Math.max(1, Math.ceil(info.duration / TARGET_TILES));
-  const tileW = Math.round((TILE_H * info.width) / info.height);
+
+  // Start from the height, as before — that is correct wherever the picture is
+  // wider than it is tall.
+  let tileH = TILE_H;
+  let tileW = Math.round((TILE_H * info.width) / info.height);
+
+  // Portrait: grow the tile until it is wide enough to read, within both caps.
+  if (info.width < info.height) {
+    const wanted = Math.min(MAX_TILE_W, Math.round(MAX_TILE_H * (info.width / info.height)));
+    const scale = wanted / Math.max(1, tileW);
+    tileW = wanted;
+    tileH = Math.min(MAX_TILE_H, Math.round(TILE_H * scale));
+  }
+
+  // Both dimensions must be even: the tile filter builds a sheet that is then
+  // JPEG-encoded with chroma subsampled 2:1, and an odd side gets rounded
+  // somewhere unpredictable.
+  tileW = Math.max(2, tileW - (tileW % 2));
+  tileH = Math.max(2, tileH - (tileH % 2));
+
   // The fps filter emits at t=0, interval, 2*interval… up to the duration.
   const count = Math.floor(info.duration / interval) + 1;
-  return { interval, tileW, count };
+  return { interval, tileW, tileH, count };
+}
+
+/** One clip's window into its file, for a strip that spans the whole timeline. */
+export interface ThumbSource {
+  sourcePath: string;
+  /** Where in the file this clip starts. Absent means the whole file. */
+  sourceStart?: number;
+  /** The clip's own length — out minus in. */
+  duration: number;
 }
 
 export async function generate(
-  input: string,
+  input: string | ThumbSource[],
   projectId: string,
   info: MediaInfo,
   hooks: { onSpawn?: (child: ChildProcess) => void } = {},
@@ -77,11 +124,41 @@ export async function generate(
     if (name.startsWith(`${projectId}-`)) await rm(join(dir, name), { force: true });
   }
 
+  /**
+   * Feed ffmpeg the WHOLE timeline, not just the first clip.
+   *
+   * The route used to pass clip 0's path together with the project's TOTAL
+   * duration, so planThumbs sized a strip for the whole programme while ffmpeg
+   * read one file — and every tile past the end of clip 0 came out black. A
+   * two-clip project's strip simply stopped halfway.
+   *
+   * The concat demuxer's inpoint/outpoint are what make this exact: a split clip
+   * is a WINDOW into a file its siblings also use, so listing paths alone would
+   * replay whole files and desynchronise the strip from the timeline it labels.
+   */
+  let inputArgs: string[];
+  let listPath: string | null = null;
+
+  if (typeof input === 'string') {
+    inputArgs = ['-i', input];
+  } else {
+    listPath = join(dir, `${projectId}-clips.txt`);
+    const lines = ['ffconcat version 1.0'];
+    for (const clip of input) {
+      const start = clip.sourceStart ?? 0;
+      lines.push(`file '${clip.sourcePath.replace(/'/g, "'\\''")}'`);
+      lines.push(`inpoint ${start.toFixed(6)}`);
+      lines.push(`outpoint ${(start + clip.duration).toFixed(6)}`);
+    }
+    await writeFile(listPath, lines.join('\n'), 'utf8');
+    inputArgs = ['-f', 'concat', '-safe', '0', '-i', listPath];
+  }
+
   const pattern = join(dir, `${projectId}-%03d.jpg`);
   const args = [
     '-hide_banner',
     '-v', 'error',
-    '-i', input,
+    ...inputArgs,
     // Explicit scale rather than -1: the tile filter needs every input the same
     // size, and we must know tileW exactly to index into the sheet later.
     //
@@ -94,8 +171,8 @@ export async function generate(
     // while degrading a mismatch to black bars instead of a stretch.
     '-vf',
     `fps=1/${plan.interval},` +
-      `scale=${plan.tileW}:${TILE_H}:force_original_aspect_ratio=decrease,` +
-      `pad=${plan.tileW}:${TILE_H}:(ow-iw)/2:(oh-ih)/2,` +
+      `scale=${plan.tileW}:${plan.tileH}:force_original_aspect_ratio=decrease,` +
+      `pad=${plan.tileW}:${plan.tileH}:(ow-iw)/2:(oh-ih)/2,` +
       `tile=${COLS}x${ROWS}`,
     '-an',
     '-q:v', '6',
@@ -128,12 +205,15 @@ export async function generate(
 
   if (sheets.length === 0) return null;
 
+  // The concat list was scaffolding; the sheets are the product.
+  if (listPath) await unlink(listPath).catch(() => {});
+
   return {
     interval: plan.interval,
     cols: COLS,
     rows: ROWS,
     tileW: plan.tileW,
-    tileH: TILE_H,
+    tileH: plan.tileH,
     count: plan.count,
     sheets,
   };

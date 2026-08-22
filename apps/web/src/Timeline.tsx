@@ -60,6 +60,8 @@ interface Props {
 
 const RULER_H = 22;
 const FILM_H = 54;
+/** Ceiling on the filmstrip lane, so a vertical source cannot swallow the dock. */
+const FILM_MAX_H = 96;
 /** The clip lane. Tall enough to grab and read a name in, short enough to stay a strip. */
 const CLIP_H = 20;
 
@@ -130,7 +132,18 @@ export default function Timeline({
   const film = useFilmstrip(thumbs);
   // No lane at all when there is no picture — an empty 54px band would just be
   // the void the left rail used to be, moved down here.
-  const filmH = film ? FILM_H : 0;
+  /**
+   * The filmstrip lane's height follows the TILE's shape.
+   *
+   * A fixed 54px band is right for landscape and wrong for the shape this
+   * editor now defaults to: a 9:16 tile fitted into 54px is about 30px wide,
+   * which reads as a ruler rather than a picture. The server already sizes a
+   * portrait tile taller than a landscape one (see planThumbs), so the lane just
+   * has to stop capping it — bounded so a very tall source cannot eat the dock.
+   */
+  const filmH = film
+    ? Math.round(Math.min(FILM_MAX_H, Math.max(FILM_H, (FILM_H * film.tileH) / Math.max(1, film.tileW))))
+    : 0;
 
   /**
    * The lane exists only when there is something to reorder. A single-clip

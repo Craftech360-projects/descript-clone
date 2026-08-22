@@ -1551,8 +1551,22 @@ app.post('/api/projects/:id/thumbs', async (c) => {
     // disagreement used to bake a squashed picture into every sheet.
     const probed = await probe(project.sourcePath).catch(() => null);
 
+    /**
+     * Every clip, not just the first.
+     *
+     * `project.duration` is the SUM across clips while `sourcePath` is clip 0
+     * alone, so passing the pair asked for a strip covering the whole programme
+     * built from one file — and the strip went black at clip 1's end.
+     */
+    const clips = store.clipsOf(project);
+    const sources = clips.map((c) => ({
+      sourcePath: c.sourcePath,
+      sourceStart: c.sourceStart,
+      duration: c.duration,
+    }));
+
     const thumbs = await generateThumbs(
-      project.sourcePath,
+      sources.length > 1 ? sources : project.sourcePath,
       project.id,
       {
         duration: project.duration,

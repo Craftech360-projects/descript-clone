@@ -2847,3 +2847,94 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 }
 .dash-memory textarea:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
 .dash-memory-hint { margin: var(--s-2) 0 0; font-size: var(--t-small); color: var(--faint); line-height: var(--lh-normal); }
+
+/* Move-to-folder, on the card itself — the same posture as the delete confirm:
+   the decision is made over the poster you are deciding about. */
+.dc-move {
+  position: absolute; inset: 0; z-index: 2;
+  display: grid; align-content: center; gap: var(--s-2);
+  padding: var(--s-4);
+  background: rgb(0 0 0 / 0.86);
+  border-radius: var(--r-3);
+}
+.dc-move p { margin: 0; font-size: var(--t-small); color: var(--dim); }
+.dc-move select {
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-ui); padding: var(--s-2);
+}
+.dc-move button {
+  background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--dim); font-size: var(--t-small); padding: var(--s-1) var(--s-2); cursor: pointer;
+}
+
+/* ── the floating assistant ──────────────────────────────────────────────────
+ * Above every screen, so the projects page has an assistant at all and the
+ * editor no longer trades the Inspector for one. */
+.fab {
+  position: fixed;
+  right: var(--s-5);
+  bottom: var(--s-5);
+  z-index: var(--z-hud);
+  width: 46px; height: 46px;
+  display: grid; place-items: center;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  box-shadow: var(--e-2);
+  cursor: pointer;
+  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.fab:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.fab:focus-visible { outline: none; box-shadow: var(--ring), var(--e-2); }
+.fab-on { background: var(--raised); color: var(--text); }
+
+.fab-panel {
+  position: fixed;
+  right: var(--s-5);
+  bottom: calc(var(--s-5) + 46px + var(--s-2));
+  z-index: var(--z-hud);
+  width: min(24rem, calc(100vw - var(--s-5) * 2));
+  max-height: min(32rem, calc(100vh - 8rem));
+  display: flex; flex-direction: column;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  box-shadow: var(--e-3);
+  overflow: hidden;
+}
+.fab-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--t-base); color: var(--text);
+}
+.fab-model { font-family: var(--font-mono); font-size: var(--t-micro); color: var(--faint); }
+.fab-scroll { flex: 1; overflow-y: auto; padding: var(--s-3) var(--s-4); display: grid; gap: var(--s-3); }
+.fab-empty, .fab-busy { margin: 0; font-size: var(--t-ui); color: var(--faint); line-height: var(--lh-normal); }
+.fab-msg { font-size: var(--t-base); line-height: var(--lh-normal); }
+.fab-msg p { margin: 0; }
+.fab-user {
+  justify-self: end;
+  max-width: 85%;
+  background: var(--selected);
+  color: var(--text);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-3);
+}
+.fab-assistant { color: var(--dim); }
+.fab-compose { display: flex; gap: var(--s-2); padding: var(--s-3); border-top: 1px solid var(--line-soft); }
+.fab-compose textarea {
+  flex: 1; min-width: 0; resize: none;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-ui);
+  padding: var(--s-2); line-height: var(--lh-snug);
+}
+.fab-compose textarea:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.linkish { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+/* On a phone the panel is the screen, not a corner of it. */
+@media (max-width: 520px) {
+  .fab-panel { right: var(--s-2); left: var(--s-2); width: auto; bottom: calc(var(--s-4) + 46px + var(--s-2)); }
+  .fab { right: var(--s-4); bottom: var(--s-4); }
+}

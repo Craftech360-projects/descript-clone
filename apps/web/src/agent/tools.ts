@@ -60,6 +60,22 @@ import {
 
 /** A snapshot of live app state. `doc` is the real editor document, not a copy. */
 export interface AgentSnapshot {
+  /**
+   * Where the user actually is, so a floating assistant can answer about the
+   * screen in front of them rather than only about an open document.
+   *
+   * Without this the context said "No project is open" on the whole projects
+   * page — true, useless, and the same sentence whether they were staring at an
+   * empty library or at a folder with a memory they had just written.
+   */
+  screen: {
+    view: 'folders' | 'folder' | 'editor';
+    /** The folder being viewed or the open project's folder. */
+    folderName: string | null;
+    folderBrief: string | null;
+    folderCount: number;
+    projectsHere: number;
+  };
   project: { id: string; name: string; durationSec: number; hasVideo: boolean } | null;
   transcribed: boolean;
   asrAvailable: boolean;
@@ -256,11 +272,33 @@ function clock(sec: number): string {
 export function buildContext(): string {
   if (!bridge) return 'The editor is still loading.';
   const s = bridge.snapshot();
-  if (!s.project) {
-    return 'No project is open. Use list_projects to see the library, then open_project to open one.';
+
+  // Where they are, always — it is the first thing a person asking "what should
+  // I call this?" assumes you can see.
+  const where: string[] = [];
+  if (s.screen.view === 'folders') {
+    where.push(`The user is looking at their folders (${s.screen.folderCount} of them).`);
+  } else if (s.screen.view === 'folder') {
+    where.push(
+      `The user is inside the folder "${s.screen.folderName ?? 'Unfiled'}" (${s.screen.projectsHere} project${s.screen.projectsHere === 1 ? '' : 's'}).`,
+    );
+  }
+  if (s.screen.folderName && s.screen.folderBrief?.trim()) {
+    // The folder's standing brief matters more than anything else here: it is
+    // what makes a suggestion sound like THIS channel.
+    where.push(`Folder "${s.screen.folderName}" memory: ${s.screen.folderBrief.trim()}`);
+  } else if (s.screen.folderName) {
+    where.push(`Folder "${s.screen.folderName}" has no memory written yet.`);
   }
 
-  const lines: string[] = [];
+  if (!s.project) {
+    return [
+      ...where,
+      'No project is open. Use list_projects to see the library, then open_project to open one.',
+    ].join('\n');
+  }
+
+  const lines: string[] = [...where];
   const p = s.project;
   lines.push(`Project: "${p.name}" (${clock(p.durationSec)}, ${p.hasVideo ? 'video' : 'audio only'})`);
   lines.push(`Transcribed: ${s.transcribed ? 'yes' : 'no'}${s.asrAvailable ? '' : ' (no ASR provider configured)'}`);

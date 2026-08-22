@@ -20,6 +20,8 @@ interface Props {
   onDeleteFolder: (id: string) => void;
   /** Save the open folder's memory — what the AI should know about this work. */
   onSaveBrief: (id: string, brief: string) => void;
+  /** Put a project in a different folder. '' means Unfiled. */
+  onMoveProject: (id: string, folderId: string) => void;
   /** An import is in flight — a placeholder card holds its slot. */
   importing: boolean;
   /** Progress of the job behind the import, 0..1, or null when there is none. */
@@ -82,12 +84,19 @@ function Poster({ item }: { item: MediaItem }) {
   );
 }
 
-function ProjectCard({ item, onOpen, onDelete, onRename }: {
+function ProjectCard({ item, folders, onOpen, onDelete, onRename, onMove }: {
   item: MediaItem;
+  /** Everywhere this project could go, for the move menu. */
+  folders: Folder[];
   onOpen: () => void;
   onDelete: () => void;
   onRename: (name: string) => void;
+  /** '' takes it out of every folder and back to Unfiled. */
+  onMove: (folderId: string) => void;
 }) {
+  /* Moving is a menu rather than a drag: a drag needs a visible target, and the
+   * folder you want is on the previous screen. */
+  const [moving, setMoving] = useState(false);
   /* Deleting takes the media file with it and there is no undo on either side,
    * so the button arms the card rather than firing. The confirmation is the card
    * itself — a modal would ask "are you sure?" about a project it cannot show
@@ -186,6 +195,14 @@ function ProjectCard({ item, onOpen, onDelete, onRename }: {
       <div className="dc-acts">
         <button
           className="dc-act"
+          aria-label={`Move ${item.name} to another folder`}
+          title="Move to folder"
+          onClick={() => setMoving((v) => !v)}
+        >
+          <Icon name="video" size={13} />
+        </button>
+        <button
+          className="dc-act"
           aria-label={`Rename ${item.name}`}
           title="Rename"
           onClick={() => setDraft(item.name)}
@@ -201,6 +218,24 @@ function ProjectCard({ item, onOpen, onDelete, onRename }: {
           <Icon name="trash" size={13} />
         </button>
       </div>
+
+      {moving && (
+        <div className="dc-move">
+          <p>Move “{item.name}” to</p>
+          <select
+            autoFocus
+            value={item.folderId ?? ''}
+            aria-label={`Folder for ${item.name}`}
+            onChange={(e) => { onMove(e.target.value); setMoving(false); }}
+          >
+            <option value="">Unfiled</option>
+            {folders.map((f) => (
+              <option key={f.id} value={f.id}>{f.name}</option>
+            ))}
+          </select>
+          <button onClick={() => setMoving(false)}>Cancel</button>
+        </div>
+      )}
 
       {arming && (
         <div className="dc-confirm">
@@ -237,6 +272,7 @@ export default function Dashboard({
   onRenameFolder,
   onDeleteFolder,
   onSaveBrief,
+  onMoveProject,
   importing,
   progress,
   opening,
@@ -505,9 +541,11 @@ export default function Dashboard({
             <ProjectCard
               key={p.id}
               item={p}
+              folders={folders}
               onOpen={() => onOpen(p.id)}
               onDelete={() => onDelete(p.id)}
               onRename={(name) => onRename(p.id, name)}
+              onMove={(folderId) => onMoveProject(p.id, folderId)}
             />
           ))}
         </div>

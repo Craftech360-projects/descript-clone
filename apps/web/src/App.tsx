@@ -96,6 +96,7 @@ import {
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
 import { DEFAULT_FRAME, frameLayout, frameSize } from '../../../packages/core/src/frame.ts';
 import SafeAreaOverlay from './shell/SafeAreaOverlay.tsx';
+import FloatingAssistant from './agent/FloatingAssistant.tsx';
 import {
   MIN_MOVE_SEC,
   boxToPunch,
@@ -240,6 +241,16 @@ export default function App() {
     try {
       await api.folders.update(id, patch);
       await loadFolders();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  /** Put a project in a folder, or take it out. '' is Unfiled. */
+  const moveProject = async (id: string, folderId: string) => {
+    try {
+      await api.setProjectFolder(id, folderId || null);
+      setLibrary(await api.list());
     } catch (e) {
       setError((e as Error).message);
     }
@@ -1976,6 +1987,23 @@ export default function App() {
   useEffect(() => {
     const bridge: AgentBridge = {
       snapshot: () => ({
+        screen: {
+          view: project ? ('editor' as const) : openFolderId === null ? ('folders' as const) : ('folder' as const),
+          folderName: (() => {
+            const id = project ? project.folderId ?? '' : openFolderId ?? '';
+            if (!id) return openFolderId === '' || project ? 'Unfiled' : null;
+            return folders.find((f) => f.id === id)?.name ?? null;
+          })(),
+          folderBrief: (() => {
+            const id = project ? project.folderId ?? '' : openFolderId ?? '';
+            return id ? folders.find((f) => f.id === id)?.brief ?? null : null;
+          })(),
+          folderCount: folders.length,
+          projectsHere:
+            openFolderId === null
+              ? library.length
+              : library.filter((p) => (p.folderId ?? '') === openFolderId).length,
+        },
         project: project
           ? { id: project.id, name: project.name, durationSec: project.duration, hasVideo: project.hasVideo }
           : null,
@@ -2278,6 +2306,7 @@ export default function App() {
           onRenameFolder={(id, name) => void patchFolder(id, { name })}
           onDeleteFolder={(id) => void removeFolder(id)}
           onSaveBrief={(id, brief) => void patchFolder(id, { brief })}
+          onMoveProject={(id, folderId) => void moveProject(id, folderId)}
           importing={busy === 'import'}
           progress={job?.progress ?? null}
           opening={busy === 'open'}
@@ -2290,6 +2319,13 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
+        {/* Reachable from the projects page too — this is where you name things
+            and decide what to shoot, and there was no assistant here at all. */}
+        <FloatingAssistant
+          enabled={Boolean(caps.agent?.enabled)}
+          defaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       </>
     );
   }
@@ -2660,6 +2696,14 @@ export default function App() {
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
 
+      {/* In the editor too, so asking a question no longer costs you sight of
+          the Inspector you are asking about. One conversation, one model —
+          this and the rail's tab are the same assistant. */}
+      <FloatingAssistant
+        enabled={Boolean(caps.agent?.enabled)}
+        defaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
     </div>
   );
 }

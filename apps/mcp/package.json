@@ -1,0 +1,18 @@
+{
+  "name": "@jumpcut/mcp",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Jumpcut as an MCP server, so an agent outside the browser can edit video.",
+  "bin": { "jumpcut-mcp": "src/index.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "//": [
+    "@modelcontextprotocol/sdk is already in the tree as a transitive dependency of",
+    "@anthropic-ai/claude-agent-sdk, so this adds no download. It is declared HERE",
+    "anyway: relying on the hoist means the day the Agent SDK drops or moves it,",
+    "this server stops resolving with no change of ours to blame."
+  ]
+}

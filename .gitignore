@@ -32,3 +32,4 @@ apps/server/native/caption-render/jumpcut-captions
 # App state: folder memories and preferences. Personal, and not the repo's.
 data/
 .*-probe.mjs
+.DS_Store

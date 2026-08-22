@@ -141,6 +141,25 @@ export const CONFIG = {
    */
   host: process.env.HOST ?? '127.0.0.1',
 
+  /**
+   * Which video encoder the caption-burn pass uses.
+   *
+   * 'x264' is software: slower and CPU-hungry, and the quality-per-byte other
+   * encoders are measured against. 'videotoolbox' hands the work to the
+   * dedicated encoder block on Apple Silicon — several times faster and leaves
+   * the CPU free, at some cost in quality for the same file size.
+   *
+   * Software stays the default because it is the safe answer everywhere: the
+   * hardware path exists only on macOS, and on a machine without it ffmpeg
+   * fails with an unhelpful error rather than falling back. renderEncoderArgs()
+   * checks availability and degrades instead.
+   *
+   * Worth switching on a Mac mini acting as a render server, where a render that
+   * pins six cores for two minutes is the difference between "I can keep editing"
+   * and "I'll wait".
+   */
+  videoEncoder: (process.env.VIDEO_ENCODER || 'x264').toLowerCase(),
+
   // The credential fields below are GETTERS, not captured values, so a key set at
   // runtime from the dashboard (which writes process.env — see settings.ts) takes
   // effect on the very next request without a restart. The Claude SDK reads

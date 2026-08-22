@@ -70,6 +70,57 @@ export async function checkTools(): Promise<{ ffmpeg: string | null; ffprobe: st
  */
 let subtitlesFilter: boolean | null = null;
 
+/**
+ * The encoder flags for a render, honouring CONFIG.videoEncoder.
+ *
+ * Probed rather than assumed. A build of ffmpeg without VideoToolbox — every
+ * Linux one, and some Homebrew formulae — fails with "Unknown encoder" partway
+ * into a render that has already spent a minute on the earlier passes, which is
+ * the worst moment to find out. Falling back to software costs speed and finishes.
+ *
+ * Cached: this shells out to ffmpeg, and a render should not pay for the probe
+ * every time.
+ */
+let encoderArgs: string[] | null = null;
+
+export async function renderEncoderArgs(): Promise<string[]> {
+  if (encoderArgs) return encoderArgs;
+
+  const SOFTWARE = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18'];
+
+  if (CONFIG.videoEncoder !== 'videotoolbox') {
+    encoderArgs = SOFTWARE;
+    return encoderArgs;
+  }
+
+  const available = await hasEncoder('h264_videotoolbox');
+  if (!available) {
+    console.warn('VIDEO_ENCODER=videotoolbox, but this ffmpeg has no h264_videotoolbox — using libx264.');
+    encoderArgs = SOFTWARE;
+    return encoderArgs;
+  }
+
+  /**
+   * -q:v rather than -crf: VideoToolbox has no CRF, and passing one is silently
+   * ignored, so a render that looked configured would come out at whatever
+   * default bitrate the encoder chose. 55 is roughly comparable to crf 18 for
+   * this kind of footage — high quality, not visually lossless.
+   */
+  encoderArgs = ['-c:v', 'h264_videotoolbox', '-q:v', '55'];
+  return encoderArgs;
+}
+
+/** Does this ffmpeg have the named encoder compiled in? */
+async function hasEncoder(name: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(CONFIG.ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (c) => { out += String(c); });
+    child.on('error', () => resolve(false));
+    child.on('close', () => resolve(new RegExp(`\\b${name}\\b`).test(out)));
+  });
+}
+
 export async function canBurnCaptions(): Promise<boolean> {
   if (subtitlesFilter !== null) return subtitlesFilter;
   try {
@@ -336,7 +387,7 @@ export async function burnCaptionStrip(
     // Audio is already mixed, cut and normalised by the first pass. Copying it
     // keeps this pass from touching the one thing it has no business changing.
     '-c:a', 'copy',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+    ...(await renderEncoderArgs()),
     '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart',
     output,

@@ -721,9 +721,32 @@ export default function App() {
   };
 
   // --- library -----------------------------------------------------------------
-  const importFile = (file: File) =>
+  /**
+   * Give the project the name the user typed before picking files.
+   *
+   * A rename, not an import parameter: the import endpoint takes the filename
+   * from a header and naming it there would mean a second way to set the same
+   * field. This is one PATCH that moves no bytes.
+   *
+   * A failed rename keeps the import. The project exists and is openable; it just
+   * carries the filename until it is renamed by hand, which is strictly better
+   * than discarding an upload that already landed.
+   */
+  const applyName = async (p: Project, name?: string): Promise<Project> => {
+    const wanted = name?.trim();
+    if (!wanted || wanted === p.name) return p;
+    try {
+      const { project } = await api.rename(p.id, wanted);
+      return project;
+    } catch {
+      return p;
+    }
+  };
+
+  const importFile = (file: File, name?: string) =>
     run('import', async () => {
-      const p = await api.import(file);
+      let p = await api.import(file);
+      p = await applyName(p, name);
       // Land it where the user is standing. An import made inside a folder
       // belongs to that folder — otherwise the folder is a label you have to
       // remember to apply, which is the thing folders are supposed to replace.
@@ -833,9 +856,10 @@ export default function App() {
    * project you can work with and add the fifth to; throwing all four away
    * because the fifth was a HEIC would be worse, and the error names which one.
    */
-  const importMany = (files: File[]) =>
+  const importMany = (files: File[], name?: string) =>
     run('import', async () => {
       let p = await api.import(files[0]);
+      p = await applyName(p, name);
       if (openFolderId) {
         try {
           await api.setProjectFolder(p.id, openFolderId);

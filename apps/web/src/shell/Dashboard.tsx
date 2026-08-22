@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Icon from '../ui/Icon.tsx';
+import Dialog from '../ui/Dialog.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { Folder, MediaItem } from '../api.ts';
 import { mediaAccept } from '../media-accept.ts';
@@ -34,9 +35,9 @@ interface Props {
   onDelete: (id: string) => void;
   /** Rename it. Already trimmed, non-empty, and never the name it already had. */
   onRename: (id: string, name: string) => void;
-  onImport: (file: File) => void;
+  onImport: (file: File, name?: string) => void;
   /** Several files, imported as one sequence. See takeMany. */
-  onImportMany: (files: File[]) => void;
+  onImportMany: (files: File[], name?: string) => void;
   error: string | null;
   onDismissError: () => void;
   /** Open the API-keys dialog (assistant + transcription credentials). */
@@ -304,12 +305,59 @@ export default function Dashboard({
   /** dragenter/leave fire per descendant, so the outline needs a depth count. */
   const depth = useRef(0);
 
+  /**
+   * Naming happens BEFORE the picker, which is the order people expect: decide
+   * what this is, then go and find it.
+   *
+   * The name has to survive a round trip through the OS file dialog, which
+   * unmounts nothing but does hand control away and come back in a different
+   * event. A ref rather than state because the change handler reads it during
+   * that callback, and a state update queued when the dialog closed may not have
+   * landed yet.
+   */
+  const [naming, setNaming] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const pendingName = useRef<string | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Focus the field once the dialog is actually showing.
+   *
+   * `autoFocus` does not work here: Dialog calls showModal() from its own effect,
+   * and React applies autoFocus during the render before that — so the focus
+   * lands on an element that is not yet in the top layer and is lost. On a phone
+   * that is the difference between the keyboard appearing and the user having to
+   * tap the field they were just asked to fill in.
+   */
+  useEffect(() => {
+    if (!naming) return;
+    const id = requestAnimationFrame(() => nameRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [naming]);
+
+  /**
+   * Confirm the name and open the picker — all synchronously.
+   *
+   * This is the constraint that shapes the whole flow: a file dialog may only be
+   * opened from a user gesture, and an `await` before `.click()` spends it.
+   * Mobile Safari is strictest — it silently does nothing rather than erroring,
+   * so the bug would look like a dead button. Nothing here awaits.
+   */
+  const confirmName = () => {
+    const name = draftName.trim();
+    if (!name) return;
+    pendingName.current = name;
+    fileRef.current?.click();
+    setNaming(false);
+  };
+
   const take = (file: File | undefined) => {
     // A drop needs somewhere to land. At the top level there is no folder yet,
     // and silently filing it under "Unfiled" would teach people that folders are
     // decoration.
     if (file && openFolder === null) return;
-    if (file) onImport(file);
+    if (file) onImport(file, pendingName.current ?? undefined);
+    pendingName.current = null;
   };
 
   /**
@@ -323,8 +371,10 @@ export default function Dashboard({
    */
   const takeMany = (files: File[]) => {
     if (files.length === 0 || openFolder === null) return;
-    if (files.length === 1) onImport(files[0]);
-    else onImportMany(files);
+    const name = pendingName.current ?? undefined;
+    pendingName.current = null;
+    if (files.length === 1) onImport(files[0], name);
+    else onImportMany(files, name);
   };
 
   return (
@@ -533,9 +583,9 @@ export default function Dashboard({
         <div className={opening ? 'dash-grid busy' : 'dash-grid'}>
           <button
             className="dcard dcard-new"
-            onClick={() => fileRef.current?.click()}
+            onClick={() => { setDraftName(''); setNaming(true); }}
             disabled={importing}
-            title="Import a video or audio file as a new project"
+            title="Name a new project, then choose its files"
           >
             <span className="dcn-disc">
               <Icon name="plus" size={26} />
@@ -587,6 +637,50 @@ export default function Dashboard({
       <div className="dash-drop" aria-hidden="true">
         <span>Drop to import</span>
       </div>
+
+      {/*
+        * Name first, then files.
+        *
+        * The old tile opened the picker straight away and the project took the
+        * filename — which on a phone is "20260817_210816.mp4", a timestamp you
+        * have to open the project to identify. Asking first costs one dialog and
+        * means the library reads as a list of things rather than a list of dates.
+        */}
+      <Dialog
+        open={naming}
+        title="New project"
+        onClose={() => setNaming(false)}
+        footer={
+          <>
+            <button onClick={() => setNaming(false)}>Cancel</button>
+            <button className="primary" onClick={confirmName} disabled={!draftName.trim()}>
+              Choose files…
+            </button>
+          </>
+        }
+      >
+        <label className="np-label" htmlFor="np-name">
+          What is this one?
+        </label>
+        <input
+          id="np-name"
+          ref={nameRef}
+          className="np-input"
+          value={draftName}
+          onChange={(e) => setDraftName(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter is the obvious way to leave a one-field form, and it is still
+            // the same gesture, so the picker is allowed to open from it.
+            if (e.key === 'Enter') { e.preventDefault(); confirmName(); }
+          }}
+          placeholder="Cheeko — rhyming game"
+          spellCheck={false}
+        />
+        <p className="np-hint">
+          Then pick the video. Choose several and they become one project, in the order
+          you picked them.
+        </p>
+      </Dialog>
     </div>
   );
 }

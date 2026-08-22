@@ -20,7 +20,9 @@
  * ── the binary ──────────────────────────────────────────────────────────────
  *
  * `native/apple-speech/main.swift` is compiled with `swiftc` to a binary beside
- * itself. There is no checked-in executable: a downloaded binary that spawns is
+ * itself IN DEVELOPMENT; the packaged app ships one built at package time and
+ * points APPLE_SPEECH_BIN at it, because an app bundle is read-only and a clean
+ * Mac has no Xcode. Either way nothing is checked in: a downloaded binary that spawns is
  * a thing users are right to be suspicious of, and the toolchain is already on
  * any Mac with the Command Line Tools. Compilation happens once, lazily, on the
  * first transcription — about ten seconds — and is cached thereafter. Concurrent
@@ -41,7 +43,18 @@ import type { Word } from '../../../packages/core/src/types.ts';
 const here = dirname(fileURLToPath(import.meta.url));
 const NATIVE_DIR = join(here, '..', 'native', 'apple-speech');
 const SOURCE = join(NATIVE_DIR, 'main.swift');
-const BINARY = join(NATIVE_DIR, 'jumpcut-stt');
+
+/**
+ * The helper binary — built here in development, SHIPPED in the packaged app.
+ *
+ * APPLE_SPEECH_BIN is set by the desktop shells, exactly as FFMPEG_PATH already
+ * is, and its presence means two things: the binary is prebuilt, and we are
+ * inside a read-only app bundle where building is not merely unnecessary but
+ * impossible. See `prebuilt` below — getting that distinction wrong is what
+ * makes a packaged app spawn a doomed compiler on every single transcription.
+ */
+const BINARY = process.env.APPLE_SPEECH_BIN || join(NATIVE_DIR, 'jumpcut-stt');
+const prebuilt = Boolean(process.env.APPLE_SPEECH_BIN);
 
 /**
  * macOS 26 is Darwin 25. SpeechAnalyzer/SpeechTranscriber — the API that gives
@@ -70,6 +83,19 @@ async function exists(path: string): Promise<boolean> {
 async function binaryReady(): Promise<boolean> {
   try {
     await access(BINARY, constants.X_OK);
+
+    /**
+     * A shipped binary has no source beside it to compare against.
+     *
+     * The mtime check below is right in development and catastrophic in a
+     * package: stat(SOURCE) throws because main.swift was never copied into the
+     * bundle, the catch returns false, and ensureBinary() then fires swiftc at a
+     * read-only directory — on EVERY transcription, failing every time, while a
+     * perfectly good binary sits right there. Executable is the whole test when
+     * we did not build it.
+     */
+    if (prebuilt) return true;
+
     // A binary older than its source is a stale build — recompile rather than
     // run yesterday's logic against today's expectations.
     const [bin, src] = await Promise.all([stat(BINARY), stat(SOURCE)]);
@@ -120,6 +146,10 @@ async function build(): Promise<string> {
 
 async function ensureBinary(): Promise<string> {
   if (await binaryReady()) return BINARY;
+  if (prebuilt) {
+    // Shipped but not runnable: a broken package, not something to compile past.
+    throw new Error(`The bundled speech helper at ${BINARY} is missing or not executable.`);
+  }
   if (!building) {
     building = build().finally(() => {
       building = null;

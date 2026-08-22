@@ -56,6 +56,9 @@ exports.default = async function afterPack(context) {
   // and its CLI are copied in whole by extraResources, one level up from those.
   const unpacked = path.join(appPath, 'Contents/Resources/app.asar.unpacked/node_modules');
   const shipped = path.join(appPath, 'Contents/Resources/node_modules');
+  // extraResources land straight in Contents/Resources — that is where build.mjs
+  // puts the Swift helpers, outside node_modules and outside the asar.
+  const resources = path.join(appPath, 'Contents/Resources');
 
   const wanted = ARCH_NAMES[context.arch];
   const nodeArch = NODE_ARCH[context.arch];
@@ -81,6 +84,23 @@ exports.default = async function afterPack(context) {
     {
       pkg: `@anthropic-ai/claude-agent-sdk-darwin-${nodeArch}`,
       bin: path.join(shipped, '@anthropic-ai', `claude-agent-sdk-darwin-${nodeArch}`, 'claude'),
+      fix: rebuild,
+    },
+    /**
+     * The Swift helpers. These are checked for the same reason as the rest, but
+     * they are the ones that failed SILENTLY: the app ran fine without them and
+     * simply had no Apple on-device transcription — the model was absent from the
+     * picker with no error anywhere. A missing ffmpeg announces itself the first
+     * time you import; a missing helper announces nothing at all.
+     */
+    {
+      pkg: 'jumpcut-stt (Apple on-device transcription)',
+      bin: path.join(resources, 'native', 'jumpcut-stt'),
+      fix: rebuild,
+    },
+    {
+      pkg: 'jumpcut-captions (burned-in captions)',
+      bin: path.join(resources, 'native', 'jumpcut-captions'),
       fix: rebuild,
     },
   ];

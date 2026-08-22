@@ -14,15 +14,7 @@
  */
 import { build } from 'esbuild';
 import { execSync, execFileSync } from 'node:child_process';
-import {
-  chmodSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -166,6 +158,56 @@ if (existsSync(join(sdkScope, native, cli))) {
 // from Windows would need the bit restored some other way, but electron-builder
 // cannot produce a signed .app there anyway.)
 if (targetPlatform !== 'win32') chmodSync(join(sdkDst, native, cli), 0o755);
+
+/**
+ * The two Swift helpers, built here rather than at runtime.
+ *
+ * In development apple-speech.ts and caption-image.ts compile main.swift with
+ * swiftc on first use, into a path beside the source. Neither works in a package:
+ * the sources are not copied into the bundle, the bundle is read-only so the
+ * output could not be written anyway, and a clean Mac has no Xcode to compile
+ * with. Before this, a packaged app silently lost Apple on-device ASR — the model
+ * simply did not appear in the picker, with no error anywhere.
+ *
+ * -target matters for the same reason afterPack.cjs checks architectures at all:
+ * nothing else stops an Intel build machine from putting x86_64 helpers inside an
+ * arm64 app, and the failure then happens on the user's machine.
+ *
+ * macOS 26 for the ASR one specifically — SpeechAnalyzer does not exist before it.
+ * Both are skipped on non-Mac targets, and --no-swift opts out entirely.
+ */
+if (targetPlatform === 'darwin' && !flag('no-swift', false)) {
+  const macosTarget = `${targetArch === 'x64' ? 'x86_64' : 'arm64'}-apple-macos26.0`;
+  const nativeOut = join(out, 'native');
+  mkdirSync(nativeOut, { recursive: true });
+
+  const helpers = [
+    ['apple-speech', 'jumpcut-stt', 'Apple on-device transcription'],
+    ['caption-render', 'jumpcut-captions', 'burned-in captions'],
+  ];
+
+  for (const [dir, bin, what] of helpers) {
+    const src = join(repo, 'apps', 'server', 'native', dir, 'main.swift');
+    if (!existsSync(src)) throw new Error(`Missing ${src} — cannot build the helper for ${what}.`);
+    console.log(`• compiling ${bin} (${macosTarget})`);
+    try {
+      execFileSync('swiftc', ['-O', '-target', macosTarget, src, '-o', join(nativeOut, bin)], {
+        stdio: ['ignore', 'inherit', 'inherit'],
+      });
+    } catch (err) {
+      // Failing the build is the point. Continuing would ship an app that quietly
+      // lacks the feature, which is the bug this block exists to fix.
+      throw new Error(
+        `Could not compile ${bin}, needed for ${what}.\n` +
+          'Install the Xcode command line tools (xcode-select --install) on the BUILD\n' +
+          'machine — the user\'s machine does not need them once this is shipped.\n' +
+          'Pass --no-swift to build without it, losing that feature.\n\n' +
+          String(err?.message ?? err),
+      );
+    }
+    chmodSync(join(nativeOut, bin), 0o755);
+  }
+}
 
 console.log('• building web app (vite)');
 execSync('npm run build --workspace apps/web', { cwd: repo, stdio: 'inherit' });

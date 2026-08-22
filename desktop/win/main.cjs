@@ -83,6 +83,32 @@ function resourcesDir() {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, 'resources');
 }
 
+/** Where the server's output goes, so `app_logs` has something to read. */
+function logFile(userData) {
+  return path.join(userData, 'logs', 'server.log');
+}
+
+/**
+ * An append fd for the log, rotating once it gets big.
+ *
+ * One file, one rotation, no dependency — this is a debugging aid, not a logging
+ * framework, and 8MB of a single-user editor's output is already more history
+ * than anyone reads.
+ */
+let logHandle = null;
+function logFd(userData) {
+  if (logHandle !== null) return logHandle;
+  const file = logFile(userData);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  try {
+    if (fs.statSync(file).size > 8 * 1024 * 1024) fs.renameSync(file, file + '.1');
+  } catch {
+    /* no log yet */
+  }
+  logHandle = fs.openSync(file, 'a', 0o600);
+  return logHandle;
+}
+
 function startServer(port, userData) {
   const res = resourcesDir();
   serverProc = spawn(process.execPath, [path.join(res, 'server.mjs')], {
@@ -100,6 +126,19 @@ function startServer(port, userData) {
       // shared location that survives deleting the app. Same reasoning as
       // MEDIA_DIR and SETTINGS_PATH above; this line was simply missed.
       DATA_DIR: path.join(userData, 'data'),
+      // Prebuilt Swift helpers, shipped by build.mjs. Their presence is also how
+      // the server knows NOT to try compiling — this bundle is read-only. Guarded
+      // by existsSync because Windows never has them.
+      ...(fs.existsSync(path.join(res, 'native', 'jumpcut-stt'))
+        ? { APPLE_SPEECH_BIN: path.join(res, 'native', 'jumpcut-stt') }
+        : {}),
+      ...(fs.existsSync(path.join(res, 'native', 'jumpcut-captions'))
+        ? { CAPTION_RENDER_BIN: path.join(res, 'native', 'jumpcut-captions') }
+        : {}),
+      // So an outside agent can find and relaunch us. See apps/server/src/bridge.ts.
+      JUMPCUT_SHELL: 'desktop',
+      JUMPCUT_APP_PATH: app.getPath('exe').replace(/\/Contents\/MacOS\/[^/]+$/, ''),
+      JUMPCUT_LOG_PATH: logFile(userData),
       WEB_DIST: path.join(res, 'web'),
       FFMPEG_PATH: ffmpegPath,
       FFPROBE_PATH: ffprobePath,
@@ -111,7 +150,11 @@ function startServer(port, userData) {
       // The ElevenLabs key is compiled into server.mjs at build time
       // (see build.mjs) — nothing to inject here.
     },
-    stdio: ['ignore', 'inherit', 'inherit'],
+    // Packaged: write to a file. 'inherit' means Electron's own stdout, which is
+    // /dev/null when launched from Finder or launchd — so the server's output was
+    // simply unreachable, and an agent could not read the crash it had just
+    // caused. In development the terminal belongs to the user, so keep inheriting.
+    stdio: ['ignore', ...(app.isPackaged ? [logFd(userData), logFd(userData)] : ['inherit', 'inherit'])],
   });
 
   serverProc.on('exit', (code) => {

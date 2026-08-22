@@ -45,7 +45,9 @@ import { platformSupported } from './apple-speech.ts';
 const here = dirname(fileURLToPath(import.meta.url));
 const NATIVE_DIR = join(here, '..', 'native', 'caption-render');
 const SOURCE = join(NATIVE_DIR, 'main.swift');
-const BINARY = join(NATIVE_DIR, 'jumpcut-captions');
+/** Prebuilt and shipped in the packaged app; built here in development. See apple-speech.ts. */
+const BINARY = process.env.CAPTION_RENDER_BIN || join(NATIVE_DIR, 'jumpcut-captions');
+const prebuilt = Boolean(process.env.CAPTION_RENDER_BIN);
 
 /** One tile: what is on screen, and for how long. */
 interface Segment {
@@ -80,6 +82,11 @@ async function exists(path: string): Promise<boolean> {
 /** Build the helper if it is missing or older than its source. Same rule as the ASR one. */
 async function ensureBinary(): Promise<string> {
   if (await exists(BINARY)) return BINARY;
+  if (prebuilt) {
+    // Shipped by the packaged app, which is read-only — there is nothing to
+    // build here, and trying would fail once per caption render forever.
+    throw new Error(`The bundled caption helper at ${BINARY} is missing or not executable.`);
+  }
   await new Promise<void>((resolve, reject) => {
     const child = spawn('swiftc', ['-O', SOURCE, '-o', BINARY], { stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';

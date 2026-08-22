@@ -16,7 +16,8 @@
     "web": "npm run dev --workspace apps/web",
     "app": "npm run build --workspace apps/web && WEB_DIST=./apps/web/dist npm run server:prod",
     "dev": "npm run server & npm run web",
-    "mcp": "node apps/mcp/src/index.ts"
+    "mcp": "node apps/mcp/src/index.ts",
+    "mcp:dev": "node apps/mcp/src/dev-index.ts"
   },
   "//": [
     "server uses --watch, which restarts on ANY server file save. That kills",

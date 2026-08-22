@@ -2422,6 +2422,7 @@ export default function App() {
         <Rail
           safeArea={safeArea}
           onSafeArea={chooseSafeArea}
+          socialHasWords={words.length > 0}
             project={project}
             hasScript={!!doc}
             selectedWords={selectedWords}

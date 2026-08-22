@@ -21,6 +21,8 @@ import { registerAgent } from './agent.ts';
 import { registerLocalAgent, probe as probeLocalAgent } from './agent-local.ts';
 import { registerClaudeAgent } from './agent-claude.ts';
 import { registerSummon } from './summon.ts';
+import { registerSocial } from './social.ts';
+import * as folders from './folders.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
 import { captionImagesReady } from './caption-image.ts';
@@ -97,6 +99,7 @@ await probeLocalAgent();
 await store.init();
 await jobs.init();
 await fonts.init();
+await folders.init();
 
 const app = new Hono();
 
@@ -197,6 +200,7 @@ app.get('/api/capabilities', (c) =>
 // static catch-all below, like every other /api route.
 registerAgent(app);
 registerLocalAgent(app);
+registerSocial(app);
 registerClaudeAgent(app, upgradeWebSocket);
 // The assistant's escape hatch: fetch a file off the open web, run a media
 // operation no panel exists for. Its own module because neither backs a feature

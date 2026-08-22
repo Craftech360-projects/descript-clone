@@ -18,6 +18,8 @@ export interface Thumbs {
 }
 
 export interface Project {
+  /** Which folder's brief informs this project's social copy. Absent = none. */
+  folderId?: string;
   id: string;
   name: string;
   sourceUrl: string;
@@ -366,6 +368,21 @@ export interface ProjectChat {
 }
 
 /** Everything the Export panel lets the user decide. */
+/** A folder, and the standing brief that teaches the AI what this channel is. */
+export interface Folder {
+  id: string;
+  name: string;
+  brief: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SocialDraft {
+  title: string;
+  description: string;
+  hashtags: string[];
+}
+
 export interface RenderSettings extends CutSettings {
   /**
    * Where the file is going: an export preset id. Fixes the output size and the
@@ -449,6 +466,33 @@ export const api = {
   // response would tell refreshCaps the ASR key is still missing right after the
   // user added it, so the on-import chain would keep refusing to transcribe.
   capabilities: () => fetch('/api/capabilities', { cache: 'no-store' }).then(json<Capabilities>),
+  folders: {
+    list: () => fetch('/api/folders').then(json<Folder[]>),
+    create: (name: string, brief = '') =>
+      post('/api/folders', { name, brief }).then(json<Folder>),
+    update: (id: string, patch: { name?: string; brief?: string }) =>
+      fetch(`/api/folders/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      }).then(json<Folder>),
+    remove: (id: string) =>
+      fetch(`/api/folders/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
+  },
+
+  setProjectFolder: (id: string, folderId: string | null) =>
+    fetch(`/api/projects/${id}/folder`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folderId }),
+    }).then(json<Project>),
+
+  /** Write the post. The folder's brief is applied server-side. */
+  social: (id: string, body: { model: string; target: string }) =>
+    post(`/api/projects/${id}/social`, body).then(
+      json<{ draft: SocialDraft; usedBrief: boolean; folder: string | null }>,
+    ),
+
   list: () => fetch('/api/projects').then(json<MediaItem[]>),
   get: (id: string) => fetch(`/api/projects/${id}`).then(json<Project>),
 
@@ -694,7 +738,15 @@ export const api = {
    */
   agent: {
     models: () =>
-      fetch('/api/agent/models').then(json<{ models: string[]; default: string; enabled: boolean }>),
+      fetch('/api/agent/models').then(
+        json<{
+          models: string[];
+          /** Where each model runs and why you'd pick it. */
+          catalogue?: { id: string; label: string; hint: string; where: string }[];
+          default: string;
+          enabled: boolean;
+        }>,
+      ),
     chat: (body: { model: string; context: string; messages: AgentWireMessage[] }) =>
       post('/api/agent', body).then(json<{ message: AgentAssistantMessage }>),
   },

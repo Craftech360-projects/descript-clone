@@ -2,7 +2,7 @@ import type { Hono } from 'hono';
 import * as local from './agent-local.ts';
 
 import { CONFIG } from './config.ts';
-import { CLAUDE_MODELS } from './agent-claude.ts';
+import { CLAUDE_MODELS, CLAUDE_MODEL_HINTS } from './agent-claude.ts';
 import { AGENT_TOOLS, AGENT_SYSTEM_PROMPT } from '../../../packages/core/src/agent-tools.ts';
 
 /**
@@ -42,6 +42,37 @@ interface WireMessage {
   name?: string;
 }
 
+/**
+ * Give every model id a readable label and a reason to pick it.
+ *
+ * The picker was a list of bare ids, which asks the user to already know three
+ * different vendors' naming schemes. What actually decides the choice here is
+ * where it runs (this machine or a network) and whether it can hold a tool loop
+ * together — so that is what the label says.
+ */
+function describe(ids: string[]): Array<{ id: string; label: string; hint: string; where: string }> {
+  return ids.map((id) => {
+    if (id.startsWith('local:')) {
+      const name = id.slice('local:'.length);
+      return {
+        id,
+        label: name,
+        where: 'On this machine',
+        hint: 'Runs offline, no key, nothing leaves the machine. Tool calling varies by model.',
+      };
+    }
+    if (id.startsWith('claude-')) {
+      return {
+        id,
+        label: id,
+        where: 'Anthropic',
+        hint: CLAUDE_MODEL_HINTS[id] ?? 'Claude model.',
+      };
+    }
+    return { id, label: id, where: 'xAI', hint: 'Grok model.' };
+  });
+}
+
 export function registerAgent(app: Hono): void {
   /**
    * The models the picker offers. Fetched live from xAI so it tracks their
@@ -68,7 +99,13 @@ export function registerAgent(app: Hono): void {
 
     if (!CONFIG.hasAgent()) {
       // Grok off: the picker is Claude-only (or empty if nothing is configured).
-      return c.json({ models: [...claude, ...localIds], default: localIds.length && !claude.length ? localIds[0] : def, enabled });
+      const ids = [...claude, ...localIds];
+      return c.json({
+        models: ids,
+        catalogue: describe(ids),
+        default: localIds.length && !claude.length ? localIds[0] : def,
+        enabled,
+      });
     }
     try {
       const r = await fetch(`${CONFIG.xaiBaseUrl}/models`, {
@@ -77,8 +114,10 @@ export function registerAgent(app: Hono): void {
       if (!r.ok) throw new Error(String(r.status));
       const data = (await r.json()) as { data?: Array<{ id?: string }> };
       const grok = (data.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+      const ids = [...(grok.length ? grok.sort() : FALLBACK_MODELS), ...claude, ...localIds];
       return c.json({
-        models: [...(grok.length ? grok.sort() : FALLBACK_MODELS), ...claude, ...localIds],
+        models: ids,
+        catalogue: describe(ids),
         default: def,
         enabled,
       });

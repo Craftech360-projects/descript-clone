@@ -2730,3 +2730,56 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   text-transform: uppercase;
   color: var(--faint);
 }
+
+/* ── Social panel ────────────────────────────────────────────────────────── */
+.social { display: grid; gap: var(--s-4); }
+.social-folder,
+.social-new input,
+.social-brief {
+  width: 100%;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  padding: var(--s-2);
+}
+.social-brief {
+  /* Prose, so it gets the body face and room to breathe — a single-line input
+     would tell people to write a keyword when the point is a paragraph. */
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+  resize: vertical;
+  min-height: 7em;
+}
+.social-folder:focus-visible,
+.social-new input:focus-visible,
+.social-brief:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.social-new { display: flex; gap: var(--s-2); margin-top: var(--s-2); }
+.social-new input { flex: 1; min-width: 0; }
+.social-go { width: 100%; }
+.social-draft { display: grid; gap: var(--s-4); margin-top: var(--s-2); }
+.social-out {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+  white-space: pre-wrap;
+}
+.social-tags {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--t-ui);
+  line-height: var(--lh-normal);
+  word-break: break-word;
+}

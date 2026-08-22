@@ -1,6 +1,8 @@
 import { useState } from 'react';
 
 import ProjectPanel, { type FillerMode } from '../rail/ProjectPanel.tsx';
+import SocialPanel from './SocialPanel.tsx';
+import { useAgent } from '../store/agent.ts';
 import SelectionPanel from '../rail/SelectionPanel.tsx';
 import AgentPanel from '../agent/AgentPanel.tsx';
 import { Empty } from '../ui/Field.tsx';
@@ -40,6 +42,7 @@ interface Props {
   onFrameDragEnd: (label: string) => void;
   safeArea: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all';
   onSafeArea: (v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => void;
+  socialHasWords: boolean;
 
   /** Push-ins. See ProjectPanel's MovesField and SelectionPanel's "Push in here". */
   onPunchIn: () => void;
@@ -133,7 +136,13 @@ export default function Rail(p: Props) {
   // from chat). The inspector is first and the default — the hands-on surface you
   // land on — with the assistant one click away. Kept above the early return below
   // so the hook order never changes.
-  const [tab, setTab] = useState<'chat' | 'inspector'>('inspector');
+  const [tab, setTab] = useState<'chat' | 'inspector' | 'social'>('inspector');
+  /**
+   * The Social tab writes with whatever model the Assistant tab is set to.
+   * One picker for the whole app: a second model chooser would be a second
+   * thing to keep in sync and a second place to be surprised by the answer.
+   */
+  const agent = useAgent();
 
   if (!p.project) {
     return (
@@ -273,6 +282,12 @@ export default function Rail(p: Props) {
           Inspector
         </button>
         <button
+          className={`rail-tab ${tab === 'social' ? 'on' : ''}`}
+          onClick={() => setTab('social')}
+        >
+          Social
+        </button>
+        <button
           className={`rail-tab ${tab === 'chat' ? 'on' : ''}`}
           onClick={() => setTab('chat')}
         >
@@ -284,6 +299,14 @@ export default function Rail(p: Props) {
           enabled={p.agentEnabled}
           defaultModel={p.agentDefaultModel}
           onOpenSettings={p.onOpenSettings}
+        />
+      ) : tab === 'social' ? (
+        <SocialPanel
+          project={p.project}
+          model={agent.model}
+          defaultModel={p.agentDefaultModel}
+          agentEnabled={p.agentEnabled}
+          hasWords={p.socialHasWords}
         />
       ) : (
         inspector

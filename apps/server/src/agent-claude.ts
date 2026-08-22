@@ -46,7 +46,41 @@ import {
  * workload at. The first is the default. Availability ultimately depends on what
  * the account's plan grants; an unavailable id surfaces as a model_not_found error.
  */
-export const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as const;
+/**
+ * The Claude models the picker offers.
+ *
+ * Hand-maintained, because the Agent SDK has no catalogue endpoint to ask — so
+ * this list is the one thing here that goes stale silently. It was three entries
+ * and had drifted a generation behind, which is why the picker looked empty of
+ * choice.
+ *
+ * Ordered by capability, heaviest first, so the top of the list is the strongest
+ * answer and the bottom is the cheapest. An id the account cannot reach fails at
+ * request time with the provider's own message rather than being hidden here —
+ * guessing entitlement client-side would hide models people are paying for.
+ */
+export const CLAUDE_MODELS = [
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-opus-4-8',
+  'claude-sonnet-4-6',
+] as const;
+
+/**
+ * What each id is FOR, shown beside it in the picker.
+ *
+ * A dropdown of bare model ids asks the user to already know the lineup. This
+ * app's workload is agentic and tool-heavy, so the useful distinction is not
+ * benchmark scores but "does this one hold a long tool loop together".
+ */
+export const CLAUDE_MODEL_HINTS: Record<string, string> = {
+  'claude-opus-5': 'Strongest reasoning. Best for long multi-step edits.',
+  'claude-sonnet-5': 'Balanced. A good default for everyday editing.',
+  'claude-haiku-4-5': 'Fastest and cheapest. Fine for short, direct commands.',
+  'claude-opus-4-8': 'Previous generation, still very capable.',
+  'claude-sonnet-4-6': 'Previous generation, balanced.',
+};
 
 /** The MCP server name our tools live under; the SDK prefixes tool ids with it. */
 const MCP_NAME = 'jumpcut';
@@ -126,6 +160,43 @@ function claudeExecutable(): string | null {
     if (cachedExecutable) console.log(`agent   Claude CLI ${cachedExecutable}`);
   }
   return cachedExecutable;
+}
+
+/**
+ * One bounded, tool-free completion through the Claude SDK.
+ *
+ * The Social panel writes a title and description — a single answer, no tool
+ * loop, no session to resume. That is a different shape from the editing agent
+ * this file otherwise serves, and it needs its own entry point: the WebSocket
+ * branch exists to drive an interactive loop, and putting a one-shot write
+ * through it would mean inventing a fake session and a fake client.
+ *
+ * `tools: []` and no MCP server, because the model is being asked to write prose
+ * and every tool offered is one more way for a turn to end without any.
+ */
+export async function completeOnce(model: string, prompt: string): Promise<string> {
+  const exe = claudeExecutable();
+  const q = query({
+    prompt,
+    options: {
+      model,
+      tools: [],
+      settingSources: [],
+      permissionMode: 'bypassPermissions',
+      ...(exe ? { pathToClaudeCodeExecutable: exe } : {}),
+    },
+  });
+
+  let text = '';
+  for await (const message of q) {
+    const m = message as { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+    if (m.type === 'assistant') {
+      for (const block of m.message?.content ?? []) {
+        if (block.type === 'text' && block.text) text += block.text;
+      }
+    }
+  }
+  return text;
 }
 
 // ── JSON Schema → Zod ────────────────────────────────────────────────────────

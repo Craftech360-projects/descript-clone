@@ -114,6 +114,20 @@ export default function FloatingAssistant(p: {
                 );
               })}
             </select>
+            {/*
+              An explicit way out. The button that opens this also closes it, but
+              on a phone the panel covers the whole lower screen — including that
+              button — and there is no Escape key to fall back on. A panel you can
+              only leave by reloading the page is not a panel.
+            */}
+            <button
+              className="fab-close"
+              onClick={() => setOpen(false)}
+              aria-label="Close Jumpy"
+              title="Close"
+            >
+              <Icon name="close" size={16} />
+            </button>
           </div>
 
           <div className="fab-scroll" ref={scrollRef}>

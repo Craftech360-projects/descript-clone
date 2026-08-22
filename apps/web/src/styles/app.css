@@ -1931,7 +1931,10 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .dc-meta {
   display: flex; align-items: center; gap: 7px;
   font-size: var(--t-small); color: var(--faint);
-  white-space: nowrap; overflow: hidden;
+  /* Ellipsis, not a hard cut. Without it this clipped mid-character —
+     "2160x3840 · Toda" — which reads as a rendering fault rather than as
+     "there is more". .dc-name above already does this. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .dc-dur { color: var(--dim); font-variant-numeric: tabular-nums; }
 .dc-dot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; flex-shrink: 0; opacity: .7; }
@@ -2305,6 +2308,15 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* A warning that offers the fix needs somewhere to put the button. */
 .warn-act { margin-top: var(--s-2); }
 
+/* The header carries a close button now, so it is a three-part row. */
+.fab-close {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 32px; height: 32px; margin: -4px -4px -4px 0;
+  background: none; border: 0; border-radius: var(--r-1);
+  color: var(--dim); cursor: pointer;
+}
+.fab-close:hover { color: var(--text); background: var(--sunk); }
+
 /* ---- new project: name, then files ---- */
 .np-label { display: block; font-size: var(--t-ui); font-weight: 600; margin-bottom: var(--s-2); }
 .np-input {
@@ -2614,10 +2626,64 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Touch targets.
+ *
+ * Audited at 394x853: 23 controls were under the 44px both Apple and Material
+ * ask for, including the ones you touch most — play at 36, Export at 34, the
+ * script/tools switcher at 40, the icon buttons at 38.
+ *
+ * Not all 23 are raised. The timeline's own controls — split, zoom, fit, the
+ * per-clip add buttons — are dense by nature, and taking each to 44 would add
+ * roughly 40px to the dock, which comes straight out of the script. They go to
+ * 32: a real improvement on 24, and honest about the trade. The controls you
+ * reach for constantly get the full 44.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (pointer: coarse) {
+  /* The title bar, the transport, the rail: anything with an icon in it. */
+  .icon { width: 44px; height: 44px; }
+
+  /* Play is the single most-tapped control in the app. */
+  .transport .play { width: 44px; height: 44px; }
+
+  /* Export commits minutes of work — a mis-tap is expensive in both directions. */
+  .titlebar .primary { min-height: 44px; }
+
+  /* The switcher decides which half of the editor you are looking at. */
+  .m-tab { min-height: 44px; }
+
+  /* Toggles and the speed picker sit in the transport's second row. */
+  .transport .toggle,
+  .transport select { min-height: 40px; }
+
+  /* The assistant's model picker — the control that decides what Jumpy can do,
+     and the only one left under 32px after the sweep. */
+  .fab-model { min-height: 40px; }
+
+  /* Dialogs: the footer buttons commit or discard, and the fields are typed
+     into. Both were around 37px, which is a cursor size. */
+  .dialog button, .dialog input, .dialog select, .dialog textarea { min-height: 44px; }
+  .np-input { min-height: 48px; }
+
+  /* Dense timeline controls: better, not perfect, and deliberately so. */
+  .tl-split, .tl-bar button, .tl-add, .tl-music-fill { min-height: 32px; }
+  .tl-add { width: 32px; height: 32px; }
+}
+
 /* Touch has no hover: anything that reveals itself on hover must simply be
  * there. The card actions were literally unreachable on a phone. */
 @media (pointer: coarse) {
   .dc-acts { opacity: 1; }
+
+  /*
+   * 24px is a cursor target. Three of them in a row on a card, the last of which
+   * DELETES the project, is a mis-tap waiting to happen — and the mis-tap that
+   * costs you is the one on the right. They go to 40, and the destructive one
+   * gets a gap so the thumb has to travel to reach it.
+   */
+  .dc-act { width: 40px; height: 40px; }
+  .dc-acts { gap: var(--s-2); }
+  .dc-act.dc-x { margin-left: var(--s-3); }
   .tl-add { opacity: .9; }
 }
 
@@ -3052,7 +3118,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .fab {
   position: fixed;
   right: var(--s-5);
-  bottom: var(--s-5);
+  bottom: var(--fab-bottom, var(--s-5));
   z-index: var(--z-hud);
   width: 46px; height: 46px;
   display: grid; place-items: center;
@@ -3068,10 +3134,20 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .fab:focus-visible { outline: none; box-shadow: var(--ring), var(--e-2); }
 .fab-on { background: var(--raised); color: var(--text); }
 
+/*
+ * The panel is anchored to the BUTTON, via one variable both read.
+ *
+ * They used to carry the offset separately, and when the button moved up to
+ * clear the editor dock the panel stayed where it was — directly on top of it.
+ * The button is what closes the panel, so the panel was covering its own way
+ * out: on a phone, with no Escape key, that is a trap you can only leave by
+ * reloading. Deriving one from the other makes that particular mistake
+ * unexpressible.
+ */
 .fab-panel {
   position: fixed;
   right: var(--s-5);
-  bottom: calc(var(--s-5) + 46px + var(--s-2));
+  bottom: calc(var(--fab-bottom, var(--s-5)) + 46px + var(--s-2));
   z-index: var(--z-hud);
   width: min(24rem, calc(100vw - var(--s-5) * 2));
   max-height: min(32rem, calc(100vh - 8rem));
@@ -3124,8 +3200,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 /* On a phone the panel is the screen, not a corner of it. */
 @media (max-width: 520px) {
-  .fab-panel { right: var(--s-2); left: var(--s-2); width: auto; bottom: calc(var(--s-4) + 46px + var(--s-2)); }
-  .fab { right: var(--s-4); bottom: var(--s-4); }
+  .fab-panel { right: var(--s-2); left: var(--s-2); width: auto; }
+  :root { --fab-bottom: var(--s-4); }
+  .fab { right: var(--s-4); }
 }
 
 /*
@@ -3141,8 +3218,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * place that sets the same property.
  */
 @media (max-width: 1000px), (max-height: 520px) {
-  .app > .fab { bottom: calc(var(--h-dock-p, 184px) + var(--s-3)); right: var(--s-3); }
+  .app { --fab-bottom: calc(var(--h-dock-p, 184px) + var(--s-3)); }
+  .app > .fab { right: var(--s-3); }
 }
 @media (min-width: 600px) and (max-width: 1000px) and (min-height: 560px) {
-  .app > .fab { bottom: calc(var(--h-dock-m, 208px) + var(--s-3)); }
+  .app { --fab-bottom: calc(var(--h-dock-m, 208px) + var(--s-3)); }
 }

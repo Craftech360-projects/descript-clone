@@ -105,16 +105,16 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'restore_text',
     'Restore previously deleted words, by phrase or explicit word-id range. Mirror of delete_text.',
     {
-      query: { type: 'string' },
-      occurrence: { type: 'string', enum: ['first', 'all'] },
-      from_word_id: { type: 'string' },
-      to_word_id: { type: 'string' },
+      query: { type: 'string', description: 'A phrase to find among the deleted words and bring back.' },
+      occurrence: { type: 'string', enum: ['first', 'all'], description: 'For query: restore the first match or every match. Default "first".' },
+      from_word_id: { type: 'string', description: 'Start of an explicit range (inclusive).' },
+      to_word_id: { type: 'string', description: 'End of an explicit range (inclusive).' },
     },
   ),
   tool(
     'correct_word',
     'Fix the spelling/text of a single word without changing its timing. Get the word id from find_in_transcript.',
-    { word_id: { type: 'string' }, text: { type: 'string' } },
+    { word_id: { type: 'string', description: 'The word to fix, from find_in_transcript.' }, text: { type: 'string', description: 'The corrected spelling. Timing is untouched, so keep it the same spoken word.' } },
     ['word_id', 'text'],
   ),
   tool(
@@ -124,8 +124,8 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
       speaker: { type: 'string', description: 'The name to apply, e.g. "Alex".' },
       query: { type: 'string', description: 'A phrase whose words get the label.' },
       occurrence: { type: 'string', enum: ['first', 'all'], description: 'For query. Default "first".' },
-      from_word_id: { type: 'string' },
-      to_word_id: { type: 'string' },
+      from_word_id: { type: 'string', description: 'First word of the run to relabel (inclusive).' },
+      to_word_id: { type: 'string', description: 'Last word of the run to relabel (inclusive).' },
     },
     ['speaker'],
   ),
@@ -136,8 +136,8 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'Highlight words in the script for the user — the same selection they would make by dragging. Use it to SHOW them something (then play_selection), not as a step before delete_text, which selects for itself.',
     {
       query: { type: 'string', description: 'A phrase to select (the first match).' },
-      from_word_id: { type: 'string' },
-      to_word_id: { type: 'string' },
+      from_word_id: { type: 'string', description: 'First word of the selection (inclusive).' },
+      to_word_id: { type: 'string', description: 'Last word of the selection (inclusive).' },
       clear: { type: 'boolean', description: 'Pass true to clear the selection instead.' },
     },
   ),
@@ -152,7 +152,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
   tool(
     'set_playback',
     'Start, stop or toggle playback from the playhead. Pair with seek to show the user a moment.',
-    { action: { type: 'string', enum: ['play', 'pause', 'toggle'] } },
+    { action: { type: 'string', enum: ['play', 'pause', 'toggle'], description: 'What to do with the player. "toggle" flips whatever it is doing now.' } },
     ['action'],
   ),
   tool(
@@ -164,7 +164,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
   tool(
     'set_speed',
     'Set the output playback speed multiplier, 0.5 to 2. 1 is normal; 1.2 renders 20% faster and shorter.',
-    { speed: { type: 'number' } },
+    { speed: { type: 'number', description: 'Playback rate multiplier. 1 is normal; clamped to 0.5-2.' } },
     ['speed'],
   ),
   tool(
@@ -174,15 +174,15 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     ['ms'],
   ),
   tool('set_studio_sound', 'Turn the Studio Sound voice enhancer (denoise, EQ, levelling) on or off.', {
-    enabled: { type: 'boolean' },
+    enabled: { type: 'boolean', description: 'On cleans up the voice track. Independent of loudness normalisation, which always runs.' },
   }, ['enabled']),
   tool(
     'set_captions',
     'Configure burned-in captions: on/off and every style knob the Captions panel has. Video projects only. Fonts other than the three built-ins must be ones list_fonts reports.',
     {
-      enabled: { type: 'boolean' },
+      enabled: { type: 'boolean', description: 'Whether captions are shown, and burned into the render.' },
       karaoke: { type: 'boolean', description: 'Light words up one at a time as spoken.' },
-      all_caps: { type: 'boolean' },
+      all_caps: { type: 'boolean', description: 'Upper-case every caption. A style choice, not a content change.' },
       font: { type: 'string', description: 'A family from list_fonts: Arial, Times New Roman, Courier New, or an imported one.' },
       color: { type: 'string', description: 'Text colour as #RRGGBB.' },
       font_size: { type: 'integer', description: 'Type size in px at 1080p.' },
@@ -209,7 +209,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'set_frame',
     'Set the output shape and the crop inside it. "source" keeps the original shape; "reel" is 9:16; "youtube" is 16:9; "square" is 1:1; "custom" takes width/height. x/y move the crop within the overflow — the way to keep a speaker who stands off-centre in a vertical reel.',
     {
-      preset: { type: 'string', enum: ['source', 'reel', 'youtube', 'square', 'custom'] },
+      preset: { type: 'string', enum: ['source', 'reel', 'youtube', 'square', 'custom'], description: 'Delivery shape. "reel" is 1080x1920 vertical; "source" keeps the footage as shot.' },
       zoom: { type: 'number', description: 'Crop zoom, 0.1 to 4. 1 fills the frame; below 1 shrinks the picture and bars the rest.' },
       x: { type: 'number', description: 'Crop position, -1 (hard left) to 1 (hard right). 0 is centred.' },
       y: { type: 'number', description: 'Crop position, -1 (top) to 1 (bottom). 0 is centred.' },
@@ -242,7 +242,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
   tool(
     'set_color',
     'Apply a colour-grade look, or "none" to remove grading.',
-    { preset: { type: 'string', enum: ['none', 'warm', 'cool', 'vintage', 'mono', 'punch', 'faded', 'noir'] } },
+    { preset: { type: 'string', enum: ['none', 'warm', 'cool', 'vintage', 'mono', 'punch', 'faded', 'noir'], description: 'A whole look, applied in one step. "none" clears any grade.' } },
     ['preset'],
   ),
 
@@ -252,7 +252,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'add_push_in',
     'Add a push-in: a stretch of the video that is punched in on, easing in and out at its ends. Times are SOURCE seconds (the same clock as the playhead and find_in_transcript), so a push-in stays on the words it was aimed at even after cuts. Ranges may not overlap an existing push-in.',
     {
-      start_sec: { type: 'number' },
+      start_sec: { type: 'number', description: 'Where the push-in begins, in SOURCE seconds - the clock find_in_transcript and the playhead report.' },
       end_sec: { type: 'number', description: 'Must be after start_sec.' },
       zoom: { type: 'number', description: 'How far in. 1 is no push-in; default 1.5.' },
       x: { type: 'number', description: 'Horizontal framing, -1 (left) to 1 (right). 0 is centred.' },
@@ -265,17 +265,17 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'update_push_in',
     'Change one push-in. Pass only the fields you want to change; get the id from list_push_ins.',
     {
-      id: { type: 'string' },
-      start_sec: { type: 'number' },
-      end_sec: { type: 'number' },
-      zoom: { type: 'number' },
-      x: { type: 'number' },
-      y: { type: 'number' },
-      ease_sec: { type: 'number' },
+      id: { type: 'string', description: 'Which push-in to change, from list_push_ins.' },
+      start_sec: { type: 'number', description: 'New start, in source seconds.' },
+      end_sec: { type: 'number', description: 'New end, in source seconds. Must be after start.' },
+      zoom: { type: 'number', description: 'How far in. 1 is no push-in at all.' },
+      x: { type: 'number', description: 'Horizontal framing, -1 (left) to 1 (right). 0 is centred.' },
+      y: { type: 'number', description: 'Vertical framing, -1 (top) to 1 (bottom). 0 is centred.' },
+      ease_sec: { type: 'number', description: 'Seconds of ramp at EACH end. 0 is a hard cut to the new framing, which is a legitimate look.' },
     },
     ['id'],
   ),
-  tool('remove_push_in', 'Remove a push-in by id.', { id: { type: 'string' } }, ['id']),
+  tool('remove_push_in', 'Remove a push-in by id.', { id: { type: 'string', description: 'Which push-in to delete, from list_push_ins.' } }, ['id']),
 
   // ── media & background music (async) ───────────────────────────────────────
   tool(
@@ -288,7 +288,7 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     ['query'],
   ),
   tool('set_music_volume', 'Set the background music volume, 0 (silent) to about 1 (full).', {
-    volume: { type: 'number' },
+    volume: { type: 'number', description: 'Linear gain for the music bed. 1 is unity; a bed that sits under speech is usually 0.1-0.3.' },
   }, ['volume']),
   tool('remove_music', 'Remove the background music bed from the project.'),
   tool(
@@ -369,21 +369,19 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     'update_image',
     'Change one placed image: its timing, transition, size, or opacity. Get the id from list_images.',
     {
-      id: { type: 'string' },
-      start_sec: { type: 'number' },
-      end_sec: { type: 'number' },
-      transition: {
-        type: 'string',
-        enum: ['cut', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down'],
-      },
+      id: { type: 'string', description: 'Which placed image to change, from list_images.' },
+      start_sec: { type: 'number', description: 'New start, in source seconds.' },
+      end_sec: { type: 'number', description: 'New end, in source seconds. Must be after start, and long enough to read.' },
+      transition: { type: 'string',
+        enum: ['cut', 'fade', 'slide-left', 'slide-right', 'slide-up', 'slide-down'], description: 'How it enters and leaves. "fade" is the usual cutaway.' },
       ease_sec: { type: 'number', description: 'Length of the transition at each end, in seconds.' },
-      size: { type: 'string', enum: ['full', 'corner'] },
+      size: { type: 'string', enum: ['full', 'corner'], description: '"full" covers the frame; "corner" keeps the speaker visible.' },
       opacity: { type: 'number', description: '0 to 1. 1 is fully opaque.' },
     },
     ['id'],
   ),
   tool('remove_image', 'Remove a placed image from the video. The picture stays in the project.', {
-    id: { type: 'string' },
+    id: { type: 'string', description: 'Which placed image to remove, from list_images.' },
   }, ['id']),
 
   // ── clips: the source files behind the timeline ────────────────────────────
@@ -400,19 +398,19 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
   tool(
     'move_clip',
     'Move one clip one place earlier or later in play order. For a wholesale re-sequence use reorder_clips.',
-    { clip_id: { type: 'string' }, direction: { type: 'string', enum: ['earlier', 'later'] } },
+    { clip_id: { type: 'string', description: 'Which clip to move, from list_clips.' }, direction: { type: 'string', enum: ['earlier', 'later'], description: 'Move it one place earlier or later in the sequence.' } },
     ['clip_id', 'direction'],
   ),
   tool(
     'reorder_clips',
     'Set the whole play order at once. Pass every clip id from list_clips, in the order you want them.',
-    { clip_ids: { type: 'array', items: { type: 'string' } } },
+    { clip_ids: { type: 'array', items: { type: 'string' }, description: 'EVERY clip id, in the order you want them. A partial list is rejected.' } },
     ['clip_ids'],
   ),
   tool(
     'remove_clip',
     'Remove a clip and its words from the project. The last remaining clip cannot be removed. Undoable only by re-importing, so confirm with the user first.',
-    { clip_id: { type: 'string' }, confirm: { type: 'boolean' } },
+    { clip_id: { type: 'string', description: 'Which clip to remove from the sequence, from list_clips.' }, confirm: { type: 'boolean', description: 'Must be true. This drops a whole clip from the sequence - ask the user first and say what will be lost.' } },
     ['clip_id', 'confirm'],
   ),
 
@@ -515,25 +513,25 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     ['id'],
   ),
   tool('open_project', 'Open a project by id (from list_projects), making it the active project.', {
-    project_id: { type: 'string' },
+    project_id: { type: 'string', description: 'Which project to open, from list_projects.' },
   }, ['project_id']),
   tool('rename_project', 'Rename a project.', {
-    project_id: { type: 'string' },
-    name: { type: 'string' },
+    project_id: { type: 'string', description: 'Which project to rename, from list_projects.' },
+    name: { type: 'string', description: 'The new name.' },
   }, ['project_id', 'name']),
   tool(
     'delete_project',
     'Permanently delete a project and its media. This CANNOT be undone, so only call it with confirm=true after the user has explicitly agreed.',
-    { project_id: { type: 'string' }, confirm: { type: 'boolean' } },
+    { project_id: { type: 'string', description: 'Which project to delete, from list_projects.' }, confirm: { type: 'boolean', description: 'Must be true. This deletes the project and its source media permanently - ask the user first.' } },
     ['project_id', 'confirm'],
   ),
   tool(
     'export_video',
     'Render and export the finished video with the current edit and settings. This is an expensive job, so only call with confirm=true once the user has asked to export.',
-    { confirm: { type: 'boolean' } },
+    { confirm: { type: 'boolean', description: 'Must be true. Renders the finished video, which can take minutes - confirm with the user before starting.' } },
     ['confirm'],
   ),
-  tool('seek', 'Move the playhead to a time in seconds.', { seconds: { type: 'number' } }, ['seconds']),
+  tool('seek', 'Move the playhead to a time in seconds.', { seconds: { type: 'number', description: 'Where to move the playhead, in source seconds.' } }, ['seconds']),
   tool('play_selection', 'Play just the currently selected words.'),
 
   // ── improvising: the two tools that are not features of the app ────────────

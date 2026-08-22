@@ -26,6 +26,7 @@ import { registerSocial } from './social.ts';
 import * as folders from './folders.ts';
 import * as preferences from './preferences.ts';
 import * as auth from './auth.ts';
+import { registerEditorBridge } from './editor-bridge.ts';
 import { readPage } from './read-page.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
@@ -287,6 +288,13 @@ registerAgent(app);
 registerLocalAgent(app);
 registerSocial(app);
 registerClaudeAgent(app, upgradeWebSocket);
+
+/**
+ * The editor bridge: a second socket a window attaches with, so callers that are
+ * NOT its own chat panel — the MCP server Hermes talks to — can run the same 70
+ * tools. Registered here beside the Claude one because both need upgradeWebSocket.
+ */
+registerEditorBridge(app, upgradeWebSocket);
 // The assistant's escape hatch: fetch a file off the open web, run a media
 // operation no panel exists for. Its own module because neither backs a feature
 // of the app — see summon.ts on why an assistant needs both.

@@ -115,6 +115,7 @@ import type { Edl, Transcript, Word } from '../../../packages/core/src/types.ts'
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
 import { setAgentBridge, type AgentBridge } from './agent/tools.ts';
 import { setChatProject } from './store/agent.ts';
+import { connectEditorBridge, reportProject } from './store/bridge.ts';
 
 const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
 
@@ -2349,6 +2350,23 @@ export default function App() {
     setAgentBridge(bridge);
   });
   useEffect(() => () => setAgentBridge(null), []);
+
+  /**
+   * Attach this window to the editor bridge, so an agent outside the browser can
+   * run the same tools the panel does.
+   *
+   * Mounted AFTER the setAgentBridge effect above, and that order matters: every
+   * executor calls requireBridge(), so a tool arriving before the bridge exists
+   * would come back "The editor is not ready yet." — which is true for a few
+   * milliseconds and confusing forever.
+   */
+  useEffect(() => connectEditorBridge(), []);
+
+  // Keep the server's idea of what this window is showing current, so a caller
+  // choosing between two open windows can tell them apart by project.
+  useEffect(() => {
+    reportProject(project?.id ?? null, project?.name ?? null);
+  }, [project?.id, project?.name]);
 
   if (!caps || !asr) {
     return (

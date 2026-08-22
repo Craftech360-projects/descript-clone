@@ -183,7 +183,18 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* The wordmark itself, at title-bar height. It is gold on transparent, so it
  * lands on the warm-black chrome without a plate. No text brand beside it — the
  * mark says "JumpCut" already. */
-.tb-logo { height: 21px; width: auto; display: block; flex-shrink: 0; user-select: none; }
+/*
+ * The wordmark, as TEXT rather than the old jumpcut.png.
+ *
+ * A bitmap wordmark has to be redrawn to rename the app, does not sharpen on a
+ * retina display unless you ship two of them, and cannot follow the theme. This
+ * is one string and one rule, and it inherits --accent like everything else.
+ */
+.tb-logo {
+  flex-shrink: 0; user-select: none; white-space: nowrap;
+  font-size: 15px; font-weight: 700; letter-spacing: -.015em;
+  color: var(--accent);
+}
 .tb-brand {
   font-size: var(--t-base); font-weight: 650; letter-spacing: -.02em;
   color: var(--text); flex-shrink: 0;
@@ -1814,7 +1825,11 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   display: flex; align-items: center; gap: var(--s-3);
   padding-top: var(--s-5); padding-bottom: var(--s-5);
 }
-.dash-logo { height: 22px; width: auto; display: block; user-select: none; }
+.dash-logo {
+  user-select: none; white-space: nowrap;
+  font-size: 22px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--accent);
+}
 .dash-tag {
   color: var(--faint); font-size: var(--t-ui);
   padding-left: var(--s-3); border-left: 1px solid var(--line);

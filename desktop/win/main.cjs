@@ -136,9 +136,9 @@ function startServer(port, userData) {
         ? { CAPTION_RENDER_BIN: path.join(res, 'native', 'jumpcut-captions') }
         : {}),
       // So an outside agent can find and relaunch us. See apps/server/src/bridge.ts.
-      JUMPCUT_SHELL: 'desktop',
-      JUMPCUT_APP_PATH: app.getPath('exe').replace(/\/Contents\/MacOS\/[^/]+$/, ''),
-      JUMPCUT_LOG_PATH: logFile(userData),
+      JUMPSTART_SHELL: 'desktop',
+      JUMPSTART_APP_PATH: app.getPath('exe').replace(/\/Contents\/MacOS\/[^/]+$/, ''),
+      JUMPSTART_LOG_PATH: logFile(userData),
       WEB_DIST: path.join(res, 'web'),
       FFMPEG_PATH: ffmpegPath,
       FFPROBE_PATH: ffprobePath,

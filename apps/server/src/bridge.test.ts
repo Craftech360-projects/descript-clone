@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 const data = await mkdtemp(join(tmpdir(), 'jumpcut-bridge-'));
 process.env.DATA_DIR = data;
-process.env.JUMPCUT_TOKEN = 'f'.repeat(64);
+process.env.JUMPSTART_TOKEN = 'f'.repeat(64);
 
 const bridge = await import('./bridge.ts');
 const auth = await import('./auth.ts');

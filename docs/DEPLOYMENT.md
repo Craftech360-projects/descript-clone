@@ -268,7 +268,7 @@ docker run -p 8787:8787 -v media:/data -e ELEVENLABS_API_KEY=... jumpcut
 | `CORS_ORIGIN` | unset = `*` | Pin it when serving a browser from another origin. |
 | `HOST` | `127.0.0.1` | **Containers must set `0.0.0.0`** or the published port reaches nothing — while the in-container healthcheck stays green. |
 | `DATA_DIR` | `/data/state` in image | Projects, jobs, folder memories, token. Never web-served, unlike `MEDIA_DIR`. Put it on the same volume. |
-| `JUMPCUT_TOKEN` | minted on first boot | Pin the API token instead of letting the server generate one into `DATA_DIR/token`. |
+| `JUMPSTART_TOKEN` | minted on first boot | Pin the API token instead of letting the server generate one into `DATA_DIR/token`. |
 | `AUTH` | `on` | `off` disables the token check entirely — only if you front this with your own auth. |
 | `MAX_UPLOAD_MB` | 512 | Bounded by RAM, not policy. |
 

@@ -341,7 +341,7 @@ export default function Dashboard({
       />
 
       <header className="dash-top">
-        <img className="dash-logo" src="/jumpcut.png" alt="JumpCut" draggable={false} />
+        <span className="dash-logo">Jumpstart</span>
         <p className="dash-tag">Edit video by editing its transcript.</p>
         {/* API keys live here so the assistant and transcription can be turned on
           * without editing .env or restarting the server. */}

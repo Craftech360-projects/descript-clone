@@ -10,7 +10,7 @@ import { appLogs, editorStatus, wakeEditor } from './lifecycle.ts';
 import * as relay from './relay.ts';
 
 /**
- * Jumpcut, as an MCP server.
+ * Jumpstart, as an MCP server.
  *
  * Every one of the seventy tools is the SAME tool the in-app assistant uses —
  * same schema out of packages/core, same executor in the browser, same undo
@@ -35,7 +35,7 @@ const NO_WINDOW =
   'No editor window is attached, and this tool edits the live document. Call wake_editor to open one, or editor_status to see what is running.';
 
 export function buildServer(): McpServer {
-  const mcp = new McpServer({ name: 'jumpcut', version: '0.1.0' });
+  const mcp = new McpServer({ name: 'jumpstart', version: '0.1.0' });
 
   /**
    * Which window to drive, for the life of this MCP connection.
@@ -59,13 +59,13 @@ export function buildServer(): McpServer {
           /**
            * Answer in the tool's own voice, never by throwing.
            *
-           * A model reads "Jumpcut is not running — call wake_editor" and does
+           * A model reads "Jumpstart is not running — call wake_editor" and does
            * something about it. A transport rejection surfaces several layers up
            * as a protocol error with no way back into the conversation, and the
            * agent's next move is usually to give up or to retry identically.
            */
           if (e instanceof relay.NotRunning) {
-            return toToolContent('Jumpcut is not running. Call wake_editor to start it.');
+            return toToolContent('Jumpstart is not running. Call wake_editor to start it.');
           }
           return toToolContent(`Error: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -79,7 +79,7 @@ export function buildServer(): McpServer {
     'editor_status',
     {
       description:
-        'Is Jumpcut running, is the bridge on, and which editor windows are attached. Call this first when a tool says the editor is not ready.',
+        'Is Jumpstart running, is the bridge on, and which editor windows are attached. Call this first when a tool says the editor is not ready.',
       inputSchema: {},
     },
     async () => toToolContent(await editorStatus()),
@@ -89,7 +89,7 @@ export function buildServer(): McpServer {
     'wake_editor',
     {
       description:
-        'Start Jumpcut if it is not running and wait until an editor window is attached and ready to take tool calls. Safe to call when it is already up.',
+        'Start Jumpstart if it is not running and wait until an editor window is attached and ready to take tool calls. Safe to call when it is already up.',
       inputSchema: {},
     },
     async () => toToolContent(await wakeEditor()),
@@ -115,7 +115,7 @@ export function buildServer(): McpServer {
             .join('\n'),
         );
       } catch (e) {
-        if (e instanceof relay.NotRunning) return toToolContent('Jumpcut is not running. Call wake_editor.');
+        if (e instanceof relay.NotRunning) return toToolContent('Jumpstart is not running. Call wake_editor.');
         throw e;
       }
     },
@@ -140,7 +140,7 @@ export function buildServer(): McpServer {
     'app_logs',
     {
       description:
-        "Read the tail of Jumpcut's server log. Works when the app is down, which is when it matters.",
+        "Read the tail of Jumpstart's server log. Works when the app is down, which is when it matters.",
       inputSchema: { lines: z.number().optional().describe('How many trailing lines. Default 80.') },
     },
     async (args: { lines?: number }) => toToolContent(await appLogs(Math.round(args.lines ?? 80))),
@@ -171,7 +171,7 @@ export function buildServer(): McpServer {
       try {
         context = await relay.call('get_project_context', {}, pinned);
       } catch {
-        context = 'Jumpcut is not running yet. Call wake_editor before trying to edit.';
+        context = 'Jumpstart is not running yet. Call wake_editor before trying to edit.';
       }
       return {
         messages: [
@@ -191,7 +191,7 @@ export function buildServer(): McpServer {
 
   mcp.registerResource(
     'system-prompt',
-    'jumpcut://system-prompt',
+    'jumpstart://system-prompt',
     { title: 'Jumpy’s brief', description: 'The editing brief, verbatim.', mimeType: 'text/markdown' },
     async (uri: URL) => ({
       contents: [{ uri: uri.href, mimeType: 'text/markdown', text: AGENT_SYSTEM_PROMPT }],
@@ -200,7 +200,7 @@ export function buildServer(): McpServer {
 
   mcp.registerResource(
     'folders',
-    'jumpcut://folders',
+    'jumpstart://folders',
     {
       title: 'Folders and their memory',
       description:
@@ -212,7 +212,7 @@ export function buildServer(): McpServer {
       try {
         text = await relay.call('list_folders', {}, pinned);
       } catch {
-        text = 'Jumpcut is not running.';
+        text = 'Jumpstart is not running.';
       }
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text }] };
     },
@@ -220,14 +220,14 @@ export function buildServer(): McpServer {
 
   mcp.registerResource(
     'projects',
-    'jumpcut://projects',
+    'jumpstart://projects',
     { title: 'The library', description: 'Every project, with its id.', mimeType: 'text/markdown' },
     async (uri: URL) => {
       let text: string;
       try {
         text = await relay.call('list_projects', {}, pinned);
       } catch {
-        text = 'Jumpcut is not running.';
+        text = 'Jumpstart is not running.';
       }
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text }] };
     },
@@ -235,7 +235,7 @@ export function buildServer(): McpServer {
 
   mcp.registerResource(
     'transcript',
-    new ResourceTemplate('jumpcut://projects/{id}/transcript', { list: undefined }),
+    new ResourceTemplate('jumpstart://projects/{id}/transcript', { list: undefined }),
     { title: 'A project’s transcript', description: 'The script, as timestamped lines.', mimeType: 'text/markdown' },
     async (uri: URL, vars: { id: string | string[] }) => {
       const id = Array.isArray(vars.id) ? vars.id[0] : vars.id;
@@ -244,7 +244,7 @@ export function buildServer(): McpServer {
         await relay.call('open_project', { project_id: id }, pinned);
         text = await relay.call('read_transcript', {}, pinned);
       } catch {
-        text = 'Jumpcut is not running.';
+        text = 'Jumpstart is not running.';
       }
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text }] };
     },
@@ -252,7 +252,7 @@ export function buildServer(): McpServer {
 
   mcp.registerResource(
     'editor',
-    'jumpcut://editor',
+    'jumpstart://editor',
     { title: 'What the editor is showing', description: 'Live state of the open project.', mimeType: 'text/markdown' },
     async (uri: URL) => ({
       contents: [{ uri: uri.href, mimeType: 'text/markdown', text: await editorStatus() }],

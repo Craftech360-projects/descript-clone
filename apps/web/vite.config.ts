@@ -18,7 +18,7 @@ import react from '@vitejs/plugin-react';
  * reaches the browser bundle.
  */
 function devToken(): string {
-  if (process.env.JUMPCUT_TOKEN) return process.env.JUMPCUT_TOKEN;
+  if (process.env.JUMPSTART_TOKEN) return process.env.JUMPSTART_TOKEN;
   const path =
     process.env.DATA_DIR
       ? `${process.env.DATA_DIR}/token`

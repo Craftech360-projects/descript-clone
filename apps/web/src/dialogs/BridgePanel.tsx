@@ -90,7 +90,7 @@ export default function BridgePanel() {
     );
 
   const config = JSON.stringify(
-    { mcpServers: { jumpcut: { command: 'jumpcut-mcp' } } },
+    { mcpServers: { jumpstart: { command: 'jumpstart-mcp' } } },
     null,
     2,
   );

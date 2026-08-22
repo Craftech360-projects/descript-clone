@@ -9,11 +9,11 @@ import { appLogs, editorStatus, wakeEditor } from './lifecycle.ts';
 import * as relay from './relay.ts';
 
 /**
- * The workshop: the tools an agent needs to change Jumpcut's own code.
+ * The workshop: the tools an agent needs to change Jumpstart's own code.
  *
  * ── why this is a second server, and why it lives outside the repo ──────────
  *
- * Separate from jumpcut-mcp because the two fail differently. The editor tools
+ * Separate from jumpstart-mcp because the two fail differently. The editor tools
  * need the app running; these need it to be safe for the app NOT to be running,
  * because the most common reason to reach for them is that the agent has just
  * broken it. Nothing here touches the app over HTTP except restart_app, which
@@ -23,7 +23,7 @@ import * as relay from './relay.ts';
  * edit the repo — that is the point — and an agent that edits its own undo
  * mechanism has disarmed itself at exactly the moment it needed it. Install a
  * copy outside the working tree (see the README) and point Hermes at that. This
- * blocks nothing the agent wants to do to Jumpcut; it only keeps the escape
+ * blocks nothing the agent wants to do to Jumpstart; it only keeps the escape
  * hatch out of reach of the thing being changed.
  *
  * ── full autonomy, made recoverable ────────────────────────────────────────
@@ -49,7 +49,7 @@ import * as relay from './relay.ts';
 const TIMEOUT_MS = 10 * 60_000;
 
 function repoRoot(): string {
-  if (process.env.JUMPCUT_REPO) return process.env.JUMPCUT_REPO;
+  if (process.env.JUMPSTART_REPO) return process.env.JUMPSTART_REPO;
   // Walk up from this file — correct when running from the checkout, wrong when
   // running from an installed copy, which is why the env var exists and why the
   // README tells you to set it.
@@ -121,13 +121,13 @@ export function summarizeTap(out: string): string {
 }
 
 export function buildDevServer(): McpServer {
-  const mcp = new McpServer({ name: 'jumpcut-dev', version: '0.1.0' });
+  const mcp = new McpServer({ name: 'jumpstart-dev', version: '0.1.0' });
 
   mcp.registerTool(
     'run_tests',
     {
       description:
-        "Run Jumpcut's test suite. Takes about half a second, so run it after every edit — not just before you finish.",
+        "Run Jumpstart's test suite. Takes about half a second, so run it after every edit — not just before you finish.",
       inputSchema: {},
     },
     async () => {
@@ -254,7 +254,7 @@ export function buildDevServer(): McpServer {
     'restart_app',
     {
       description:
-        'Restart Jumpcut so your code changes take effect, then wait until it is answering again. Reports whether it actually came back.',
+        'Restart Jumpstart so your code changes take effect, then wait until it is answering again. Reports whether it actually came back.',
       inputSchema: {},
     },
     async () => {
@@ -285,7 +285,7 @@ export function buildDevServer(): McpServer {
   mcp.registerTool(
     'app_logs',
     {
-      description: "The tail of Jumpcut's server log. Works when the app is down, which is when you need it.",
+      description: "The tail of Jumpstart's server log. Works when the app is down, which is when you need it.",
       inputSchema: { lines: z.number().optional().describe('How many trailing lines. Default 80.') },
     },
     async (args: { lines?: number }) => text(await appLogs(Math.round(args.lines ?? 80))),
@@ -294,7 +294,7 @@ export function buildDevServer(): McpServer {
   mcp.registerTool(
     'editor_status',
     {
-      description: 'Is Jumpcut running, is the bridge on, and are any editor windows attached.',
+      description: 'Is Jumpstart running, is the bridge on, and are any editor windows attached.',
       inputSchema: {},
     },
     async () => text(await editorStatus()),

@@ -23,7 +23,7 @@ export interface CallResult {
 
 export class NotRunning extends Error {
   constructor() {
-    super('Jumpcut is not running.');
+    super('Jumpstart is not running.');
     this.name = 'NotRunning';
   }
 }

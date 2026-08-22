@@ -34,7 +34,7 @@ export async function editorStatus(): Promise<string> {
 
   if (!b) {
     return [
-      'Jumpcut does not appear to have run on this machine — there is no bridge file.',
+      'Jumpstart does not appear to have run on this machine — there is no bridge file.',
       'Start it once (open the app, or `npm run app` in the repo) so it can publish where it is listening.',
     ].join('\n');
   }
@@ -42,7 +42,7 @@ export async function editorStatus(): Promise<string> {
   const alive = looksAlive(b) && (await relay.reachable());
   if (!alive) {
     return [
-      'Jumpcut is NOT running.',
+      'Jumpstart is NOT running.',
       b.port ? `Last seen on port ${b.port} (pid ${b.pid || 'unknown'}), started ${b.startedAt}.` : 'It exited cleanly.',
       b.logPath ? `Log: ${b.logPath}` : '',
       'Call wake_editor to start it.',
@@ -55,13 +55,13 @@ export async function editorStatus(): Promise<string> {
   try {
     s = await relay.status();
   } catch (e) {
-    return `Jumpcut is listening on ${b.port}, but the bridge did not answer: ${
+    return `Jumpstart is listening on ${b.port}, but the bridge did not answer: ${
       e instanceof Error ? e.message : String(e)
     }`;
   }
 
   const lines = [
-    `Jumpcut is running at ${s.url} (${s.mode}, pid ${s.pid}), started ${s.startedAt}.`,
+    `Jumpstart is running at ${s.url} (${s.mode}, pid ${s.pid}), started ${s.startedAt}.`,
     `Hermes bridge: ${s.enabled ? 'ON' : 'OFF — turn it on in Settings → Connect Hermes'}.`,
   ];
 
@@ -110,9 +110,9 @@ export async function wakeEditor(): Promise<string> {
     const app = b?.appPath || (await defaultAppPath());
     if (!app) {
       return [
-        'Jumpcut is not running and I could not find the app to start.',
+        'Jumpstart is not running and I could not find the app to start.',
         'Open it yourself, or run `npm run app` in the repo checkout.',
-        'If it is installed somewhere unusual, set JUMPCUT_APP_PATH.',
+        'If it is installed somewhere unusual, set JUMPSTART_APP_PATH.',
       ].join('\n');
     }
 
@@ -134,12 +134,12 @@ export async function wakeEditor(): Promise<string> {
   }, 20_000);
 
   if (!attached) {
-    return 'Jumpcut is running, but no editor window attached within 20s. If the app is open, the bridge may be switched off in Settings → Connect Hermes.';
+    return 'Jumpstart is running, but no editor window attached within 20s. If the app is open, the bridge may be switched off in Settings → Connect Hermes.';
   }
 
   const s = await relay.status();
   const where = s.sessions[0]?.projectName;
-  return `Jumpcut is ready — ${s.windows} window${s.windows === 1 ? '' : 's'} attached${
+  return `Jumpstart is ready — ${s.windows} window${s.windows === 1 ? '' : 's'} attached${
     where ? `, showing "${where}"` : ', no project open'
   }.`;
 }
@@ -154,8 +154,8 @@ async function waitFor(check: () => Promise<boolean>, budgetMs: number): Promise
 }
 
 async function defaultAppPath(): Promise<string | null> {
-  if (process.env.JUMPCUT_APP_PATH) return process.env.JUMPCUT_APP_PATH;
-  for (const p of ['/Applications/Transcript Editor.app', '/Applications/Jumpcut.app']) {
+  if (process.env.JUMPSTART_APP_PATH) return process.env.JUMPSTART_APP_PATH;
+  for (const p of ['/Applications/Jumpstart.app', '/Applications/Transcript Editor.app']) {
     try {
       await stat(p);
       return p;
@@ -169,7 +169,7 @@ async function defaultAppPath(): Promise<string | null> {
 /** The tail of the server log, so an agent can read the crash it just caused. */
 export async function appLogs(lines: number): Promise<string> {
   const b = await relay.bridge();
-  const path = process.env.JUMPCUT_LOG_PATH || b?.logPath;
+  const path = process.env.JUMPSTART_LOG_PATH || b?.logPath;
   if (!path) {
     return 'No log file is configured. The desktop app writes one; a server started in a terminal prints to that terminal instead.';
   }

@@ -13,8 +13,8 @@ import { fileURLToPath } from 'node:url';
  * the app is.
  *
  * Search order, most specific first:
- *   JUMPCUT_BRIDGE   an explicit path to bridge.json
- *   JUMPCUT_DATA_DIR the data directory holding it
+ *   JUMPSTART_BRIDGE   an explicit path to bridge.json
+ *   JUMPSTART_DATA_DIR the data directory holding it
  *   the packaged app's Application Support directory
  *   the repo's own data/ directory (development)
  */
@@ -31,14 +31,23 @@ export interface Bridge {
   token: string;
 }
 
-/** Where the Mac app keeps its per-user state. Mirrors Electron's app.getPath('userData'). */
-const APP_SUPPORT = join(homedir(), 'Library', 'Application Support', 'Transcript Editor');
+/**
+ * Where the Mac app keeps its per-user state. Mirrors Electron's app.getPath('userData'),
+ * which derives from productName — so renaming the app moves this.
+ *
+ * The old name is still searched, second. It costs one failed stat and means an
+ * install that predates the rename is still found rather than silently looking
+ * like "Jumpstart has never run on this machine".
+ */
+const APP_SUPPORT = join(homedir(), 'Library', 'Application Support', 'Jumpstart');
+const APP_SUPPORT_LEGACY = join(homedir(), 'Library', 'Application Support', 'Transcript Editor');
 
 export function candidatePaths(): string[] {
   const out: string[] = [];
-  if (process.env.JUMPCUT_BRIDGE) out.push(process.env.JUMPCUT_BRIDGE);
-  if (process.env.JUMPCUT_DATA_DIR) out.push(join(process.env.JUMPCUT_DATA_DIR, 'bridge.json'));
+  if (process.env.JUMPSTART_BRIDGE) out.push(process.env.JUMPSTART_BRIDGE);
+  if (process.env.JUMPSTART_DATA_DIR) out.push(join(process.env.JUMPSTART_DATA_DIR, 'bridge.json'));
   out.push(join(APP_SUPPORT, 'data', 'bridge.json'));
+  out.push(join(APP_SUPPORT_LEGACY, 'data', 'bridge.json'));
   // ../../../data/ from apps/mcp/src — the repo checkout, for development.
   out.push(fileURLToPath(new URL('../../../data/bridge.json', import.meta.url)));
   return out;
@@ -71,18 +80,18 @@ export async function read(): Promise<Bridge | null> {
 /**
  * The base URL to call.
  *
- * JUMPCUT_URL overrides everything, for a Hermes running somewhere the file is
- * not — but note the token still has to come from somewhere, so JUMPCUT_TOKEN
+ * JUMPSTART_URL overrides everything, for a Hermes running somewhere the file is
+ * not — but note the token still has to come from somewhere, so JUMPSTART_TOKEN
  * goes with it.
  */
 export function baseUrl(b: Bridge): string {
-  if (process.env.JUMPCUT_URL) return process.env.JUMPCUT_URL.replace(/\/$/, '');
+  if (process.env.JUMPSTART_URL) return process.env.JUMPSTART_URL.replace(/\/$/, '');
   const host = b.host === '::' || b.host === '0.0.0.0' ? '127.0.0.1' : b.host;
   return `http://${host}:${b.port}`;
 }
 
 export function token(b: Bridge | null): string {
-  return process.env.JUMPCUT_TOKEN || b?.token || '';
+  return process.env.JUMPSTART_TOKEN || b?.token || '';
 }
 
 /** A port of 0 means the app retired cleanly; a pid we cannot signal means it died. */

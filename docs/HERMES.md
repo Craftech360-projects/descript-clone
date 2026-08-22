@@ -1,6 +1,6 @@
-# Handing Jumpcut to an agent
+# Handing Jumpstart to an agent
 
-Jumpcut can be driven by an agent running outside the browser — a Hermes host, or
+Jumpstart can be driven by an agent running outside the browser — a Hermes host, or
 any MCP client. It gets the same seventy tools the in-app assistant uses, the same
 folder memories, and the same editing brief.
 
@@ -13,18 +13,18 @@ once; they are two doors into one document.
 
 ```
 Hermes
-├── stdio ──▶ jumpcut-mcp  ──HTTP──▶ Jumpcut ──WS──▶ editor window ──▶ live document
+├── stdio ──▶ jumpstart-mcp  ──HTTP──▶ Jumpstart ──WS──▶ editor window ──▶ live document
 │              70 tools + editor_status, wake_editor,
 │              list_editor_sessions, use_editor_session, app_logs
 │
-└── stdio ──▶ jumpcut-dev  ──▶ the repo: run_tests, git_checkpoint,
+└── stdio ──▶ jumpstart-dev  ──▶ the repo: run_tests, git_checkpoint,
                                 git_revert_last, git_reset_to,
                                 git_status_diff, restart_app, app_logs
 ```
 
 **Two servers, both separate processes from the app.** That is the important part.
-The agent is allowed to change Jumpcut's code, so sooner or later it will break the
-server. When it does, the app dies — but `jumpcut-dev` does not, so the agent can
+The agent is allowed to change Jumpstart's code, so sooner or later it will break the
+server. When it does, the app dies — but `jumpstart-dev` does not, so the agent can
 still read the log, run the tests and undo the change. If the MCP server lived
 inside the app, the agent's hands would die with the thing it broke.
 
@@ -42,7 +42,7 @@ there.
 
 ### 1. Turn the bridge on
 
-Open Jumpcut → **Settings** → **Connect Hermes** → *Turn on*.
+Open Jumpstart → **Settings** → **Connect Hermes** → *Turn on*.
 
 It is off by default, and the switch withholds the capability rather than hiding a
 panel: while it is off, every external call is refused no matter how good the
@@ -60,10 +60,10 @@ an agent reports mysterious failures.
       "command": "node",
       "args": ["/path/to/descript-clone/apps/mcp/src/index.ts"]
     },
-    "jumpcut-dev": {
+    "jumpstart-dev": {
       "command": "node",
       "args": ["/Users/you/.jumpcut-agent/dev-index.ts"],
-      "env": { "JUMPCUT_REPO": "/path/to/descript-clone" }
+      "env": { "JUMPSTART_REPO": "/path/to/descript-clone" }
     }
   }
 }
@@ -74,7 +74,7 @@ port every launch — deliberately, so it cannot collide with a dev server — a
 MCP server re-reads `bridge.json` on every call, so a restart on a new port is
 invisible.
 
-### 3. Install `jumpcut-dev` outside the repo
+### 3. Install `jumpstart-dev` outside the repo
 
 ```bash
 mkdir -p ~/.jumpcut-agent
@@ -86,7 +86,7 @@ have disarmed itself at exactly the moment it needed it. Running the dev server
 from a copy the agent has no reason to touch keeps the escape hatch out of reach.
 Refresh it by hand when you want the newer version.
 
-This blocks nothing the agent wants to do **to Jumpcut**. It is a safety net, not a
+This blocks nothing the agent wants to do **to Jumpstart**. It is a safety net, not a
 gate.
 
 ### 4. Set up the backups
@@ -115,7 +115,7 @@ protects the work.
 
 ## The persona
 
-Give the agent this, or something like it. `jumpcut-mcp` also serves it as an MCP
+Give the agent this, or something like it. `jumpstart-mcp` also serves it as an MCP
 prompt (`jumpy`, and `video_editor` which adds the current editor state), taken
 verbatim from the same constant the in-app assistant uses so the two cannot drift.
 
@@ -157,8 +157,8 @@ Two DMGs, and they are **not** interchangeable:
 
 | File | For |
 |---|---|
-| `Transcript Editor-0.1.0-arm64.dmg` | Apple Silicon (M1/M2/M3…) |
-| `Transcript Editor-0.1.0-x64.dmg` | Intel |
+| `Jumpstart-0.1.0-arm64.dmg` | Apple Silicon (M1/M2/M3…) |
+| `Jumpstart-0.1.0-x64.dmg` | Intel |
 
 Both are built from `desktop/mac`:
 
@@ -176,7 +176,7 @@ build rather than shipping.
 The apps are **not notarised**, so macOS quarantines them on first open:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Transcript Editor.app"
+xattr -dr com.apple.quarantine "/Applications/Jumpstart.app"
 ```
 
 ### On-device transcription needs macOS 26
@@ -243,7 +243,7 @@ above undoes:
 |---|---|
 | "The Hermes bridge is switched off" | Settings → Connect Hermes → Turn on |
 | "No editor window is attached" | `wake_editor`, or open the app |
-| "Jumpcut is not running" | `wake_editor`; if it will not start, `app_logs` |
+| "Jumpstart is not running" | `wake_editor`; if it will not start, `app_logs` |
 | Every call 401s | Stale cookie from another install — reload the page once |
 | Tools work, edits do not stick | Two processes on one data directory. Run one |
 | `app_logs` says no log configured | A server started in a terminal prints there; only the packaged app writes a file |

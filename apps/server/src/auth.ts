@@ -38,7 +38,7 @@ import { CONFIG } from './config.ts';
  *                                   CSRF-immune: a cross-origin page cannot set
  *                                   a custom header on a simple request, and it
  *                                   does not know the value anyway.
- *   Cookie jumpcut_token            The browser and the Electron renderer.
+ *   Cookie jumpstart_token          The browser and the Electron renderer.
  *   ?token=<token> on GET /         The bootstrap for a remote deployment: sets
  *                                   the cookie, then redirects to / so the token
  *                                   does not sit in the address bar or in
@@ -58,7 +58,7 @@ import { CONFIG } from './config.ts';
  * authentication, it is a formality.
  */
 
-export const COOKIE = 'jumpcut_token';
+export const COOKIE = 'jumpstart_token';
 
 /** Token file lives with the other private state, never under mediaDir. */
 const tokenFile = () => join(CONFIG.dataDir, 'token');
@@ -88,8 +88,8 @@ export function currentToken(): string {
  * every code change, is constantly.
  */
 export async function init(): Promise<void> {
-  if (process.env.JUMPCUT_TOKEN) {
-    token = process.env.JUMPCUT_TOKEN;
+  if (process.env.JUMPSTART_TOKEN) {
+    token = process.env.JUMPSTART_TOKEN;
     return;
   }
 

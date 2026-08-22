@@ -1,12 +1,12 @@
 {
-  "name": "@jumpcut/mcp",
+  "name": "@jumpstart/mcp",
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "Jumpcut as an MCP server, so an agent outside the browser can edit video.",
+  "description": "Jumpstart as an MCP server, so an agent outside the browser can edit video.",
   "bin": {
-    "jumpcut-mcp": "src/index.ts",
-    "jumpcut-dev": "src/dev-index.ts"
+    "jumpstart-mcp": "src/index.ts",
+    "jumpstart-dev": "src/dev-index.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

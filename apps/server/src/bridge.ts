@@ -82,9 +82,9 @@ export async function publish(port: number): Promise<void> {
     ...cache,
     host: CONFIG.host,
     port,
-    mode: process.env.JUMPCUT_SHELL || 'server',
-    appPath: process.env.JUMPCUT_APP_PATH || null,
-    logPath: process.env.JUMPCUT_LOG_PATH || null,
+    mode: process.env.JUMPSTART_SHELL || 'server',
+    appPath: process.env.JUMPSTART_APP_PATH || null,
+    logPath: process.env.JUMPSTART_LOG_PATH || null,
     pid: process.pid,
     startedAt: new Date().toISOString(),
   };

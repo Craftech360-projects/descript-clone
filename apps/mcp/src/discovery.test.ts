@@ -8,7 +8,7 @@ import { join } from 'node:path';
  * Finding a server whose port changes every launch.
  *
  * The desktop shell takes a free port each time, and the agent restarts the app
- * whenever it edits code — so "where is Jumpcut" has to be answerable fresh on
+ * whenever it edits code — so "where is Jumpstart" has to be answerable fresh on
  * every call, and answerable NEGATIVELY without throwing when the app is down.
  * A discovery layer that raises on a missing file would take the agent's
  * diagnostic tools down with the app, which is the one thing the two-process
@@ -16,10 +16,10 @@ import { join } from 'node:path';
  */
 
 const dir = await mkdtemp(join(tmpdir(), 'jumpcut-disc-'));
-process.env.JUMPCUT_DATA_DIR = dir;
-delete process.env.JUMPCUT_BRIDGE;
-delete process.env.JUMPCUT_URL;
-delete process.env.JUMPCUT_TOKEN;
+process.env.JUMPSTART_DATA_DIR = dir;
+delete process.env.JUMPSTART_BRIDGE;
+delete process.env.JUMPSTART_URL;
+delete process.env.JUMPSTART_TOKEN;
 
 const d = await import('./discovery.ts');
 
@@ -30,7 +30,7 @@ const write = (patch: Record<string, unknown>) =>
   );
 
 test('a missing bridge file reads as "not running", not as an error', async () => {
-  // JUMPCUT_DATA_DIR points at an empty dir, so nothing is found. Both fallback
+  // JUMPSTART_DATA_DIR points at an empty dir, so nothing is found. Both fallback
   // paths (the app bundle, the repo) may or may not exist on a given machine,
   // so assert only that it does not throw.
   await assert.doesNotReject(() => d.read());
@@ -56,12 +56,12 @@ test('a truncated file does not take the caller down', async () => {
   await assert.doesNotReject(() => d.read());
 });
 
-test('JUMPCUT_BRIDGE wins over the search path', async () => {
+test('JUMPSTART_BRIDGE wins over the search path', async () => {
   const other = join(dir, 'elsewhere.json');
   await writeFile(other, JSON.stringify({ port: 9999, token: 'b'.repeat(64) }));
-  process.env.JUMPCUT_BRIDGE = other;
+  process.env.JUMPSTART_BRIDGE = other;
   assert.equal((await d.read())?.port, 9999);
-  delete process.env.JUMPCUT_BRIDGE;
+  delete process.env.JUMPSTART_BRIDGE;
 });
 
 test('baseUrl turns a wildcard bind into something connectable', () => {
@@ -85,8 +85,8 @@ test('a pid that no longer exists means the app died without retiring', () => {
   assert.equal(d.looksAlive({ ...base, pid: 4_194_303 }), false);
 });
 
-test('JUMPCUT_TOKEN overrides the file, for a host that cannot read it', () => {
-  process.env.JUMPCUT_TOKEN = 'override';
+test('JUMPSTART_TOKEN overrides the file, for a host that cannot read it', () => {
+  process.env.JUMPSTART_TOKEN = 'override';
   assert.equal(d.token(null), 'override');
-  delete process.env.JUMPCUT_TOKEN;
+  delete process.env.JUMPSTART_TOKEN;
 });

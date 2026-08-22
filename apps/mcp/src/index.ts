@@ -4,7 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { buildServer } from './server.ts';
 
 /**
- * `jumpcut-mcp` — the entry point a Hermes host spawns.
+ * `jumpstart-mcp` — the entry point a Hermes host spawns.
  *
  * ── stdout is the wire ──────────────────────────────────────────────────────
  *
@@ -35,7 +35,7 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 
 // stderr, never stdout. See above.
-process.stderr.write('jumpcut-mcp ready\n');
+process.stderr.write('jumpstart-mcp ready\n');
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {

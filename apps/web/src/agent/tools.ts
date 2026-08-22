@@ -1210,7 +1210,27 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
     requireDoc(snap);
     const fillers = countFillers(str(args.mode) === 'all', snap.customFillers);
     const retakes = countRetakes(Math.max(1, Math.round(numOr(args.min_words, 2))));
-    return `${fillers} filler word${fillers === 1 ? '' : 's'} and ${retakes} word${retakes === 1 ? '' : 's'} of retakes could be cut. Nothing has been cut.`;
+
+    /**
+     * Say STILL, and report what is already cut.
+     *
+     * This used to end "Nothing has been cut." — meaning "this tool cut nothing",
+     * because it is a preview. Read by a model it says something else entirely:
+     * a claim about the DOCUMENT. An agent that had just cut eleven words, called
+     * this, and was told nothing had been cut concluded its own edit had not
+     * landed. Measured, not hypothetical — it happened the first time an external
+     * caller drove this tool.
+     *
+     * The counts are also "what remains findable now", not "what was ever there",
+     * so a second call after a cut legitimately still returns a number. Saying
+     * "still" is what makes that read as progress rather than as failure.
+     */
+    const already = snap.stats.words - snap.stats.kept;
+    const cutSoFar = already > 0 ? ` ${already} word${already === 1 ? ' is' : 's are'} already cut.` : '';
+    return (
+      `${fillers} filler word${fillers === 1 ? '' : 's'} and ${retakes} word${retakes === 1 ? '' : 's'} ` +
+      `of retakes could still be cut.${cutSoFar} This tool only counts — use remove_fillers or remove_retakes to cut.`
+    );
   },
 
   track_subject: async (args) => {

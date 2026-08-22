@@ -27,6 +27,8 @@ import * as folders from './folders.ts';
 import * as preferences from './preferences.ts';
 import * as auth from './auth.ts';
 import { registerEditorBridge } from './editor-bridge.ts';
+import * as bridge from './bridge.ts';
+import { registerBridgeRoutes } from './bridge-routes.ts';
 import { readPage } from './read-page.ts';
 import * as appleSpeech from './apple-speech.ts';
 import * as captionImage from './caption-image.ts';
@@ -108,6 +110,7 @@ await fonts.init();
 await folders.init();
 await preferences.init();
 await auth.init();
+await bridge.init();
 
 const app = new Hono();
 
@@ -295,6 +298,7 @@ registerClaudeAgent(app, upgradeWebSocket);
  * tools. Registered here beside the Claude one because both need upgradeWebSocket.
  */
 registerEditorBridge(app, upgradeWebSocket);
+registerBridgeRoutes(app);
 // The assistant's escape hatch: fetch a file off the open web, run a media
 // operation no panel exists for. Its own module because neither backs a feature
 // of the app — see summon.ts on why an assistant needs both.
@@ -2013,6 +2017,9 @@ const server = serve({ fetch: app.fetch, port: CONFIG.port, hostname: CONFIG.hos
   // their editor is listening told them the reassuring answer rather than the
   // real one.
   console.log(`server  http://${CONFIG.host}:${info.port}`);
+  // Publish where we ACTUALLY landed, so an external agent can find us even
+  // though the desktop shell picks a fresh port every launch. See bridge.ts.
+  void bridge.publish(info.port);
   if (!isLoopback(CONFIG.host)) {
     console.log(`        reachable from the network — every route on this port is`);
   }

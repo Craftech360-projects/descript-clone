@@ -813,7 +813,37 @@ export const api = {
     save: (patch: Record<string, string>) =>
       post('/api/settings/keys', patch).then(json<KeysResponse>),
   },
+
+  /** The outside-agent bridge. See apps/server/src/bridge.ts. */
+  bridge: {
+    status: () => fetch('/api/bridge/status').then(json<BridgeStatus>),
+    setEnabled: (enabled: boolean) => post('/api/bridge', { enabled }).then(json<{ enabled: boolean }>),
+    token: () => fetch('/api/bridge/token').then(json<{ token: string }>),
+    rotate: () => post('/api/bridge/rotate', {}).then(json<{ token: string }>),
+  },
 };
+
+/** One editor window attached to the bridge, ready to execute tools. */
+export interface BridgeSession {
+  id: string;
+  projectId: string | null;
+  projectName: string | null;
+  since: string;
+  busy: boolean;
+}
+
+export interface BridgeStatus {
+  enabled: boolean;
+  url: string;
+  mode: string;
+  pid: number;
+  startedAt: string;
+  logPath: string | null;
+  /** Started under --watch, so editing a server file will restart it. */
+  watch: boolean;
+  sessions: BridgeSession[];
+  windows: number;
+}
 
 /** One listing of a folder the user shared with the assistant. Names and sizes only. */
 export interface LocalListing {

@@ -2287,6 +2287,33 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--warn-fg); font-size: var(--t-small); line-height: 1.5;
 }
 
+/* ---- Connect Hermes ---- */
+.set-rule { margin: var(--s-5) 0 var(--s-4); border: 0; border-top: 1px solid var(--line); }
+.set-section { margin: 0 0 var(--s-3); font-size: var(--t-ui); font-weight: 600; color: var(--text); }
+.set-bridge { display: flex; flex-direction: column; gap: var(--s-3); }
+/*
+ * The attached-window line. It is a status readout, not a control, so it gets a
+ * quiet ground and a colour that says which of the two states it is in — the
+ * reader is scanning for exactly one bit here.
+ */
+.set-attached {
+  margin: 0; padding: var(--s-2) var(--s-3); border-radius: var(--r-1);
+  border: 1px solid var(--line); background: var(--sunk);
+  font-size: var(--t-small); color: var(--dim);
+}
+.set-attached.live { color: var(--ok-fg); border-color: var(--ok-line); background: var(--ok-bg); }
+.set-attached.idle { color: var(--faint); }
+.set-config {
+  margin: 0; padding: var(--s-3); overflow-x: auto;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-1);
+  font-family: var(--font-mono); font-size: var(--t-small); color: var(--dim);
+  line-height: 1.5;
+}
+.set-bridge code {
+  font-family: var(--font-mono); font-size: .95em;
+  background: var(--sunk); border-radius: 3px; padding: 0 3px;
+}
+
 /* ===================== mobile ===================== */
 /**
  * The Android shell loads this same app into a WebView, and a phone browser

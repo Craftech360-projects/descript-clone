@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import Dialog from '../ui/Dialog.tsx';
 import { api, type KeyStatus } from '../api.ts';
+import BridgePanel from './BridgePanel.tsx';
 
 interface Props {
   open: boolean;
@@ -14,7 +15,13 @@ interface Props {
 const ROW_ORDER = ['xai', 'anthropic', 'claudeOauth', 'elevenlabs', 'sarvam', 'gemini', 'jamendo'];
 
 /**
- * View and update the app's API keys without touching .env or restarting.
+ * The app's settings: its API keys, and who is allowed to drive it.
+ *
+ * Titled "Settings" rather than "API keys" since it grew a second section — the
+ * Hermes bridge is not a key, and a dialog whose title names only half of what is
+ * in it sends people looking elsewhere for the other half.
+ *
+ * Keys can be updated without touching .env or restarting.
  *
  * The server never sends a secret back — only whether each key is set and a short
  * tail hint — so a configured key shows as a placeholder ("…a1b2") and the input
@@ -82,7 +89,7 @@ export default function SettingsDialog({ open, onClose, onSaved }: Props) {
   return (
     <Dialog
       open={open}
-      title="API keys"
+      title="Settings"
       onClose={onClose}
       footer={
         <>
@@ -149,9 +156,13 @@ export default function SettingsDialog({ open, onClose, onSaved }: Props) {
       </div>
 
       <p className="set-warn">
-        Keys are stored in plaintext on this machine and this local server is unauthenticated —
-        fine for local use, not for a shared or exposed host.
+        Keys are stored in plaintext on this machine. The server now requires a token and listens
+        on this machine only — still fine for local use, still not a multi-user auth layer.
       </p>
+
+      <hr className="set-rule" />
+      <h3 className="set-section">Connect Hermes</h3>
+      <BridgePanel />
     </Dialog>
   );
 }

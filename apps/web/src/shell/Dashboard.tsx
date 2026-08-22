@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import Icon from '../ui/Icon.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { Folder, MediaItem } from '../api.ts';
+import { mediaAccept } from '../media-accept.ts';
 
 interface Props {
   projects: MediaItem[];
@@ -34,6 +35,8 @@ interface Props {
   /** Rename it. Already trimmed, non-empty, and never the name it already had. */
   onRename: (id: string, name: string) => void;
   onImport: (file: File) => void;
+  /** Several files, imported as one sequence. See takeMany. */
+  onImportMany: (files: File[]) => void;
   error: string | null;
   onDismissError: () => void;
   /** Open the API-keys dialog (assistant + transcription credentials). */
@@ -280,6 +283,7 @@ export default function Dashboard({
   onDelete,
   onRename,
   onImport,
+  onImportMany,
   error,
   onDismissError,
   onOpenSettings,
@@ -308,6 +312,21 @@ export default function Dashboard({
     if (file) onImport(file);
   };
 
+  /**
+   * Several files at once become ONE project with the clips in order.
+   *
+   * That is what "import these takes" means for this product: a reel is usually
+   * cut from a few attempts at the same thing, and the sequence is what you want.
+   * Five separate projects would be five places to go and reorder by hand. The
+   * order is the order the picker returned, which on a gallery and on a file
+   * dialog alike is the order it showed you.
+   */
+  const takeMany = (files: File[]) => {
+    if (files.length === 0 || openFolder === null) return;
+    if (files.length === 1) onImport(files[0]);
+    else onImportMany(files);
+  };
+
   return (
     <div
       className={dropping ? 'dash dropping' : 'dash'}
@@ -328,15 +347,19 @@ export default function Dashboard({
         take(e.dataTransfer.files?.[0]);
       }}
     >
+      {/* `multiple`: several takes are one sequence, not five projects — see
+          takeMany. `accept` narrows on touch so the gallery appears at all —
+          see media-accept.ts. */}
       <input
         ref={fileRef}
         className="dash-file"
         type="file"
-        accept="video/*,audio/*"
+        accept={mediaAccept()}
+        multiple
         onChange={(e) => {
-          const file = e.target.files?.[0];
+          const files = [...(e.target.files ?? [])];
           e.target.value = ''; // same file twice fires no change unless cleared
-          take(file);
+          takeMany(files);
         }}
       />
 

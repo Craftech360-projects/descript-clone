@@ -821,6 +821,55 @@ export default function App() {
     });
 
   /**
+   * Several files as ONE project, clips in the order they were picked.
+   *
+   * The first file makes the project — that is the only call that can create one —
+   * and the rest are appended as clips. Sequential rather than parallel on
+   * purpose: each upload streams to disk and then gets probed, and firing five at
+   * once at a laptop or a Mac mini turns a predictable wait into contention with
+   * no progress anyone can read.
+   *
+   * A failure partway through keeps what landed. Four of five clips imported is a
+   * project you can work with and add the fifth to; throwing all four away
+   * because the fifth was a HEIC would be worse, and the error names which one.
+   */
+  const importMany = (files: File[]) =>
+    run('import', async () => {
+      let p = await api.import(files[0]);
+      if (openFolderId) {
+        try {
+          await api.setProjectFolder(p.id, openFolderId);
+          p.folderId = openFolderId;
+        } catch {
+          // Same reasoning as importFile: a failed filing must not lose the import.
+        }
+      }
+
+      const failed: string[] = [];
+      for (let i = 1; i < files.length; i++) {
+        setBusy(`import ${i + 1}/${files.length}`);
+        try {
+          const r = await api.addClip(p.id, files[i]);
+          p = r.project;
+        } catch (e) {
+          failed.push(files[i].name);
+        }
+      }
+
+      setProject(p);
+      openTranscript(p, editDefaults(caps));
+      setResult(null);
+      setLibrary(await api.list());
+      if (failed.length) {
+        setError(
+          `Imported ${files.length - failed.length} of ${files.length}. ` +
+            `Could not add: ${failed.join(', ')}.`,
+        );
+      }
+      return p;
+    });
+
+  /**
    * Commit a whole new play order at once — what dragging a clip along the
    * timeline's clip lane produces.
    *
@@ -2429,6 +2478,7 @@ export default function App() {
           onDelete={(id) => void deleteProject(id)}
           onRename={(id, name) => void renameProject(id, name)}
           onImport={importFile}
+          onImportMany={importMany}
           error={error}
           onDismissError={() => setError(null)}
           onOpenSettings={() => setSettingsOpen(true)}

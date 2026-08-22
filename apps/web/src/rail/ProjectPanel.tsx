@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react';
+import { PLATFORM_GUIDES } from '../../../../packages/core/src/safe-area.ts';
 import {
   Field,
   Hint,
@@ -78,6 +79,9 @@ interface Props {
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+  /** Which platform's furniture to outline in the monitor. 'off' draws nothing. */
+  safeArea: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all';
+  onSafeArea: (v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => void;
 
   /**
    * Push-ins: mark a portion of the picture and zoom into it for a stretch of
@@ -609,6 +613,32 @@ function FrameField(p: Props) {
         onPointerDown={p.onFrameDragStart}
         onPointerUp={() => p.onFrameDragEnd('Zoom frame')}
       />
+
+      {/* Where the platform will cover the picture. A preview aid only — it is
+          never burned in and never reaches the render, so it lives beside the
+          frame controls rather than in the output settings. */}
+      <div className="safe-pick">
+        <span className="safe-pick-label">Safe area</span>
+        <Segmented
+          name="safe-area"
+          value={p.safeArea}
+          onChange={(v) => p.onSafeArea(v as typeof p.safeArea)}
+          options={[
+            ['off', 'Off'],
+            ['reels', 'Reels'],
+            ['tiktok', 'TikTok'],
+            ['shorts', 'Shorts'],
+            ['all', 'All'],
+          ]}
+        />
+      </div>
+      {p.safeArea !== 'off' && (
+        <Hint>
+          {PLATFORM_GUIDES.find((g) => g.id === p.safeArea)?.hint ??
+            'The shaded bands are where the app draws over your video.'}{' '}
+          Guides only — nothing here is rendered into the export.
+        </Hint>
+      )}
 
       <Hint>
         {cropped

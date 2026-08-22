@@ -94,6 +94,7 @@ import {
 } from './store/autoImport.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
 import { DEFAULT_FRAME, frameLayout, frameSize } from '../../../packages/core/src/frame.ts';
+import SafeAreaOverlay from './shell/SafeAreaOverlay.tsx';
 import {
   MIN_MOVE_SEC,
   boxToPunch,
@@ -184,6 +185,26 @@ export default function App() {
 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Which platform's furniture to outline over the picture.
+   *
+   * A VIEW preference, not part of the document: it changes nothing about the
+   * output, so persisting it into the project would put a render-irrelevant
+   * field in every saved file and mark the doc dirty for looking at something.
+   * localStorage, the same as the pane widths.
+   */
+  const [safeArea, setSafeArea] = useState<'off' | 'reels' | 'tiktok' | 'shorts' | 'all'>(() => {
+    try {
+      const v = localStorage.getItem('ui.safeArea');
+      return v === 'reels' || v === 'tiktok' || v === 'shorts' || v === 'all' ? v : 'off';
+    } catch {
+      return 'off';
+    }
+  });
+  const chooseSafeArea = useCallback((v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => {
+    setSafeArea(v);
+    try { localStorage.setItem('ui.safeArea', v); } catch { /* private mode */ }
+  }, []);
   /** Why the workspace could not boot. Read by the gate, not by the banner. */
   const [bootError, setBootError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -2291,6 +2312,9 @@ export default function App() {
               {/* Images first, captions second — DOM order is z-order, and it
                 * has to mirror the render, which composites the picture and
                 * THEN burns the caption on top of it. */}
+              {/* Above the images and the captions: a guide you cannot see
+                  because a caption is sitting on it is no guide at all. */}
+              <SafeAreaOverlay platform={safeArea} />
               <ImageOverlayLayer
                 overlays={overlays}
                 urls={imageUrls}
@@ -2366,6 +2390,8 @@ export default function App() {
 
         {/* ---- the inspector for whatever is selected: the full-height right column ---- */}
         <Rail
+          safeArea={safeArea}
+          onSafeArea={chooseSafeArea}
             project={project}
             hasScript={!!doc}
             selectedWords={selectedWords}

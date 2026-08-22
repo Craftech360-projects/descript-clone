@@ -38,6 +38,8 @@ interface Props {
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+  safeArea: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all';
+  onSafeArea: (v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => void;
 
   /** Push-ins. See ProjectPanel's MovesField and SelectionPanel's "Push in here". */
   onPunchIn: () => void;
@@ -187,6 +189,8 @@ export default function Rail(p: Props) {
     <>
       <div className="rail-head">Project</div>
       <ProjectPanel
+        safeArea={p.safeArea}
+        onSafeArea={p.onSafeArea}
         project={p.project}
         verbatim={p.verbatim}
         asrProvider={p.asrProvider}

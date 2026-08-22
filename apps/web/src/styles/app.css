@@ -2554,3 +2554,51 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   padding: 1px var(--s-1);
   color: var(--dim);
 }
+
+/* ── safe-area guides ──────────────────────────────────────────────────────
+ * Where the platform paints its own interface over the reel. A preview aid:
+ * pointer-events none, never rendered into the output.
+ *
+ * The bands are a scrim rather than an outline because the instruction is "do
+ * not compose here", not "here is a rectangle" — and a scrim reads at a glance
+ * over any footage, where a thin outline disappears against a busy frame. */
+.safe-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.safe-band {
+  position: absolute;
+  background: rgb(0 0 0 / 0.5);
+}
+.safe-box {
+  position: absolute;
+  border: 1px dashed rgb(255 255 255 / 0.45);
+}
+.safe-tag {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: #fff;
+  background: rgb(0 0 0 / 0.6);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-full);
+  white-space: nowrap;
+}
+
+/* The safe-area picker in the Frame panel. */
+.safe-pick { display: grid; gap: var(--s-2); margin-top: var(--s-3); }
+.safe-pick-label {
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}

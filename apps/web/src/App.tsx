@@ -1694,36 +1694,56 @@ export default function App() {
 
   // --- editing -----------------------------------------------------------------
   /**
-   * Clicking a word always means "put the playhead here". What changes is the
-   * selection: the word you clicked, extended from the anchor on shift — or
-   * nothing at all, if that word was already the whole selection.
+   * Put the cursor on a word. THE rule for both surfaces that have one.
    *
-   * That last case is the toggle. Without it a selection could only be cleared
-   * with Escape or by hitting a paragraph gap, so one you made by accident just
-   * sat there. The seek stays either way, which keeps the rule above true: the
-   * highlight goes away, the playhead still lands where you pointed.
+   * Landing on a word means "put the playhead here and select it"; landing on it
+   * with shift held means "stretch the live selection's focus end onto it, and
+   * leave the playhead alone" — reviewing a range you are still choosing must
+   * not keep jumping the video to its far end.
+   *
+   * Both the click path below and the keyboard cursor in Script go through this,
+   * so the two cannot drift into disagreeing about what a selection is.
+   */
+  const moveCursor = (id: string, extend: boolean) => {
+    const word = words.find((w) => w.id === id);
+    if (!word) return;
+    if (extend && selection) {
+      setSelection({ anchorId: selection.anchorId, focusId: id });
+      return;
+    }
+    setSelection({ anchorId: id, focusId: id });
+    seek(word.start);
+  };
+
+  /**
+   * Clicking a word is moveCursor, plus one thing a keypress cannot do: clicking
+   * the word that IS the whole selection clears it.
+   *
+   * That is the toggle. Without it a selection could only be cleared with Escape
+   * or by hitting a paragraph gap, so one you made by accident just sat there.
+   * The seek stays either way, which keeps the rule above true: the highlight
+   * goes away, the playhead still lands where you pointed.
+   *
+   * `clicks === 1` keeps the second half of a double-click out of it. That
+   * gesture means "play from here", and it would otherwise select on click one
+   * and unselect on click two, flickering on its way to playing.
    */
   const clickWord = (index: number, shift: boolean, clicks: number) => {
     const word = words[index];
     if (!word) return;
 
-    if (shift && selection) {
-      setSelection({ anchorId: selection.anchorId, focusId: word.id });
-      return;
-    }
-
-    // Only when this word IS the selection, not merely inside it — clicking
-    // one word of a run collapses onto it, the way any text editor does, and a
+    // Only when this word IS the selection, not merely inside it — clicking one
+    // word of a run collapses onto it, the way any text editor does, and a
     // second click then clears.
-    //
-    // `clicks === 1` keeps the second half of a double-click out of this. That
-    // gesture means "play from here", and it would otherwise select on click
-    // one and unselect on click two, flickering on its way to playing.
     const isWholeSelection =
       selection?.anchorId === word.id && selection?.focusId === word.id;
 
-    setSelection(isWholeSelection && clicks === 1 ? null : { anchorId: word.id, focusId: word.id });
-    seek(word.start);
+    if (!shift && isWholeSelection && clicks === 1) {
+      setSelection(null);
+      seek(word.start);
+      return;
+    }
+    moveCursor(word.id, shift);
   };
 
   const doFillers = () => {
@@ -1809,6 +1829,12 @@ export default function App() {
       }
       // Home and the arrows are advertised in the transport's own tooltips, so
       // they have to exist. They did not.
+      //
+      // These are the TRANSPORT's copies. With a word focused in the script the
+      // same keys drive the word cursor instead, and Script stops them before
+      // they reach this window listener — so the tooltips stay true either way
+      // (both land the playhead on an adjacent word), and only one of the two
+      // ever fires.
       else if (e.key === 'Home') { e.preventDefault(); seek(0); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); stepWord(-1); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); stepWord(1); }
@@ -2279,6 +2305,8 @@ export default function App() {
             onWordClick={clickWord}
             onCorrectWord={correctText}
             onSelectRange={(anchorId, focusId) => setSelection({ anchorId, focusId })}
+            onMoveCursor={moveCursor}
+            onDeleteSelection={() => setSelectionDeleted(true)}
             onRetranscribe={() => setDialog('transcribe')}
           />
         )}

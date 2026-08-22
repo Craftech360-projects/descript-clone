@@ -451,6 +451,22 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--text);
   border-color: var(--line-strong, var(--line));
 }
+/* The keyboard legend under it. --faint is the quietest text the palette has
+ * that still clears AA (6.9:1) — this is reference material you read once, not
+ * a control, and it must not compete with the button above it. */
+.script-keys {
+  margin-top: var(--s-3);
+  font-size: var(--t-micro);
+  color: var(--faint);
+  line-height: 1.9;
+}
+.script-keys kbd {
+  font: inherit;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
 
 .canvas-empty { max-width: 460px; margin: 12vh auto 0; text-align: center; }
 .canvas-empty h2 { font-size: var(--t-title); font-weight: 500; margin-bottom: var(--s-1); letter-spacing: -.02em; }
@@ -518,9 +534,31 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   text-decoration-color: color-mix(in srgb, var(--cut) 75%, transparent);
   text-decoration-thickness: 1.5px;
 }
+/* The keyboard cursor.
+ *
+ * :focus-visible, not :focus — a word takes DOM focus on mousedown too (that is
+ * what a roving tabindex costs), and a ring left behind by every click would be
+ * noise on top of the amber the click already draws.
+ *
+ * It has to be a SECOND signal, not a louder version of the selection: while
+ * Shift+Arrow extends a run, every word in it is amber and only this ring says
+ * which end is about to move. Hence a ring rather than another fill. */
+.w:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
 /* Black on amber: a highlighter on a page. --accent-fg is not optional here —
  * white on #ffb224 measures 1.8:1. This pair measures 10.8:1. */
 .w.sel { background: var(--accent); color: var(--accent-fg); }
+/* --focus is light gold, and on the gold a selection fills with it measures
+ * 1.56:1 — i.e. the ring would vanish on exactly the word that has it, since the
+ * cursor word is nearly always the selected one. Warm-black is the pair that
+ * reads there: 8.46:1 on --accent, 6.51:1 on the terracotta a selected CUT word
+ * takes. :not(.playing) because the karaoke fill is --accent-dim, a DARK amber
+ * that wins the cascade over .sel — light gold reads on it at 7.6:1 and
+ * warm-black would drop to 1.74:1. */
+.w.sel:not(.playing):focus-visible { outline-color: var(--accent-fg); }
 /* Selected AND cut: solid rose, keeping the strike. It cannot be a dark tint —
  * .w.sel has already committed the text to black, so the fill has to stay light
  * enough to carry it. Measured 6.2:1. */
@@ -2215,6 +2253,9 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   /* Script and rail share the one content slot; the m-view-* class App.tsx
    * puts on .app decides which of the two is the one. */
   .script { grid-area: content; padding: var(--s-3) var(--s-3) var(--s-6); }
+  /* The keyboard legend is for a keyboard. This breakpoint is the phone, where
+   * it wrapped to two lines of instructions for keys the device does not have. */
+  .script-keys { display: none; }
   .rail { grid-area: content; border-left: none; border-top: none; }
   .app.m-view-script .rail { display: none; }
   .app.m-view-tools .script { display: none; }

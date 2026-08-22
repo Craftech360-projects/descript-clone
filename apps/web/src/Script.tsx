@@ -6,6 +6,8 @@ import {
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
   type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type FocusEvent as ReactFocusEvent,
 } from 'react';
 import { toParagraphs, speakerLabel, type Paragraph } from '../../../packages/core/src/paragraphs.ts';
 import type { Transcript, Word } from '../../../packages/core/src/types.ts';
@@ -30,6 +32,17 @@ interface Props {
   onCorrectWord: (id: string, text: string) => void;
   /** Drag-select: the run from the word the drag began on to the one under the cursor now. */
   onSelectRange: (anchorId: string, focusId: string) => void;
+  /**
+   * Put the keyboard cursor on a word: select it and seek there, or — with
+   * `extend` — stretch the live selection's focus end onto it.
+   *
+   * Deliberately the same two rules a click and a shift-click follow (see
+   * moveCursor in App, which clickWord now goes through as well), so the mouse
+   * and the keyboard cannot end up disagreeing about what "the selection" is.
+   */
+  onMoveCursor: (id: string, extend: boolean) => void;
+  /** Cut the selection — the same edit the global Backspace makes. */
+  onDeleteSelection: () => void;
   /** Open the Transcribe dialog to redo the script. Sits at the end of the page. */
   onRetranscribe: () => void;
 }
@@ -52,24 +65,221 @@ export default function Script({
   onWordClick,
   onCorrectWord,
   onSelectRange,
+  onMoveCursor,
+  onDeleteSelection,
   onRetranscribe,
 }: Props) {
   const paragraphs = toParagraphs(transcript);
+  const pageRef = useRef<HTMLDivElement>(null);
 
   // Which word is currently being spelled-corrected inline, if any. A purely
   // local view concern — it is not part of the document — so it lives here and
-  // never touches the store until a commit. Double-click opens it; Enter or a
-  // click away commits; Escape cancels. See WordEditor below.
+  // never touches the store until a commit. Double-click or Enter opens it;
+  // Enter or a click away commits; Escape cancels. See WordEditor below.
   const [editingId, setEditingId] = useState<string | null>(null);
-  const commitEdit = (id: string, text: string) => {
+
+  // Where focus goes when an edit ENDS ON A KEY. The field is about to unmount,
+  // and focus would land on <body> — so a keyboard user who pressed Enter to fix
+  // a spelling would lose the cursor and have to Tab back in from the top of the
+  // page. A blur-commit must NOT do this: the click that caused the blur has
+  // already put focus somewhere the user chose, and yanking it back to the word
+  // would fight them.
+  const returnFocusTo = useRef<string | null>(null);
+
+  const commitEdit = (id: string, text: string, byKey: boolean) => {
+    if (byKey) returnFocusTo.current = id;
     setEditingId(null);
     onCorrectWord(id, text);
   };
+  const cancelEdit = (id: string, byKey: boolean) => {
+    if (byKey) returnFocusTo.current = id;
+    setEditingId(null);
+  };
+
+  useEffect(() => {
+    const id = returnFocusTo.current;
+    if (editingId !== null || id == null) return;
+    returnFocusTo.current = null;
+    focusWord(id);
+  }, [editingId]);
 
   // Word identity is by index into the flat list — that is what the caller's
   // selection and shift-ranges are expressed in. Ids are NOT indices: real ASR
   // ids run w0, w2, w4…, so this map is the only safe way across.
   const indexOf = new Map(transcript.words.map((w, i) => [w.id, i]));
+
+  // ── the keyboard cursor ─────────────────────────────────────────────────────
+  //
+  // The words a cursor can stand on, in the order they are painted. NOT
+  // transcript.words: with "Show cuts" off a deleted word is not in the DOM at
+  // all, so stepping onto one would focus nothing and strand the cursor
+  // mid-transcript with no way out but the mouse.
+  const visible = showDeleted ? transcript.words : transcript.words.filter((w) => !w.deleted);
+
+  // A roving tabindex: exactly ONE word is tabbable and the rest are -1, so Tab
+  // enters the script and then LEAVES it. Making every word tabbable would bury
+  // the next control behind 2282 stops, which is a worse trap than not being
+  // reachable at all.
+  //
+  // DOM focus is the real cursor; this state only exists so the right span
+  // renders tabIndex=0 and so Tab comes back to the word you left. It FOLLOWS
+  // focus (see onFocus below) rather than leading it, which is why every move
+  // here is a focusWord() call and not a setState.
+  const [cursorId, setCursorId] = useState<string | null>(null);
+  const cursorWord = cursorId == null ? undefined : transcript.words[indexOf.get(cursorId) ?? -1];
+  // A cursor word that has just been cut is gone from the DOM with "Show cuts"
+  // off, and a tabIndex=0 on a span that does not exist takes the whole script
+  // out of the tab order. Fall back to the first word.
+  const tabbableId =
+    cursorWord && (showDeleted || !cursorWord.deleted) ? cursorId : visible[0]?.id ?? null;
+
+  /** Move DOM focus onto a word and bring it on screen. */
+  function focusWord(id: string): void {
+    const el = pageRef.current?.querySelector<HTMLElement>(`[data-wid="${cssEscape(id)}"] > .w`);
+    if (!el) return;
+    // 'nearest', explicitly, rather than whatever focus() decides on its own: a
+    // step onto a word that is already on screen must not move the page at all,
+    // or holding an arrow key walks the transcript out from under you.
+    el.focus({ preventScroll: true });
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  const moveCursorTo = (id: string, extend: boolean) => {
+    onMoveCursor(id, extend);
+    focusWord(id);
+  };
+
+  /**
+   * The word one visual LINE away, in the column you started in.
+   *
+   * Measured off the DOM rather than computed, because prose wraps: where a line
+   * breaks is a layout fact that only the browser knows, and it changes with the
+   * splitter, the font and the window. The boxes come out in DOM order, which is
+   * `visible` order, so an index here is an index there.
+   */
+  const lineStep = (at: number, direction: 1 | -1): number => {
+    const els = pageRef.current?.querySelectorAll<HTMLElement>('[data-wid] > .w');
+    if (!els || els.length !== visible.length) return at;
+    const box = (i: number) => els[i].getBoundingClientRect();
+    const start = box(at);
+    // Vertical OVERLAP, not equal tops: sub-pixel layout and a taller neighbour
+    // move `top` by fractions of a pixel, so equality is the first thing to
+    // break. Measured on this page: a word box is 22.5px tall and lines sit
+    // 29px apart (17px × 1.7), so two real lines clear each other by 6.5px and
+    // there is no way for the test to be ambiguous.
+    const shares = (a: DOMRect, b: DOMRect) => a.top < b.bottom && b.top < a.bottom;
+
+    // Walk off the line we are on; the first word past it starts the next one.
+    let i = at + direction;
+    while (i >= 0 && i < els.length && shares(box(i), start)) i += direction;
+    if (i < 0 || i >= els.length) return at;
+
+    const line = box(i);
+    const column = (start.left + start.right) / 2;
+    const gap = (r: DOMRect) => Math.abs((r.left + r.right) / 2 - column);
+    let best = i;
+    let bestGap = gap(line);
+    for (let j = i + direction; j >= 0 && j < els.length; j += direction) {
+      const r = box(j);
+      if (!shares(r, line)) break;
+      // Sweeping a line, the distance to the column falls and then rises. The
+      // first rise is the answer; measuring the rest of the line cannot beat it.
+      if (gap(r) >= bestGap) break;
+      best = j;
+      bestGap = gap(r);
+    }
+    return best;
+  };
+
+  /**
+   * The transcript, from the keyboard.
+   *
+   * This lives here and not in App's global handler because every one of these
+   * keys means something only in terms of the RENDERED text: which words are on
+   * screen, which line they wrapped onto, which one has focus. App keeps the
+   * keys that mean something to the whole app (undo, Space, Escape, the razor).
+   *
+   * Handled keys are stopped, not just prevented — App's window listener binds
+   * ArrowLeft/ArrowRight to the transport's word-step, and both firing would
+   * scrub the playhead away from the word you just moved onto.
+   */
+  const onKeyDown = (e: ReactKeyboardEvent) => {
+    // Only keys pressed ON a word, and only while none of them is a field.
+    // Re-transcribe is a button on this same page and Enter there has to stay
+    // Enter-the-button; an open WordEditor stops its own keys before they get
+    // this far, and the second test says so out loud rather than relying on it.
+    const from = (e.target as HTMLElement).closest<HTMLElement>('[data-wid]')?.dataset.wid;
+    if (from == null || editingId != null) return;
+    // Shift is the only modifier that means anything here. The rest are commands
+    // — Cmd+Z, Cmd+S, Alt+Left for browser-back — and swallowing those to move a
+    // word cursor would be a worse bug than not moving it.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    const at = visible.findIndex((w) => w.id === from);
+    if (at === -1) return;
+
+    let to: number;
+    switch (e.key) {
+      case 'ArrowRight': to = at + 1; break;
+      case 'ArrowLeft': to = at - 1; break;
+      case 'ArrowDown': to = lineStep(at, 1); break;
+      case 'ArrowUp': to = lineStep(at, -1); break;
+      case 'Home': to = 0; break;
+      case 'End': to = visible.length - 1; break;
+
+      case 'Enter':
+        e.preventDefault();
+        e.stopPropagation();
+        setEditingId(from);
+        return;
+
+      case 'Backspace':
+      case 'Delete': {
+        // With nothing selected there is nothing to cut: leave it to App's
+        // handler, which no-ops, rather than swallowing the key here.
+        if (selection.size === 0) return;
+        // Where the cursor lands afterwards. Every word in the selection is
+        // about to go, so the first word PAST it is the first survivor — and
+        // landing there is what makes Backspace repeatable, the way holding it
+        // down in a text editor eats one word after another. Falling back to the
+        // word BEFORE the run covers cutting the tail of the transcript.
+        let first = -1;
+        let last = -1;
+        for (let i = 0; i < visible.length; i++) {
+          if (!selection.has(visible[i].id)) continue;
+          if (first === -1) first = i;
+          last = i;
+        }
+        const next = visible[last + 1] ?? visible[first - 1];
+        e.preventDefault();
+        e.stopPropagation();
+        onDeleteSelection();
+        // Before React unmounts the cut words: this span exists in the DOM we
+        // are still standing in, and it survives the re-render (keyed by id), so
+        // focus rides through the edit instead of falling to <body>.
+        if (next) moveCursorTo(next.id, false);
+        return;
+      }
+
+      default: return;
+    }
+
+    // Swallowed even when the cursor cannot move: at the last word, Right must
+    // not fall through to the transport and scrub the playhead off the word you
+    // are looking at.
+    e.preventDefault();
+    e.stopPropagation();
+    const target = visible[Math.min(Math.max(to, 0), visible.length - 1)];
+    if (target && target.id !== from) moveCursorTo(target.id, e.shiftKey);
+  };
+
+  // Focus is the cursor, so the cursor is whatever took focus — a click, a Tab,
+  // or one of our own focusWord calls. focusin bubbles, so one handler on the
+  // page covers every word without a listener per span.
+  const onFocus = (e: ReactFocusEvent) => {
+    const wid = (e.target as HTMLElement).closest<HTMLElement>('[data-wid]')?.dataset.wid;
+    if (wid) setCursorId(wid);
+  };
 
   // ── drag to select ──────────────────────────────────────────────────────────
   //
@@ -84,6 +294,11 @@ export default function Script({
   // causes a repaint, and only when the covered run actually changes.
   const anchorId = useRef<string | null>(null);
   const dragged = useRef(false);
+  // The far end of the drag, so the release can leave DOM focus there. The
+  // keyboard cursor IS the selection's focus end — without this, a Shift+Arrow
+  // straight after a drag would extend from the word the drag STARTED on and
+  // collapse everything the drag just painted.
+  const dragFocusId = useRef<string | null>(null);
 
   // Double-click detection, done by hand rather than trusting the native
   // dblclick event or e.detail — both of which the drag-select machinery can
@@ -124,11 +339,14 @@ export default function Script({
       dragged.current = true;
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* no pointer */ }
     }
+    dragFocusId.current = wid;
     onSelectRange(anchorId.current, wid);
   };
 
   const onPointerUp = () => {
     anchorId.current = null;
+    if (dragged.current && dragFocusId.current) focusWord(dragFocusId.current);
+    dragFocusId.current = null;
   };
 
   // A drag ends in a click event on the anchor word; left unchecked it would run
@@ -148,10 +366,13 @@ export default function Script({
     // obvious "empty" space dead; the scroll container is the honest hit target.
     <div
       className="page"
+      ref={pageRef}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onClickCapture={onClickCapture}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
     >
       {paragraphs.map((para, p) => {
         const previous = paragraphs[p - 1];
@@ -167,11 +388,12 @@ export default function Script({
             color={colors.get(para.speaker)}
             indexOf={indexOf}
             editingId={editingId}
+            tabbableId={tabbableId}
             lastClick={lastClick}
             onWordClick={onWordClick}
             onStartEdit={setEditingId}
             onCommitEdit={commitEdit}
-            onCancelEdit={() => setEditingId(null)}
+            onCancelEdit={cancelEdit}
           />
         );
       })}
@@ -183,6 +405,17 @@ export default function Script({
         <button type="button" className="retrans" onClick={onRetranscribe}>
           Re-transcribe…
         </button>
+        {/* The keys, where the text ends.
+          *
+          * Only Enter is genuinely undiscoverable — the arrows are already in
+          * the transport's tooltips and Backspace is named in the rail — but a
+          * legend that listed one key would read as a list of one. It sits at
+          * the foot of the page as a footnote, at the quietest weight the
+          * palette has, because it is reference and not an affordance. */}
+        <p className="script-keys">
+          <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> move · <kbd>Shift</kbd> select ·{' '}
+          <kbd>Enter</kbd> fix a spelling · <kbd>Backspace</kbd> cut
+        </p>
       </div>
     </div>
   );
@@ -200,12 +433,14 @@ interface ParaProps {
   /** The word being spelling-corrected, or null. Passed to every paragraph, but
    * only the one holding it swaps its span for a field — the rest ignore it. */
   editingId: string | null;
+  /** The one word carrying tabIndex=0. Same deal: every paragraph is told, one acts. */
+  tabbableId: string | null;
   /** Shared across paragraphs so a double-click is detected wherever it lands. */
   lastClick: MutableRefObject<{ id: string; at: number }>;
   onWordClick: (index: number, shift: boolean, clicks: number) => void;
   onStartEdit: (id: string) => void;
-  onCommitEdit: (id: string, text: string) => void;
-  onCancelEdit: () => void;
+  onCommitEdit: (id: string, text: string, byKey: boolean) => void;
+  onCancelEdit: (id: string, byKey: boolean) => void;
 }
 
 /**
@@ -223,6 +458,7 @@ const Para = memo(function Para({
   color,
   indexOf,
   editingId,
+  tabbableId,
   lastClick,
   onWordClick,
   onStartEdit,
@@ -271,12 +507,27 @@ const Para = memo(function Para({
                 <WordEditor
                   initial={word.text}
                   className={className(word, false, selected, false) + ' editing'}
-                  onCommit={(text) => onCommitEdit(word.id, text)}
-                  onCancel={onCancelEdit}
+                  onCommit={(text, byKey) => onCommitEdit(word.id, text, byKey)}
+                  onCancel={(byKey) => onCancelEdit(word.id, byKey)}
                 />
               ) : (
                 <span
                   className={className(word, i === playingIndex, selected, flash.has(word.id))}
+                  /**
+                   * Roving tabindex. One word in the whole script is tabbable;
+                   * the others are -1 so the cursor can be MOVED onto them
+                   * without any of them being a Tab stop.
+                   *
+                   * No role, deliberately. The obvious candidate is a listbox of
+                   * options, but that would make a screen reader announce the
+                   * transcript as 2282 options instead of reading it as the
+                   * prose it is — and role="button" is worse still: App's Space
+                   * handler steps aside for [role="button"], so play/pause would
+                   * die on every focused word to activate a span that has no
+                   * activation behaviour at all.
+                   */
+                  tabIndex={word.id === tabbableId ? 0 : -1}
+                  aria-keyshortcuts="Enter Backspace"
                   // Single click selects and seeks (handled upstream). A second
                   // click on the SAME word within 450ms opens the inline editor.
                   // We time it ourselves rather than trust the native dblclick /
@@ -306,8 +557,9 @@ const Para = memo(function Para({
 interface WordEditorProps {
   initial: string;
   className: string;
-  onCommit: (text: string) => void;
-  onCancel: () => void;
+  /** `byKey` distinguishes Enter/Escape from a click-away — see returnFocusTo. */
+  onCommit: (text: string, byKey: boolean) => void;
+  onCancel: (byKey: boolean) => void;
 }
 
 /**
@@ -344,15 +596,15 @@ function WordEditor({ initial, className, onCommit, onCancel }: WordEditorProps)
     sel?.addRange(range);
   }, [initial]);
 
-  const finish = (commit: boolean) => {
+  const finish = (commit: boolean, byKey: boolean) => {
     if (done.current) return;
     done.current = true;
     // Collapse any pasted newlines/runs of space — this is one word, always.
     const text = (ref.current?.textContent ?? '').replace(/\s+/g, ' ').trim();
     // An empty field is a cancel, not a delete: use the transcript's own
     // delete for that, which is reversible and cuts the media too.
-    if (commit && text) onCommit(text);
-    else onCancel();
+    if (commit && text) onCommit(text, byKey);
+    else onCancel(byKey);
   };
 
   return (
@@ -365,12 +617,12 @@ function WordEditor({ initial, className, onCommit, onCancel }: WordEditorProps)
       role="textbox"
       aria-label={`Edit word: ${initial}`}
       onKeyDown={(e) => {
-        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+        if (e.key === 'Enter') { e.preventDefault(); finish(true, true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false, true); }
         // Keep keystrokes off the page's shortcut handler regardless.
         e.stopPropagation();
       }}
-      onBlur={() => finish(true)}
+      onBlur={() => finish(true, false)}
       // While it is a field it is not a word: swallow the click/drag/double-click
       // gestures so they neither seek nor re-open the editor mid-edit.
       onClick={(e) => e.stopPropagation()}
@@ -391,6 +643,11 @@ function className(word: Word, playing: boolean, selected: boolean, flashing: bo
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+/** Ids come from ASR, so they are not guaranteed to be selector-safe. */
+function cssEscape(value: string): string {
+  return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value;
 }
 
 function timecode(seconds: number): string {

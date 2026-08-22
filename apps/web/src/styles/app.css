@@ -2783,3 +2783,67 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   line-height: var(--lh-normal);
   word-break: break-word;
 }
+
+/* ── folders on the dashboard ────────────────────────────────────────────── */
+.dash-newfolder { display: flex; gap: var(--s-2); margin-bottom: var(--s-5); max-width: 46rem; }
+.dash-newfolder input {
+  flex: 1; min-width: 0;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-base);
+  padding: var(--s-2) var(--s-3);
+}
+.dash-newfolder input:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+
+.dash-folders {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: var(--s-3);
+}
+.fcard {
+  display: grid; gap: var(--s-1); justify-items: start; text-align: left;
+  padding: var(--s-4);
+  background: var(--chrome);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.fcard:hover { background: var(--hover); border-color: var(--line-strong); }
+.fcard:focus-visible { outline: none; box-shadow: var(--ring); }
+.fcard-name { font-size: var(--t-lg); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-tight); }
+.fcard-meta { font-size: var(--t-small); color: var(--faint); }
+/* Unfiled is a holding pen, not a folder — dashed, so it never reads as one. */
+.fcard-loose { border-style: dashed; background: transparent; }
+
+.dash-back {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  background: none; border: none; padding: 0;
+  color: var(--faint); font-size: var(--t-ui); cursor: pointer;
+  margin-right: var(--s-3);
+}
+.dash-back:hover { color: var(--text); }
+.dash-folder-acts { display: inline-flex; gap: var(--s-2); margin-left: auto; }
+.dash-folder-acts button {
+  background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--dim); font-size: var(--t-small); padding: var(--s-1) var(--s-2); cursor: pointer;
+}
+.dash-folder-acts button:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* The folder's memory. Given real room, because the whole feature turns on
+   someone actually writing a paragraph here. */
+.dash-memory { max-width: 46rem; margin-bottom: var(--s-5); }
+.dash-memory h2 {
+  font-size: var(--t-micro); font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps); text-transform: uppercase;
+  color: var(--faint); margin: 0 0 var(--s-2);
+}
+.dash-memory textarea {
+  width: 100%;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui);
+  font-size: var(--t-base); line-height: var(--lh-normal);
+  padding: var(--s-3); resize: vertical; min-height: 8em;
+}
+.dash-memory textarea:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.dash-memory-hint { margin: var(--s-2) 0 0; font-size: var(--t-small); color: var(--faint); line-height: var(--lh-normal); }

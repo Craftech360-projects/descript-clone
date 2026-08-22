@@ -34,10 +34,6 @@ export default function SocialPanel(p: {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  // The brief is edited here and saved on blur, not on every keystroke — it is
-  // a paragraph of prose, and a write per character is noise.
-  const [brief, setBrief] = useState('');
-  const [newName, setNewName] = useState('');
 
   const folderId = p.project?.folderId ?? '';
   const folder = folders.find((f) => f.id === folderId) ?? null;
@@ -56,44 +52,9 @@ export default function SocialPanel(p: {
   useEffect(() => {
     if (!p.model) void initAgent(p.defaultModel, p.agentEnabled);
   }, [p.model, p.defaultModel, p.agentEnabled]);
-  useEffect(() => { setBrief(folder?.brief ?? ''); }, [folder?.id, folder?.brief]);
   useEffect(() => { setDraft(null); setError(null); }, [p.project?.id]);
 
   if (!p.project) return <div className="panel"><Hint>Open a project to write its post.</Hint></div>;
-
-  const attach = async (id: string) => {
-    setError(null);
-    try {
-      await api.setProjectFolder(p.project!.id, id || null);
-      await load();
-      setNote(id ? 'Moved into that folder.' : 'Taken out of its folder.');
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  const saveBrief = async () => {
-    if (!folder || brief === folder.brief) return;
-    try {
-      await api.folders.update(folder.id, { brief });
-      await load();
-      setNote('Memory saved. It will shape the next draft.');
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
-  const createFolder = async () => {
-    if (!newName.trim()) return;
-    try {
-      const made = await api.folders.create(newName.trim());
-      setNewName('');
-      await load();
-      await attach(made.id);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
 
   const write = async () => {
     setBusy(true);
@@ -119,57 +80,18 @@ export default function SocialPanel(p: {
 
   return (
     <div className="panel social">
-      <Field label="Folder">
-        <select
-          className="social-folder"
-          value={folderId}
-          onChange={(e) => void attach(e.target.value)}
-          aria-label="Folder this project belongs to"
-        >
-          <option value="">No folder</option>
-          {folders.map((f) => (
-            <option key={f.id} value={f.id}>{f.name}</option>
-          ))}
-        </select>
-
-        <div className="social-new">
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void createFolder(); }}
-            placeholder="New folder — Cheeko, China trip…"
-            aria-label="New folder name"
-          />
-          <button onClick={() => void createFolder()} disabled={!newName.trim()}>Add</button>
-        </div>
-      </Field>
-
-      {folder && (
-        <Field label="Memory">
-          {/* The whole point of the folder. Prose rather than fields for tone and
-              audience: a form collects what its author imagined mattered, a
-              paragraph collects what the person actually knows. */}
-          <textarea
-            className="social-brief"
-            value={brief}
-            onChange={(e) => setBrief(e.target.value)}
-            onBlur={() => void saveBrief()}
-            rows={7}
-            placeholder={`What should the AI know before it writes for ${folder.name}?\n\nWho is in these videos, what the channel is, who watches it, how titles usually sound.`}
-            aria-label={`What the AI should know about ${folder.name}`}
-          />
-          <Hint>
-            Saved when you click away. This is prepended to every draft for{' '}
-            <strong>{folder.name}</strong> — it is what makes the copy sound like your
-            channel instead of a summary of the words.
-          </Hint>
-        </Field>
-      )}
-
-      {!folder && (
+      {/* The memory is edited on the folder's own page, where the folder is.
+          Here it is only reported, so you can see WHY the copy reads as it does
+          without a second place to edit the same paragraph. */}
+      {folder ? (
         <Hint>
-          Put this in a folder to give the AI a memory. Without one it writes from the
-          transcript alone, which reads like a description rather than a title.
+          Writing with <strong>{folder.name}</strong>&rsquo;s memory
+          {folder.brief.trim() ? '' : ' — which is still empty. Add one on the folder page.'}
+        </Hint>
+      ) : (
+        <Hint>
+          This project is not in a folder, so there is no memory to write from — the copy will
+          read like a summary of the words. Put it in a folder from the projects page.
         </Hint>
       )}
 

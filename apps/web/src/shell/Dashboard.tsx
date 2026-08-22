@@ -1,10 +1,25 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Icon from '../ui/Icon.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
-import type { MediaItem } from '../api.ts';
+import type { Folder, MediaItem } from '../api.ts';
 
 interface Props {
   projects: MediaItem[];
+  /** Every folder, for the top level. */
+  folders: Folder[];
+  /**
+   * The folder currently open, or null at the top level.
+   *
+   * Navigation state rather than a filter: the dashboard shows FOLDERS until you
+   * are inside one, and projects only within. A project belongs somewhere.
+   */
+  openFolder: Folder | null;
+  onOpenFolder: (id: string | null) => void;
+  onCreateFolder: (name: string) => void;
+  onRenameFolder: (id: string, name: string) => void;
+  onDeleteFolder: (id: string) => void;
+  /** Save the open folder's memory — what the AI should know about this work. */
+  onSaveBrief: (id: string, brief: string) => void;
   /** An import is in flight — a placeholder card holds its slot. */
   importing: boolean;
   /** Progress of the job behind the import, 0..1, or null when there is none. */
@@ -215,6 +230,13 @@ function ProjectCard({ item, onOpen, onDelete, onRename }: {
  */
 export default function Dashboard({
   projects,
+  folders,
+  openFolder,
+  onOpenFolder,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  onSaveBrief,
   importing,
   progress,
   opening,
@@ -227,12 +249,26 @@ export default function Dashboard({
   onOpenSettings,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [newFolder, setNewFolder] = useState('');
+  /**
+   * The open folder's memory, edited locally and saved on blur.
+   *
+   * Prose, not a form: a form with fields for "tone" and "audience" collects
+   * what the form's author imagined mattered, while a paragraph collects what
+   * the person actually knows about their own work.
+   */
+  const [brief, setBrief] = useState('');
+  useEffect(() => { setBrief(openFolder?.brief ?? ''); }, [openFolder?.id, openFolder?.brief]);
   /** A file is over the window. Drives the drop outline; never a layout change. */
   const [dropping, setDropping] = useState(false);
   /** dragenter/leave fire per descendant, so the outline needs a depth count. */
   const depth = useRef(0);
 
   const take = (file: File | undefined) => {
+    // A drop needs somewhere to land. At the top level there is no folder yet,
+    // and silently filing it under "Unfiled" would teach people that folders are
+    // decoration.
+    if (file && openFolder === null) return;
     if (file) onImport(file);
   };
 
@@ -280,17 +316,161 @@ export default function Dashboard({
       </header>
 
       <div className="dash-body">
-        <div className="dash-head">
-          <h1>Projects</h1>
-          <span className="dash-count">
-            {projects.length === 0
-              ? 'Nothing yet'
-              : `${projects.length} project${projects.length === 1 ? '' : 's'}`}
-          </span>
-        </div>
+        {/*
+          Two levels, not a filter.
 
-        {error && <p className="error" onClick={onDismissError}>{error}</p>}
+          The top level is FOLDERS: a piece of work is a series before it is a
+          file, and the folder is where its standing context lives. Projects
+          appear once you are inside one, which is also the only place an import
+          can land somewhere meaningful.
+        */}
+        {openFolder === null ? (
+          <>
+            <div className="dash-head">
+              <h1>Folders</h1>
+              <span className="dash-count">
+                {folders.length === 0
+                  ? 'None yet'
+                  : `${folders.length} folder${folders.length === 1 ? '' : 's'}`}
+              </span>
+            </div>
 
+            {error && <p className="error" onClick={onDismissError}>{error}</p>}
+
+            <div className="dash-newfolder">
+              <input
+                value={newFolder}
+                onChange={(e) => setNewFolder(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newFolder.trim()) {
+                    onCreateFolder(newFolder.trim());
+                    setNewFolder('');
+                  }
+                }}
+                placeholder="New folder — Cheeko, China trip, Client work…"
+                aria-label="New folder name"
+              />
+              <button
+                className="primary"
+                disabled={!newFolder.trim()}
+                onClick={() => { onCreateFolder(newFolder.trim()); setNewFolder(''); }}
+              >
+                Create folder
+              </button>
+            </div>
+
+            <div className="dash-folders">
+              {folders.map((f) => {
+                const count = projects.filter((p) => p.folderId === f.id).length;
+                return (
+                  <button
+                    key={f.id}
+                    className="fcard"
+                    onClick={() => onOpenFolder(f.id)}
+                    aria-label={`Open folder ${f.name}`}
+                  >
+                    <Icon name="video" size={22} />
+                    <span className="fcard-name">{f.name}</span>
+                    <span className="fcard-meta">
+                      {count === 0 ? 'Empty' : `${count} project${count === 1 ? '' : 's'}`}
+                      {f.brief.trim() ? ' · has memory' : ' · no memory yet'}
+                    </span>
+                  </button>
+                );
+              })}
+
+              {/* Anything imported before folders existed. Not an error state —
+                  it is where every project starts until it is put somewhere. */}
+              {projects.some((p) => !p.folderId) && (
+                <button
+                  className="fcard fcard-loose"
+                  onClick={() => onOpenFolder('')}
+                  aria-label="Open unfiled projects"
+                >
+                  <Icon name="video" size={22} />
+                  <span className="fcard-name">Unfiled</span>
+                  <span className="fcard-meta">
+                    {projects.filter((p) => !p.folderId).length} project
+                    {projects.filter((p) => !p.folderId).length === 1 ? '' : 's'} · no memory
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {folders.length === 0 && (
+              <p className="dash-empty">
+                Make a folder for each kind of video you make. Everything inside it shares one
+                memory — who is in it, what the channel is, how the titles usually sound — and that
+                is what makes the titles and descriptions sound like yours.
+              </p>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="dash-head">
+              <button className="dash-back" onClick={() => onOpenFolder(null)}>
+                <Icon name="chevron-left" size={14} /> All folders
+              </button>
+              <h1>{openFolder.id ? openFolder.name : 'Unfiled'}</h1>
+              <span className="dash-count">
+                {projects.length === 0
+                  ? 'Nothing yet'
+                  : `${projects.length} project${projects.length === 1 ? '' : 's'}`}
+              </span>
+              {openFolder.id && (
+                <span className="dash-folder-acts">
+                  <button
+                    onClick={() => {
+                      const name = prompt('Rename folder', openFolder.name);
+                      if (name?.trim()) onRenameFolder(openFolder.id, name.trim());
+                    }}
+                  >
+                    Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (confirm(`Delete the folder "${openFolder.name}"? The videos inside it are kept.`))
+                        onDeleteFolder(openFolder.id);
+                    }}
+                  >
+                    Delete folder
+                  </button>
+                </span>
+              )}
+            </div>
+
+            {error && <p className="error" onClick={onDismissError}>{error}</p>}
+
+            {openFolder.id ? (
+              <section className="dash-memory">
+                <h2>Memory</h2>
+                <textarea
+                  value={brief}
+                  onChange={(e) => setBrief(e.target.value)}
+                  onBlur={() => { if (brief !== openFolder.brief) onSaveBrief(openFolder.id, brief); }}
+                  rows={6}
+                  placeholder={`What should the AI know about everything in ${openFolder.name}?\n\nWho is in these videos, what the channel is, who watches it, how titles usually sound.`}
+                  aria-label={`What the AI should know about ${openFolder.name}`}
+                />
+                <p className="dash-memory-hint">
+                  Saved when you click away. Every video in this folder is written with this in
+                  mind — it is the difference between “Listen to a silly crow story” and “Cheeko’s
+                  first try at a rhyming game”.
+                </p>
+              </section>
+            ) : (
+              <p className="dash-empty">
+                These are not in a folder yet, so they have no memory to write from. Make a folder
+                and move them in.
+              </p>
+            )}
+          </>
+        )}
+
+        {/* Projects live INSIDE a folder. At the top level there is nothing to
+            show here — and an import tile at the top level would have to land
+            somewhere, which is exactly the decision the folder makes. */}
+        {openFolder !== null && (
         <div className={opening ? 'dash-grid busy' : 'dash-grid'}>
           <button
             className="dcard dcard-new"
@@ -331,8 +511,9 @@ export default function Dashboard({
             />
           ))}
         </div>
+        )}
 
-        {projects.length === 0 && !importing && (
+        {openFolder !== null && projects.length === 0 && !importing && (
           <p className="dash-empty">
             Drop a file anywhere on this page, or use the tile above. Nothing is transcribed
             until you ask for it.

@@ -9,6 +9,7 @@ import {
   type Capabilities,
   type Clip,
   type CustomFont,
+  type Folder,
   type ImageAsset,
   type JobKind,
   type MediaItem,
@@ -207,6 +208,55 @@ export default function App() {
   }, []);
   /** Why the workspace could not boot. Read by the gate, not by the banner. */
   const [bootError, setBootError] = useState<string | null>(null);
+
+  /**
+   * Folders, and which one is open.
+   *
+   * `null` is the top level (a list of folders); a folder id is inside that one;
+   * `''` is the Unfiled bucket. Navigation state, deliberately not persisted —
+   * coming back to the app should show you the whole shelf, not wherever you
+   * happened to stop.
+   */
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+
+  const loadFolders = useCallback(
+    () => api.folders.list().then(setFolders).catch((e) => setError(`Could not load folders: ${e.message}`)),
+    [],
+  );
+
+  const createFolder = async (name: string) => {
+    try {
+      const made = await api.folders.create(name);
+      await loadFolders();
+      // Straight into it: you made a folder in order to put something in it.
+      setOpenFolderId(made.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const patchFolder = async (id: string, patch: { name?: string; brief?: string }) => {
+    try {
+      await api.folders.update(id, patch);
+      await loadFolders();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const removeFolder = async (id: string) => {
+    try {
+      await api.folders.remove(id);
+      await loadFolders();
+      // The videos survive; only the label is gone. Show them rather than
+      // leaving the user staring at a folder that no longer exists.
+      await api.list().then(setLibrary).catch(() => {});
+      setOpenFolderId(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
   const [notice, setNotice] = useState<string | null>(null);
 
   /** The long-running job in flight, if any: what it is and how far along. */
@@ -376,6 +426,7 @@ export default function App() {
     // user is told their entire library is gone.
     api.list().then(setLibrary).catch((e) => setError(`Could not load your projects: ${e.message}`));
     api.fonts.list().then(setCustomFonts).catch((e) => setError(`Could not load your fonts: ${e.message}`));
+    void loadFolders();
   }, []);
 
   useEffect(() => { loadWorkspace(); }, [loadWorkspace]);
@@ -654,6 +705,18 @@ export default function App() {
   const importFile = (file: File) =>
     run('import', async () => {
       const p = await api.import(file);
+      // Land it where the user is standing. An import made inside a folder
+      // belongs to that folder — otherwise the folder is a label you have to
+      // remember to apply, which is the thing folders are supposed to replace.
+      if (openFolderId) {
+        try {
+          await api.setProjectFolder(p.id, openFolderId);
+          p.folderId = openFolderId;
+        } catch {
+          // A failed filing must not lose the import — the project exists and is
+          // openable; it just sits in Unfiled until it is moved.
+        }
+      }
       setProject(p);
       openTranscript(p, editDefaults(caps));
       setResult(null);
@@ -2196,7 +2259,25 @@ export default function App() {
     return (
       <>
         <Dashboard
-          projects={library}
+          /* Only what is in the open folder. '' is the Unfiled bucket — projects
+             that predate folders or were taken out of one. */
+          projects={
+            openFolderId === null
+              ? library
+              : library.filter((p) => (p.folderId ?? '') === openFolderId)
+          }
+          folders={folders}
+          openFolder={
+            openFolderId === null
+              ? null
+              : folders.find((f) => f.id === openFolderId) ??
+                { id: '', name: 'Unfiled', brief: '', createdAt: '', updatedAt: '' }
+          }
+          onOpenFolder={setOpenFolderId}
+          onCreateFolder={(name) => void createFolder(name)}
+          onRenameFolder={(id, name) => void patchFolder(id, { name })}
+          onDeleteFolder={(id) => void removeFolder(id)}
+          onSaveBrief={(id, brief) => void patchFolder(id, { brief })}
           importing={busy === 'import'}
           progress={job?.progress ?? null}
           opening={busy === 'open'}

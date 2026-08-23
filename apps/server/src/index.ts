@@ -16,6 +16,7 @@ import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTo
 import { transcribe, defaultAsrOptions, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
+import * as denoise from './denoise.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
@@ -95,6 +96,9 @@ setAppleSpeechReady(await appleSpeech.available());
 // Ask ffmpeg once whether it can burn captions, so the answer is a synchronous
 // fact for every request handler and for /api/capabilities. See canBurnCaptions.
 await canBurnCaptions();
+// Same shape as canBurnCaptions above: a fact about the machine, resolved once,
+// because /api/capabilities and the render route cannot await a probe per call.
+const denoiseReady = await denoise.available();
 
 // And whether we can draw them ourselves when ffmpeg cannot. One of the two has
 // to be true for "Burn captions" to mean anything.
@@ -244,6 +248,12 @@ app.get('/api/capabilities', (c) =>
         (model.provider === 'deepgram' && CONFIG.hasDeepgramAsr()) ||
         (model.provider === 'apple' && CONFIG.hasAppleSpeech()),
     })),
+    /**
+     * Whether the trained voice cleaner is installed. The toggle is hidden
+     * rather than disabled when it is not — an offer the server cannot keep is
+     * worse than no offer. Probed once at boot; see denoise.ts.
+     */
+    canCleanVoice: denoiseReady,
     asrDefaults: defaultAsrOptions(),
     editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
     /**
@@ -1140,7 +1150,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, frame, color, overlays } =
+  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, denoise: denoise2, frame, color, overlays } =
     await c.req.json<{
     deletedIds: string[];
     texts?: Record<string, unknown>;
@@ -1149,6 +1159,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
     speed?: number;
     cut?: Partial<CutSettings>;
     studioSound?: boolean;
+    denoise?: boolean;
     frame?: Partial<FrameSettings>;
     color?: Partial<ColorSettings>;
     overlays?: unknown;
@@ -1193,6 +1204,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   // cannot poison the compiler on the next render.
   if (cut) project.cut = sanitizeCut(cut);
   if (studioSound !== undefined) project.studioSound = Boolean(studioSound);
+  if (denoise2 !== undefined) project.denoise = Boolean(denoise2);
   // normalizeFrame is the coercion, same contract as sanitizeCut above: a bad
   // width, a NaN zoom, or an unknown preset off the wire cannot reach the graph.
   if (frame !== undefined) project.frame = normalizeFrame(frame);
@@ -1563,10 +1575,40 @@ app.post('/api/projects/:id/render', async (c) => {
 
   const job = jobs.start(project.id, 'render', 'Encoding', async (runner) => {
     const started = Date.now();
+
+    /**
+     * Voice cleanup, when it is asked for.
+     *
+     * Runs BEFORE the render and swaps the input, rather than joining the filter
+     * chain — DeepFilterNet is a model, not a filter. What comes back is the same
+     * media with the same picture (stream-copied, not re-encoded) and cleaned
+     * audio, so everything below this line is unchanged and unaware.
+     *
+     * Cached per source, so only the first render of a clip pays for it.
+     *
+     * A multi-clip project cleans each clip; they are separate files and the
+     * stitch reads them individually.
+     */
+    const wantsClean = Boolean(options.denoise ?? project.denoise);
+    let input = project.sourcePath;
+    let clipInputs = render?.clips;
+    if (wantsClean) {
+      runner.onProgress({ progress: -1, stage: 'Cleaning voice' });
+      input = await denoise.ensureCleaned(project.sourcePath, (stage) =>
+        runner.onProgress({ progress: -1, stage }),
+      );
+      if (clipInputs) {
+        clipInputs = [];
+        for (const cl of render!.clips) {
+          clipInputs.push({ ...cl, input: await denoise.ensureCleaned(cl.input) });
+        }
+      }
+    }
+
     const { segments, burnedIn } = await renderEdl(
       edl,
       {
-        input: project.sourcePath,
+        input,
         output: outPath,
         hasVideo: project.hasVideo,
         subtitles,
@@ -1576,11 +1618,14 @@ app.post('/api/projects/:id/render', async (c) => {
         // Present only for a multi-clip project: renderEdl then stitches these
         // source files instead of cutting the single input. width/height give the
         // canonical frame the clips are letterboxed into.
-        clips: render?.clips,
+        clips: clipInputs,
         width: render?.width,
         height: render?.height,
         // The music bed, mixed under the finished program. Absent = clean render.
         bgMusic,
+        // Tells the voice chain the model already cleaned this input, so it does
+        // not denoise twice or amplify what the model left behind.
+        denoised: wantsClean,
         // The Studio Sound voice chain, run on the program before the bed. Live
         // settings win over the stored flag for the same reason the music ones do:
         // an Export fired mid-debounce should use the toggle on screen.

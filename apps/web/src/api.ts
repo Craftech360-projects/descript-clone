@@ -57,6 +57,8 @@ export interface Project {
   cut?: CutSettings;
   /** Studio sound voice enhancer */
   studioSound?: boolean;
+  /** Clean the voice with the trained denoiser on export. See server denoise.ts. */
+  denoise?: boolean;
   /** Output frame: target resolution plus the zoom/pan that fills it. Absent on
    *  projects that have never left the source's own resolution. */
   frame?: FrameSettings;
@@ -292,6 +294,8 @@ export interface CustomFont {
 
 export interface Capabilities {
   hasAsr: boolean;
+  /** Whether the server has DeepFilterNet installed — gates the Clean voice control. */
+  canCleanVoice?: boolean;
   asrModels: Array<{
     id: string;
     // Kept in step with ASR_MODELS in apps/server/src/config.ts. This union had
@@ -629,6 +633,8 @@ export const api = {
       speed?: number;
       cut?: CutSettings;
       studioSound?: boolean;
+      /** Clean the voice with DeepFilterNet on export. See denoise.ts. */
+      denoise?: boolean;
       frame?: FrameSettings;
       color?: ColorSettings;
       overlays?: ImageOverlay[];

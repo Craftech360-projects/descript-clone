@@ -229,6 +229,8 @@ export interface Project {
    * Studio sound voice enhancer
    */
   studioSound?: boolean;
+  /** Clean the voice with DeepFilterNet before rendering. See denoise.ts. */
+  denoise?: boolean;
   /**
    * The cover frame shown on the dashboard card, as a /media URL. Absent on
    * audio, and on video whose cover has not been built yet — `list` builds any

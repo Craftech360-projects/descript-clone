@@ -263,6 +263,19 @@ export const CONFIG = {
    * (not `??`) so an empty env var falls back rather than spawning "".
    */
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+
+  /**
+   * DeepFilterNet's CLI, for cleaning speech recorded outdoors.
+   *
+   * Not an ffmpeg filter and deliberately not bundled: it is a Python tool whose
+   * working combination is narrow — DeepFilterNet 0.5.6 wants torchaudio < 2.1,
+   * because `torchaudio.backend` was removed after that, and its native wheel
+   * only reaches CPython 3.11. Pinning all of that inside the app would tie the
+   * whole product to one fragile dependency set for one optional feature. So it
+   * lives in its own venv, is found by path, and is simply absent when it is not
+   * installed — the same graceful degradation image generation has without a key.
+   */
+  deepFilterBin: process.env.DEEPFILTER_BIN || '',
   ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
 
   /** Whether real transcription is available. Without it, the mock provider runs. */

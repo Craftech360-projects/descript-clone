@@ -463,6 +463,8 @@ export interface RenderJob {
    * the bed. See studioSoundStages in render.ts.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on `input` — gentles the voice chain. */
+  denoised?: boolean;
   /**
    * The crop into a target resolution, already resolved to concrete pixels by the
    * caller — resolveFrame returns null when the setting would change nothing, and
@@ -516,7 +518,7 @@ export async function renderEdl(
   job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
-  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound, frame, color } =
+  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound, denoised, frame, color } =
     job;
   // A multi-clip stitch when the caller handed us one file per EDL clip. A single
   // clip falls through to the original single-input path, byte-identical.
@@ -575,6 +577,7 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      denoised,
       frame,
       color,
       // The canonical rate every clip was resampled to — not any one clip's, or
@@ -595,6 +598,7 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      denoised,
       frame,
       color,
       // The same freshly-probed rate the frame renumber uses. Undefined when the

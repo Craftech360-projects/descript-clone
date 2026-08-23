@@ -62,6 +62,7 @@ import {
   updateCaptions,
   updateSpeed,
   updateStudioSound,
+  updateDenoise,
   updateFrame,
   beginFrameDrag,
   endFrameDrag,
@@ -583,6 +584,7 @@ export default function App() {
           captions: d.captions,
           speed: d.speed,
           studioSound: d.studioSound,
+          denoise: d.denoise,
           frame: d.frame,
           color: d.color,
           overlays: d.overlays,
@@ -734,6 +736,7 @@ export default function App() {
         normalizeCaptions(p.captions),
         p.speed,
         p.studioSound,
+        p.denoise,
         p.frame,
         p.color,
         p.overlays,
@@ -1393,6 +1396,9 @@ export default function App() {
           loop: pendingMusic.current?.loop ?? (project?.music ? bedLoops(project.music) : false),
         },
         studioSound: doc?.studioSound ?? project?.studioSound ?? false,
+        // The trained cleaner. Live value wins over the stored flag, same as its
+        // neighbours — an Export fired mid-debounce must honour the toggle on screen.
+        denoise: doc?.denoise ?? project?.denoise ?? false,
         // Same reason as captions and speed above: an Export fired mid-debounce
         // must reframe to the crop on screen, not to the last one that saved.
         frame: doc?.frame ?? project?.frame,
@@ -2935,6 +2941,9 @@ export default function App() {
               onCaptionDragEnd={endCaptionDrag}
               studioSound={doc?.studioSound ?? false}
               onToggleStudioSound={updateStudioSound}
+              denoise={doc?.denoise ?? false}
+              onToggleDenoise={updateDenoise}
+              canCleanVoice={caps.canCleanVoice ?? false}
               frame={frame}
               setFrame={updateFrame}
               onFrameDragStart={beginFrameDrag}

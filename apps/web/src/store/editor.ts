@@ -143,6 +143,7 @@ export function loadDoc(
   captions?: CaptionSettings,
   speed?: number,
   studioSound?: boolean,
+  denoise?: boolean,
   frame?: Partial<FrameSettings> | null,
   color?: Partial<ColorSettings> | null,
   overlays?: unknown,
@@ -155,6 +156,7 @@ export function loadDoc(
       captions,
       clampSpeed(speed),
       Boolean(studioSound),
+      Boolean(denoise),
       normalizeFrame(frame),
       normalizeColor(color),
       // Coerced on the way in for the same reason frame and colour are: this is
@@ -289,6 +291,19 @@ function commitCut(cut: CutSettings): void {
   const { doc } = state;
   if (!doc) return;
   apply({ kind: 'cut', prev: doc.cut, next: cut }, { label: 'Change edit settings' });
+}
+
+/**
+ * Turn the trained voice cleaner on or off.
+ *
+ * Undoable like every other output setting, but note what it does NOT do: it
+ * never runs the model. The first render after this pays for the pass and caches
+ * it, so toggling is instant and costs nothing until you export.
+ */
+export function updateDenoise(denoise: boolean): void {
+  const { doc } = state;
+  if (!doc || doc.denoise === denoise) return;
+  apply({ kind: 'denoise', prev: doc.denoise, next: denoise }, { label: denoise ? 'Enable voice cleanup' : 'Disable voice cleanup' });
 }
 
 export function updateStudioSound(studioSound: boolean): void {

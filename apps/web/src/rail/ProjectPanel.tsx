@@ -110,6 +110,10 @@ interface Props {
 
   studioSound: boolean;
   onToggleStudioSound: (enabled: boolean) => void;
+  denoise: boolean;
+  onToggleDenoise: (enabled: boolean) => void;
+  /** False when the server has no denoiser installed — the control is then hidden. */
+  canCleanVoice: boolean;
 
   /** The output frame — resolution plus the crop that fills it. */
   frame: FrameSettings;
@@ -336,6 +340,7 @@ export default function ProjectPanel(p: Props) {
         <MovesField {...p} />
         <ImagesField {...p} />
         <ColorField {...p} />
+        <CleanVoiceField {...p} />
         <StudioSoundField {...p} />
         <MusicField {...p} />
         <CaptionsField {...p} />
@@ -561,6 +566,41 @@ function PausesField(p: Props) {
         label="pause length cap"
         format={(v) => (v === 0 ? 'Keep every pause' : `Cap at ${v}ms`)}
       />
+    </Section>
+  );
+}
+
+/**
+ * The trained voice cleaner.
+ *
+ * Its own control rather than a strength setting on Studio Sound, because it is
+ * not more of the same thing: Studio Sound is a filter chain that subtracts a
+ * noise estimate it can hold still, which is why it barely touches traffic or a
+ * crowd. This is a model that separates speech from everything else. They
+ * compose — clean first, then shape — so both can be on.
+ *
+ * Hidden entirely when the server has no denoiser installed. A toggle that
+ * cannot do anything is worse than an absent one.
+ */
+function CleanVoiceField(p: Props) {
+  if (!p.canCleanVoice) return null;
+  return (
+    <Section
+      icon="sparkle"
+      label="Clean voice"
+      toggle={{
+        checked: p.denoise,
+        onChange: p.onToggleDenoise,
+        label: 'Clean voice',
+      }}
+    >
+      <Hint>
+        Separates the voice from traffic, crowds and wind using a model that runs on
+        this machine — nothing is uploaded. For footage shot outdoors this does what
+        Studio Sound cannot, because the noise never holds still long enough to be
+        subtracted. It runs on export, once per clip, and is remembered afterwards,
+        so only the first export of a clip waits for it.
+      </Hint>
     </Section>
   );
 }

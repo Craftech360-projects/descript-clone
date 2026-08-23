@@ -72,6 +72,8 @@ export interface RenderOptions {
    * studioSoundStages.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on the input — see studioSoundStages. */
+  denoised?: boolean;
   /**
    * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
    * the level as mixed.
@@ -362,14 +364,26 @@ function bgMusicMixLines(
  *    to resample anyway, so without this the bug appears only on music-free
  *    renders — which is exactly the sort of thing that ships.
  */
-export function studioSoundStages(loudness?: string | null): string[] {
+export function studioSoundStages(loudness?: string | null, alreadyDenoised = false): string[] {
   return [
     'highpass=f=85',
-    'afftdn=nr=12:nf=-30:tn=1',
+    // Skipped when the trained denoiser has already run: afftdn would be
+    // subtracting a noise estimate from audio that no longer has that noise, and
+    // the pair audibly over-processes. The rest of the chain still earns its
+    // place — the model cleans, it does not shape.
+    ...(alreadyDenoised ? [] : ['afftdn=nr=12:nf=-30:tn=1']),
     'deesser=i=0.35',
     'equalizer=f=220:t=q:w=1.0:g=-2',
     'equalizer=f=3200:t=q:w=1.2:g=3',
-    'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
+    // Unity makeup after a denoise pass. The model leaves near-silence between
+    // words, and makeup gain on near-silence is amplified artefacts — measured,
+    // this was most of why a cleaned export scored barely better than an
+    // uncleaned one. `makeup=1` IS unity: acompressor's range is [1, 64] and 0
+    // is rejected outright, which is a render that fails rather than one that
+    // sounds wrong.
+    alreadyDenoised
+      ? 'acompressor=threshold=-18dB:ratio=2.5:attack=8:release=180:makeup=1'
+      : 'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
     // -16 is the speech-broadcast number and the right default for a voice. When
     // an export preset names a target instead, THAT one runs here rather than
     // after — two loudnorm passes in one chain is not twice as normalised, it is
@@ -605,7 +619,7 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   const loudnessAfterMix = Boolean(options.loudness && bgMusic);
   const programLoudness = loudnessAfterMix ? null : options.loudness;
 
-  if (options.studioSound) audioStages.push(...studioSoundStages(programLoudness));
+  if (options.studioSound) audioStages.push(...studioSoundStages(programLoudness, options.denoised));
   else if (programLoudness) audioStages.push(...loudnessOnlyStages(programLoudness));
   if (retime) audioStages.push(`atempo=${f(speed)}`);
 
@@ -720,6 +734,8 @@ export interface SequenceRenderOptions {
    * studioSoundStages.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on the input — see studioSoundStages. */
+  denoised?: boolean;
   /**
    * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
    * the level as mixed.
@@ -926,7 +942,7 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
 
   if (wantsAudioStage) {
     const aStages: string[] = [];
-    if (options.studioSound) aStages.push(...studioSoundStages(seqProgramLoudness));
+    if (options.studioSound) aStages.push(...studioSoundStages(seqProgramLoudness, options.denoised));
     else if (seqProgramLoudness) aStages.push(...loudnessOnlyStages(seqProgramLoudness));
     if (retime) aStages.push(`atempo=${f(speed)}`);
     lines.push(`[ac]${aStages.join(',')}${programLabel};`);

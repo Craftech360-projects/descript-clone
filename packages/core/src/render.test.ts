@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenderPlan, buildSequenceRenderPlan } from './render.ts';
+import { buildRenderPlan, buildSequenceRenderPlan, studioSoundStages } from './render.ts';
 import { presetSettings, resolveColor } from './color.ts';
 import { MAX_SPEED } from './doc.ts';
 import type { Edl } from './types.ts';
@@ -853,4 +853,47 @@ test('a sequence with images but no other video work still opens its stage', () 
   const { filterScript } = seqPlan(seqEdl, { images: IMAGES([{}]) });
   assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(filterScript), filterScript);
   assert.ok(filterScript.includes('[vc][img0]overlay='), filterScript);
+});
+
+/**
+ * The voice chain's emitted filter STRINGS.
+ *
+ * These are asserted literally because ffmpeg validates them at render time, not
+ * at build time: `makeup=0` looked like a reasonable "no gain" and is in fact
+ * outside acompressor's [1, 64] range, so it failed the whole encode after the
+ * denoise pass had already run. A green suite said nothing about it. Parameter
+ * ranges that only a subprocess can reject are exactly what needs pinning here.
+ */
+test('studioSoundStages emits acompressor makeup inside ffmpeg’s allowed range', () => {
+  for (const denoised of [false, true]) {
+    const comp = studioSoundStages(null, denoised).find((s) => s.startsWith('acompressor='));
+    assert.ok(comp, 'the chain always compresses');
+    const makeup = Number(/makeup=([\d.]+)/.exec(comp!)?.[1]);
+    assert.ok(makeup >= 1 && makeup <= 64, `makeup=${makeup} is outside [1, 64] and ffmpeg refuses it`);
+  }
+});
+
+test('the trained denoiser replaces afftdn rather than stacking with it', () => {
+  const plain = studioSoundStages(null, false);
+  const cleaned = studioSoundStages(null, true);
+  assert.ok(plain.some((s) => s.startsWith('afftdn=')), 'without the model, the chain denoises itself');
+  assert.ok(
+    !cleaned.some((s) => s.startsWith('afftdn=')),
+    'with the model, subtracting a noise estimate from already-clean audio over-processes',
+  );
+});
+
+test('a denoised chain does not apply makeup gain to the silence the model left', () => {
+  const plain = studioSoundStages(null, false).find((s) => s.startsWith('acompressor='))!;
+  const cleaned = studioSoundStages(null, true).find((s) => s.startsWith('acompressor='))!;
+  const gain = (s: string) => Number(/makeup=([\d.]+)/.exec(s)?.[1]);
+  assert.ok(gain(cleaned) < gain(plain), 'makeup on near-silence is amplified artefacts');
+});
+
+test('both chains still normalise and resample, denoised or not', () => {
+  for (const denoised of [false, true]) {
+    const stages = studioSoundStages(null, denoised);
+    assert.ok(stages.some((s) => s.startsWith('loudnorm=')), 'arriving at the right level is not optional');
+    assert.equal(stages.at(-1), 'aresample=48000', 'loudnorm leaves the stream at 192kHz; AAC then lands on 96k');
+  }
 });

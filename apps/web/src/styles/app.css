@@ -2447,6 +2447,27 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   }
   .m-tools::-webkit-scrollbar { display: none; }
 
+  /* The two view controls, pinned while the tools scroll past. Outlined rather
+     than filled so they read as a different KIND of thing from the tools —
+     these change what you are looking at, the others change the video. */
+  .m-view-btn {
+    flex: 0 0 auto;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; min-width: 58px; min-height: 52px; padding: 6px 8px;
+    font-size: 10.5px; font-weight: 550; white-space: nowrap;
+    color: var(--text);
+    background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  }
+  .m-view-btn.on,
+  .m-view-btn.on:hover {
+    color: var(--accent); border-color: var(--accent);
+    background: var(--selected);
+  }
+  .m-tools-sep {
+    flex: 0 0 auto; width: 1px; align-self: stretch; margin: 8px 5px;
+    background: var(--line);
+  }
+
   .m-tool {
     flex: 0 0 auto; scroll-snap-align: start;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -2658,14 +2679,133 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * takes the difference.
  * ───────────────────────────────────────────────────────────────────────── */
 @media (max-width: 599px) and (min-height: 521px) {
-  /*
-   * Only the non-portrait case shrinks. A 9:16 programme on a 9:19.5 screen uses
-   * the full width and is worth its height — that is what the portrait rule
-   * further down is for. It is a landscape or source-shaped frame that arrives as
-   * a thin strip between two wide bars, and only that one is cut back.
+  /* ═══════════════════════════════════════════════════════════════════════
+   * The phone editor: picture first.
+   *
+   * Chosen from three drawn options. The picture takes what is left after the
+   * bars — about 61% — the timeline sits under it, the script is a peek, and the
+   * tools are a row along the bottom where a thumb already is.
+   *
+   * The order is the one every mobile editor uses, and the reason is reach: the
+   * things you touch constantly (play, tools) are at the bottom, the thing you
+   * look at is up top, and nothing you touch is under your own hand while you
+   * watch. It reads top to bottom as watch → trim → read → change.
+   *
+   * The cost, stated plainly because it is real: the transcript — the surface
+   * this product is named for — gets about 110px, two or three lines. Cutting a
+   * long take on a phone means scrolling a keyhole. That was the trade on offer
+   * and it was taken deliberately; the script is still the whole screen on a
+   * desk, and on a foldable it is a full column.
+   * ═══════════════════════════════════════════════════════════════════════ */
+  /* ── watch: the picture gets the screen ──────────────────────────────── */
+  .app.m-mode-watch,
+  .app.m-mode-watch[data-frame='portrait'] {
+    grid-template-rows: 44px minmax(0, 1fr) auto 0 58px;
+    grid-template-areas: 'title' 'center' 'dock' 'content' 'mtabs';
+  }
+  .app.m-mode-watch .script { display: none; }
+
+  /* ── script: the transcript gets it, the picture keeps a strip ────────── */
+  .app.m-mode-script,
+  .app.m-mode-script[data-frame='portrait'] {
+    grid-template-rows: 44px 120px minmax(0, 1fr) auto 58px;
+    grid-template-areas: 'title' 'center' 'content' 'dock' 'mtabs';
+  }
+
+  /* ── the timeline, only when asked for ─────────────────────────────────
+   * An explicit height, not flex. The dock row is `auto`, so a canvas that only
+   * says `flex: 1` inside it resolves to zero — it was "visible" and 0px tall,
+   * which looks exactly like the button not working.
+   * 88px is the ruler, one clip lane and a readable strip of filmstrip. */
+  .tl-canvas { display: none; }
+  .app.m-tl .tl-canvas { display: block; flex: 0 0 auto; height: 88px; }
+
+  /* ---- the dock, made to fit ----
+   *
+   * At 116px the old dock overflowed into the script: the transport wrapped to
+   * two rows (~110px on its own), then the range/split/zoom bar, then the canvas,
+   * then the music lane — all drawn on top of the transcript below it.
+   *
+   * So it is cut to the two things a phone can use: one row of transport, and
+   * the timeline canvas. The lanes inside that canvas are drawn by
+   * timeline/draw.ts rather than laid out as elements, so its height is the only
+   * control there is over them.
    */
-  .app {
-    grid-template-rows: 44px minmax(112px, 23vh) auto minmax(0, 1fr) var(--h-dock-p, 184px);
+  .tl { overflow: hidden; display: flex; flex-direction: column; }
+
+  /*
+   * Two rows, and this is the honest answer rather than the tidy one.
+   *
+   * Five control groups want this bar — transport buttons, clock, speed, and two
+   * view switches. Measured at 390px they came to 408, and the reference app
+   * this layout is modelled on has three groups, not five, which is why its
+   * single row works. Every way of forcing one row here meant losing a control:
+   * speed exists nowhere else in the app, and "Preview edit" decides whether you
+   * are watching the cut or the raw take, which is the whole point of watching.
+   *
+   * So the dock is 156px and the transport wraps: controls on the first line,
+   * switches on the second. Nothing is clipped, nothing is removed, and the
+   * picture still takes 56% of the screen.
+   */
+  .transport {
+    flex: 0 0 auto; flex-wrap: wrap; height: auto; min-height: 0;
+    gap: var(--s-1) var(--s-2); padding: var(--s-1); overflow: hidden;
+  }
+  .tp-toggles { width: 100%; }
+
+  /* The view toggles become their switches. "Preview edit" and "Show cuts" are
+     worth keeping — they change what you are looking at — but their labels cost
+     240px of a 390px row, and the switch already reads on/off. */
+  .tp-toggles { gap: var(--s-2); margin-left: auto; flex: 0 0 auto; }
+  /*
+   * font-size: 0, because the label is a bare TEXT NODE next to the switch —
+   * `<span class="sw"/>Preview edit` — and there is no selector for a text node.
+   * The switch itself is sized in px so it is unaffected, and the button keeps
+   * its title and aria-pressed, so the name a screen reader announces is
+   * unchanged. Only the sighted label goes.
+   */
+  /* On their own line the labels fit, so they stay. The earlier font-size:0
+     trick — needed because the label is a bare text node beside the switch — is
+     gone with the row it was working around. */
+  .tp-toggles .toggle { flex: 1 1 0; justify-content: center; }
+
+  /*
+   * Two things leave the row so the rest fits in 390px. Adding up what wanted to
+   * be there: four icon buttons at 44, a clock, an edit/source badge, the speed
+   * menu and two switches came to about 454px, and the row does not wrap any
+   * more — so the toggles on the right were simply clipped off the edge.
+   *
+   * Go-to-start goes because the timeline is right there and dragging to zero is
+   * one gesture. The edit/source badge goes because it labels a distinction the
+   * "Preview edit" switch beside it already makes. Speed stays: it exists
+   * nowhere else in the app, and hiding it would remove the feature rather than
+   * relocate it.
+   */
+  .tp-buttons > .icon:first-child { display: none; }
+  .tc-space { display: none; }
+
+  /* The "saved" readout fits again on the second line, beside the switches. */
+
+
+  /* Range, split, zoom and fit are precision controls for a pointer. Split is
+     reachable from the tool bar's Clean up; the rest are desk work. */
+  .tl-bar { display: none; }
+
+  /* The bed is named in the Music tool, where there is room for the artist and
+     the licence. A second copy here costs a whole lane of a 116px dock. */
+  .tl-music { display: none; }
+
+  .tl-canvas { flex: 1 1 auto; min-height: 0; }
+
+  /* ---- the script peek ----
+   * A fixed 112px that scrolls, with a top border so it reads as its own surface
+   * rather than as the bottom of the timeline. It is deliberately small: this
+   * layout spends the screen on the picture, and the peek is here so you can see
+   * WHICH line you are on, not so you can read the whole take. */
+  .script {
+    border-top: 1px solid var(--line);
+    padding: var(--s-2) var(--s-3);
+    overflow-y: auto;
   }
 
   .titlebar { padding: 0 var(--s-1); }
@@ -2679,14 +2819,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
      need to be as tall as the play button. */
   .transport { gap: 2px var(--s-2); padding: var(--s-1) var(--s-1); }
 
-  /* A filmstrip thumbnail 40px tall on a 390px screen is a smear you cannot
-     read. Giving those pixels to the waveform makes the one lane that IS
-     legible at this size taller. */
-  .tl-strip { display: none; }
 
-  /* The script is the editor here — let it breathe rather than inheriting the
-     desk's gutters. */
-  .script { padding: var(--s-2) var(--s-3) var(--s-6); }
 
 }
 
@@ -2923,24 +3056,15 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * for a landscape picture. A 9:16 frame fitted into 32vh is a sliver about
  * 0.56 x that height wide, stranded in mat. A vertical programme on a vertical
  * screen should use the height it has. */
-@media (max-width: 599px) {
-  /*
-   * Measured at 390x844 with a 9:16 programme: at 44vh the monitor took 44% of
-   * the screen and the script 23% — and the picture STILL did not fill the
-   * width. Filling 390px at 9:16 needs 693px of height, which is 82% of the
-   * display; there is no setting where a phone shows a vertical programme
-   * edge-to-edge and still shows you the words.
-   *
-   * So the premise is wrong at this size. A portrait frame keeps more height
-   * than a landscape one — 34vh against 23vh, because it genuinely uses more of
-   * what it is given — but not at the cost of the surface you edit with. The
-   * script is the editor; the monitor is for checking a caption sits where you
-   * put it. 34vh is enough to check that.
-   */
-  .app[data-frame='portrait'] {
-    grid-template-rows: 44px minmax(180px, 34vh) auto minmax(0, 1fr) var(--h-dock-p, 184px);
-  }
-}
+/*
+ * The portrait override that used to live here is gone.
+ *
+ * It gave a 9:16 frame more of the phone's height than a landscape one, which
+ * made sense when the layout stacked five rows and the picture had to argue for
+ * space. The picture now takes whatever the bars leave, whatever its shape, so
+ * the rule had nothing left to decide — and it did real harm: its five-value row
+ * list landed on the new five-area list and put 184px under the tool bar.
+ */
 
 /* Square sits between the two: it cannot use a wide column either, but it needs
  * less height than a reel. */
@@ -3282,7 +3406,11 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * place that sets the same property.
  */
 @media (max-width: 1000px), (max-height: 520px) {
-  .app { --fab-bottom: calc(var(--h-dock-p, 184px) + var(--s-3)); }
+  /* Clear of BOTH bottom bars — the tool bar and the transport above it. At
+     just the tool bar's height it sat on the "Show cuts" switch. 58 + 95 is the
+     two of them; the button floats over the picture or the script instead, which
+     is what a floating button is for. */
+  .app { --fab-bottom: calc(58px + 95px + var(--s-3)); }
   .app > .fab { right: var(--s-3); }
 }
 @media (min-width: 600px) and (max-width: 1000px) and (min-height: 560px) {

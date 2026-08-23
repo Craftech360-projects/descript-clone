@@ -334,6 +334,21 @@ export default function App() {
   const [openSection, setOpenSection] = useState<string | null>(null);
 
   /**
+   * The phone shows ONE of two things properly rather than three badly.
+   *
+   * 'watch' gives the picture the screen; 'script' gives it to the transcript.
+   * Trying to fit both at once is what the first attempt did, and the result was
+   * a medium picture above a three-line transcript above a squeezed timeline —
+   * every surface compromised and none of them good.
+   *
+   * The timeline is hidden in both until asked for. On a 390px screen it is a
+   * ruler with colliding labels and clip stubs you cannot aim at; it is worth
+   * having when you go looking for it and worth nothing the rest of the time.
+   */
+  const [phoneMode, setPhoneMode] = useState<'watch' | 'script'>('watch');
+  const [showTimeline, setShowTimeline] = useState(false);
+
+  /**
    * Bring the section the tool bar just opened into view.
    *
    * Without this the bar is only half a feature: tapping "Captions" switched to
@@ -2594,7 +2609,7 @@ export default function App() {
   // --- workspace ---------------------------------------------------------------
   return (
     <div
-      className={`app m-view-${mobileTab}`}
+      className={`app m-view-${mobileTab} m-mode-${phoneMode}${showTimeline ? ' m-tl' : ''}`}
       data-frame={frameOrientation}
       // Give the dock the extra height the music lane needs, rather than stealing
       // it from the waveform. Only when a bed is attached; no bed, no change.
@@ -2783,6 +2798,33 @@ export default function App() {
           * working on stays readable while you change the thing.
           */}
         <nav className="m-tools" aria-label="Tools">
+          {/*
+            * The two view controls sit at the head of the tool bar, pinned while
+            * the tools scroll past them. They belong here rather than in the
+            * title bar because they are things you flick between constantly and
+            * the bottom of the screen is where the thumb already is.
+            */}
+          <button
+            className="m-view-btn"
+            onClick={() => setPhoneMode(phoneMode === 'watch' ? 'script' : 'watch')}
+            aria-label={phoneMode === 'watch' ? 'Show the script' : 'Show the picture'}
+            title={phoneMode === 'watch' ? 'Show the script' : 'Show the picture'}
+          >
+            <Icon name={phoneMode === 'watch' ? 'captions' : 'video'} size={19} />
+            <span>{phoneMode === 'watch' ? 'Script' : 'Watch'}</span>
+          </button>
+          <button
+            className={showTimeline ? 'm-view-btn on' : 'm-view-btn'}
+            onClick={() => setShowTimeline((v) => !v)}
+            aria-pressed={showTimeline}
+            aria-label="Timeline"
+            title="Show the timeline"
+          >
+            <Icon name="grid" size={19} />
+            <span>Timeline</span>
+          </button>
+          <span className="m-tools-sep" aria-hidden="true" />
+
           {MOBILE_TOOLS.map((t) => {
             const on = openSection === t.key;
             return (

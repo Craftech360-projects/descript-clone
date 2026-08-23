@@ -33,6 +33,7 @@ import Rail from './shell/Rail.tsx';
 import Icon, { type IconName } from './ui/Icon.tsx';
 import { SectionOpen, sectionKey } from './ui/Field.tsx';
 import { SwipeAway } from './ui/SwipeAway.tsx';
+import { uploadResumable } from './upload.ts';
 import TranscribeDialog from './dialogs/TranscribeDialog.tsx';
 import ExportDialog from './dialogs/ExportDialog.tsx';
 import SettingsDialog from './dialogs/SettingsDialog.tsx';
@@ -850,7 +851,9 @@ export default function App() {
 
   const importFile = (file: File, name?: string) =>
     run('import', async () => {
-      let p = await api.import(file);
+      // A percentage, because an upload of holiday footage over Tailscale is
+      // long enough that a silent spinner reads as a hang.
+      let p = await uploadResumable(file, (f) => setBusy(`uploading ${Math.round(f * 100)}%`));
       p = await applyName(p, name);
       // Land it where the user is standing. An import made inside a folder
       // belongs to that folder — otherwise the folder is a label you have to
@@ -963,7 +966,7 @@ export default function App() {
    */
   const importMany = (files: File[], name?: string) =>
     run('import', async () => {
-      let p = await api.import(files[0]);
+      let p = await uploadResumable(files[0], (f) => setBusy(`uploading 1/${files.length} · ${Math.round(f * 100)}%`));
       p = await applyName(p, name);
       if (openFolderId) {
         try {

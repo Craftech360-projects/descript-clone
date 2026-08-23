@@ -3,12 +3,12 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { writeFile, rename, unlink, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, rename, unlink, mkdir, readFile, stat, copyFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { join, extname } from 'node:path';
+import { join, extname, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { ASR_MODELS, CONFIG, EDIT_DEFAULTS, setAppleSpeechReady } from './config.ts';
@@ -17,6 +17,7 @@ import { transcribe, defaultAsrOptions, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as denoise from './denoise.ts';
+import * as resumable from './resumable.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
@@ -99,6 +100,10 @@ await canBurnCaptions();
 // Same shape as canBurnCaptions above: a fact about the machine, resolved once,
 // because /api/capabilities and the render route cannot await a probe per call.
 const denoiseReady = await denoise.available();
+// Abandoned part-files, swept at boot: the one moment we know nothing is in
+// flight, so an upload in progress cannot be mistaken for a dead one.
+const sweptUploads = await resumable.sweep();
+if (sweptUploads > 0) console.log(`upload  swept ${sweptUploads} abandoned upload${sweptUploads === 1 ? '' : 's'}`);
 
 // And whether we can draw them ourselves when ffmpeg cannot. One of the two has
 // to be true for "Burn captions" to mean anything.
@@ -416,9 +421,39 @@ app.post('/api/projects', async (c) => {
     return c.json({ error: 'Could not read the upload.' }, 400);
   }
 
+  // Same cleanup contract as the resumable finish below: bytes that turn out not
+  // to be media must not be left behind in mediaDir.
+  let project: store.Project;
+  try {
+    project = await projectFromFile(id, sourcePath, name, ext);
+  } catch (e) {
+    await unlink(sourcePath).catch(() => {});
+    return c.json(
+      { error: `That file could not be read as media. ${e instanceof Error ? e.message.split('\n')[0] : ''}`.trim() },
+      400,
+    );
+  }
+  await store.save(project);
+  return c.json(project);
+});
+
+/**
+ * Build a project record around a file that is ALREADY on disk.
+ *
+ * Shared by the one-shot import above and the resumable finish below, because
+ * everything after "the bytes arrived" is identical and the two must not drift:
+ * a project created by a resumed upload has to be indistinguishable from one
+ * created in a single request.
+ */
+async function projectFromFile(
+  id: string,
+  sourcePath: string,
+  name: string,
+  ext: string,
+): Promise<store.Project> {
   const info = await probe(sourcePath);
 
-  const project: store.Project = {
+  return {
     id,
     name,
     sourcePath,
@@ -449,9 +484,114 @@ app.post('/api/projects', async (c) => {
     peaks: await computePeaks(sourcePath),
     createdAt: new Date().toISOString(),
   };
+}
 
+
+/**
+ * Resumable upload: open a session.
+ *
+ * The client gets an id and sends the file in chunks against it. Everything the
+ * server needs to finish the import later (name, extension) is captured now, so
+ * a resume after a reload does not depend on the client remembering it.
+ */
+app.post('/api/uploads', async (c) => {
+  const body = await c.req.json<{ name?: string; size?: number }>().catch(() => ({}));
+  const name = (body.name ?? 'upload.mp4').slice(0, 200);
+  const size = Number(body.size ?? 0);
+  if (!Number.isFinite(size) || size <= 0) return c.json({ error: 'A size is required.' }, 400);
+  if (size > CONFIG.maxUploadBytes) {
+    return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
+  }
+  const session = await resumable.create({
+    id: randomUUID(),
+    name,
+    ext: extname(name) || '.mp4',
+    size,
+  });
+  return c.json({ uploadId: session.id, offset: 0 });
+});
+
+/**
+ * Where did this upload get to?
+ *
+ * The question a client asks after a refresh. Answering with the byte count on
+ * disk is what turns "start again" into "carry on".
+ */
+app.get('/api/uploads/:id', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+  return c.json({ uploadId: session.id, offset: session.offset, size: session.size, name: session.name });
+});
+
+/** Append one chunk at an explicit offset. See resumable.append for why it is strict. */
+app.patch('/api/uploads/:id', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+
+  const offset = Number(c.req.query('offset') ?? NaN);
+  if (!Number.isFinite(offset) || offset < 0) return c.json({ error: 'A byte offset is required.' }, 400);
+
+  const result = await resumable.append(session, offset, c.req.raw.body);
+  if (!result.ok) {
+    // 409, with the truth: the client re-seeks rather than guessing. This is the
+    // normal way a retried chunk is handled, not an error worth surfacing.
+    return c.json({ error: 'Offset does not match', expected: result.expected }, 409);
+  }
+  return c.json({ uploadId: session.id, offset: result.session.offset });
+});
+
+/**
+ * Finish: turn the assembled bytes into a project.
+ *
+ * Refuses a short file rather than importing a truncated video — a clip that
+ * plays for ten of its ninety seconds is a worse outcome than a failed import,
+ * because it looks like it worked.
+ */
+app.post('/api/uploads/:id/finish', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+
+  const onDisk = await stat(resumable.partPath(session.id)).then((s) => s.size).catch(() => 0);
+  if (onDisk !== session.size) {
+    return c.json({ error: 'Upload is incomplete', offset: onDisk, size: session.size }, 409);
+  }
+
+  const id = randomUUID();
+  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${id}${session.ext}`);
+  await mkdir(dirname(sourcePath), { recursive: true });
+  // rename() when it can, copy+unlink across devices — dataDir and mediaDir are
+  // not guaranteed to be the same filesystem (they are not, in the Docker image).
+  try {
+    await rename(resumable.partPath(session.id), sourcePath);
+  } catch {
+    await copyFile(resumable.partPath(session.id), sourcePath);
+  }
+  await resumable.discard(session.id);
+
+  /**
+   * Probe can reject what arrived — a file that is not media, or one whose moov
+   * atom never made it. The bytes are already in mediaDir by then, so failing
+   * here without cleaning up leaves an orphan no project references and nothing
+   * ever collects. Delete it and say what was wrong.
+   */
+  let project: store.Project;
+  try {
+    project = await projectFromFile(id, sourcePath, session.name, session.ext);
+  } catch (e) {
+    await unlink(sourcePath).catch(() => {});
+    return c.json(
+      { error: `That file could not be read as media. ${e instanceof Error ? e.message.split('\n')[0] : ''}`.trim() },
+      400,
+    );
+  }
   await store.save(project);
   return c.json(project);
+});
+
+/** Give up on an upload and reclaim its bytes. */
+app.delete('/api/uploads/:id', async (c) => {
+  await resumable.discard(c.req.param('id'));
+  return c.json({ ok: true });
 });
 
 app.get('/api/projects/:id', async (c) => {

@@ -10,7 +10,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.jumpcut.android"
+        // The install identity, matching the Mac bundle id (com.jumpstart.editor).
+        // The Kotlin `namespace` above stays com.jumpcut.android on purpose: it is
+        // the source package, no user ever sees it, and moving it would touch every
+        // file for no benefit — the same call made for the Swift helpers.
+        applicationId = "com.jumpstart.android"
         // 29 (Android 10): the exec-from-nativeLibraryDir story and the
         // MediaStore.Downloads API are uniform from here up. Going lower forks
         // every storage and exec code path for devices too weak for this

@@ -36,3 +36,9 @@ data/
 
 # Machine-specific: points gradle at THIS machine's Android SDK.
 desktop/android/local.properties
+desktop/android/out/
+desktop/android/build/
+desktop/android/app/build/
+desktop/android/app/src/main/jniLibs/
+desktop/android/third_party/ffmpeg/out/
+desktop/android/.gradle/

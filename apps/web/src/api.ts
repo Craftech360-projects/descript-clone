@@ -533,6 +533,15 @@ export const api = {
     ),
 
   list: () => fetch('/api/projects').then(json<MediaItem[]>),
+
+  /** Uploads that started and never finished, newest first. */
+  unfinishedUploads: () =>
+    fetch('/api/uploads').then(
+      json<Array<{ id: string; name: string; size: number; offset: number; updatedAt: string }>>,
+    ),
+
+  /** Give up on one and reclaim its bytes. */
+  discardUpload: (id: string) => fetch(`/api/uploads/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
   get: (id: string) => fetch(`/api/projects/${id}`).then(json<Project>),
 
   /**

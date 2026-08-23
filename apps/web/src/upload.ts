@@ -74,8 +74,29 @@ export async function uploadResumable(
   file: File,
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
+  /**
+   * Continue THIS session rather than looking one up.
+   *
+   * Passed when the user picks a file to finish an upload the dashboard is
+   * offering. Without it, resuming depends on localStorage still holding the
+   * signature — and the phone that discarded the tab mid-upload is exactly the
+   * one that may have dropped the storage too.
+   */
+  continueId?: string,
 ): Promise<Project> {
-  let started = await resume(file);
+  let started: Started | null = null;
+  if (continueId) {
+    const s = await json<{ uploadId: string; offset: number; size: number }>(
+      await fetch(`/api/uploads/${continueId}`),
+    );
+    // Guard the splice: a different file of a different length must never be
+    // appended onto this one's bytes.
+    if (s.size !== file.size) {
+      throw new Error('That is a different file from the one this upload started with.');
+    }
+    started = { uploadId: s.uploadId, offset: s.offset };
+  }
+  started = started ?? (await resume(file));
 
   if (!started) {
     const created = await json<Started>(

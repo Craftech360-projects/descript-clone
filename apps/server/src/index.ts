@@ -517,6 +517,9 @@ app.post('/api/uploads', async (c) => {
  * The question a client asks after a refresh. Answering with the byte count on
  * disk is what turns "start again" into "carry on".
  */
+/** Unfinished uploads, so the dashboard can offer to carry one on. */
+app.get('/api/uploads', async (c) => c.json(await resumable.list()));
+
 app.get('/api/uploads/:id', async (c) => {
   const session = await resumable.get(c.req.param('id'));
   if (!session) return c.json({ error: 'No such upload' }, 404);

@@ -142,3 +142,36 @@ export async function sweep(): Promise<number> {
   }
   return removed;
 }
+
+/**
+ * Every upload that started and did not finish.
+ *
+ * The reason this exists: resuming worked, but only if you happened to re-pick
+ * the exact same file. A phone that discards a backgrounded tab mid-upload takes
+ * the progress bar, the error and the page with it — so from the user's side a
+ * 1.5 GB upload silently "vanished", while 271 MB of it sat on the server that
+ * nothing would ever mention again. An interrupted upload has to be able to say
+ * so.
+ */
+export async function list(): Promise<UploadSession[]> {
+  let names: string[];
+  try {
+    names = await readdir(dir());
+  } catch {
+    return [];
+  }
+  const out: UploadSession[] = [];
+  for (const f of names) {
+    if (!f.endsWith('.json')) continue;
+    const s = await get(f.slice(0, -'.json'.length));
+    // Trust the file over the record, exactly as append() does.
+    if (!s) continue;
+    const on = await stat(partPath(s.id)).then((x) => x.size).catch(() => 0);
+    // Nothing landed yet: a session opened and abandoned before the first chunk
+    // is noise, not unfinished work worth offering to resume.
+    if (on <= 0) continue;
+    out.push({ ...s, offset: on });
+  }
+  // Most recent first: the one you just lost is the one you want back.
+  return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}

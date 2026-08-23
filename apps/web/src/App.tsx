@@ -287,6 +287,7 @@ export default function App() {
     try {
       await api.setProjectFolder(id, folderId || null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
     } catch (e) {
       setError((e as Error).message);
     }
@@ -415,6 +416,10 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [followEdit, setFollowEdit] = useState(true);
   const [result, setResult] = useState<RenderResult | null>(null);
+  /** Uploads that stopped partway, offered on the dashboard so they can be finished. */
+  const [unfinished, setUnfinished] = useState<
+    Array<{ id: string; name: string; size: number; offset: number }>
+  >([]);
 
   // Imported caption fonts are global — one library backs every project — so they
   // live at the top of the app, not on a project. See importFont / the @font-face
@@ -702,6 +707,12 @@ export default function App() {
     speed,
   };
 
+  // On first paint, not only after an import: the whole point is that the page
+  // was reloaded and the user has no idea an upload is still half-done.
+  useEffect(() => {
+    api.unfinishedUploads().then(setUnfinished).catch(() => {});
+  }, []);
+
   const run = async <T,>(label: string, fn: () => Promise<T>) => {
     setBusy(label);
     setError(null);
@@ -797,6 +808,7 @@ export default function App() {
       setProject(p);
       openTranscript(p, editDefaults(caps));
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       transcribed = true;
     }
 
@@ -871,6 +883,7 @@ export default function App() {
       openTranscript(p, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       // Import still does not transcribe on its own — but if you have asked for
       // the on-import chain, this is where it runs. With every step off this
       // returns immediately and importing means exactly what it always did.
@@ -919,6 +932,7 @@ export default function App() {
       openTranscript(fresh, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
 
       // The on-import chain applies here too, but only its filler step, and only
       // over the clip that just arrived. The rest are DOCUMENT settings — pauses,
@@ -992,6 +1006,7 @@ export default function App() {
       openTranscript(p, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       if (failed.length) {
         setError(
           `Imported ${files.length - failed.length} of ${files.length}. ` +
@@ -1294,6 +1309,7 @@ export default function App() {
     await run('delete', async () => {
       await api.remove(id);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
     });
   };
 
@@ -1351,6 +1367,7 @@ export default function App() {
       setResult(null);
       setDialog(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       // The verbatim warning is not a toast — it lives in the rail next to the
       // filler tool it is about, where you can act on it.
       return p;
@@ -2643,6 +2660,28 @@ export default function App() {
           onRename={(id, name) => void renameProject(id, name)}
           onImport={importFile}
           onImportMany={importMany}
+          unfinished={unfinished}
+          onResumeUpload={(id, file) =>
+            run('import', async () => {
+              const p = await uploadResumable(
+                file,
+                (f) => setBusy(`resuming ${Math.round(f * 100)}%`),
+                undefined,
+                id,
+              );
+              setUnfinished(await api.unfinishedUploads().catch(() => []));
+              setProject(p);
+              openTranscript(p, editDefaults(caps));
+              setLibrary(await api.list());
+              return p;
+            })
+          }
+          onDiscardUpload={(id) =>
+            void api
+              .discardUpload(id)
+              .then(async () => setUnfinished(await api.unfinishedUploads().catch(() => [])))
+              .catch((e) => setError(e.message))
+          }
           error={error}
           onDismissError={() => setError(null)}
           onOpenSettings={() => setSettingsOpen(true)}

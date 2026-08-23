@@ -3472,3 +3472,30 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 @media (min-width: 600px) and (max-width: 1000px) and (min-height: 560px) {
   .app { --fab-bottom: calc(var(--h-dock-m, 208px) + var(--s-3)); }
 }
+
+/* ---- an upload that stopped, offering to carry on ----
+ * Sits above the grid rather than inside it: this is not one of your projects,
+ * it is work that has not become one yet, and burying it among the cards is how
+ * it went unnoticed in the first place. Warn-coloured, not error — nothing is
+ * broken and nothing has been lost; it is waiting. */
+.resume-bar {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  margin-bottom: var(--s-4);
+}
+.resume-row {
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  padding: var(--s-3);
+  border: 1px solid var(--warn-line); border-radius: var(--r-3);
+  background: var(--warn-bg); color: var(--warn-fg);
+}
+.resume-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.resume-what strong { font-size: var(--t-base); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-what span { font-size: var(--t-small); opacity: .85; font-variant-numeric: tabular-nums; }
+.resume-acts { display: flex; gap: var(--s-2); flex: 0 0 auto; }
+
+/* On a phone the row stacks, and the primary action goes full width — it is the
+ * one thing on this bar worth a thumb. */
+@media (max-width: 1000px) {
+  .resume-acts { width: 100%; }
+  .resume-acts .primary { flex: 1; }
+}

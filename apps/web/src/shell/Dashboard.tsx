@@ -38,6 +38,13 @@ interface Props {
   onImport: (file: File, name?: string) => void;
   /** Several files, imported as one sequence. See takeMany. */
   onImportMany: (files: File[], name?: string) => void;
+  /**
+   * Uploads that started and never finished, so one can be carried on. Empty on
+   * the common path; see the resume banner below for why it exists at all.
+   */
+  unfinished?: Array<{ id: string; name: string; size: number; offset: number }>;
+  onResumeUpload?: (id: string, file: File) => void;
+  onDiscardUpload?: (id: string) => void;
   error: string | null;
   onDismissError: () => void;
   /** Open the API-keys dialog (assistant + transcription credentials). */
@@ -285,6 +292,9 @@ export default function Dashboard({
   onRename,
   onImport,
   onImportMany,
+  unfinished,
+  onResumeUpload,
+  onDiscardUpload,
   error,
   onDismissError,
   onOpenSettings,
@@ -574,6 +584,51 @@ export default function Dashboard({
               </p>
             )}
           </>
+        )}
+
+        {(unfinished ?? []).length > 0 && (
+          /**
+           * An upload that stopped, offering to carry on.
+           *
+           * This exists because resuming used to be invisible. A phone that
+           * discards a backgrounded tab mid-upload takes the progress bar AND the
+           * error with it, so a 1.5 GB import looked like it had simply vanished
+           * — while most of it sat on the server, resumable, unmentioned. The
+           * bytes were never the problem; knowing they were there was.
+           */
+          <div className="resume-bar">
+            {(unfinished ?? []).map((u) => (
+              <div className="resume-row" key={u.id}>
+                <div className="resume-what">
+                  <strong>{u.name}</strong>
+                  <span>
+                    {Math.round((u.offset / Math.max(u.size, 1)) * 100)}% uploaded ·{' '}
+                    {Math.round(u.offset / 1048576)} of {Math.round(u.size / 1048576)} MB
+                  </span>
+                </div>
+                <div className="resume-acts">
+                  <button
+                    className="primary"
+                    onClick={() => {
+                      // A fresh input each time: the same one reused will not fire
+                      // change when the user picks the identical file twice.
+                      const el = document.createElement('input');
+                      el.type = 'file';
+                      el.accept = mediaAccept();
+                      el.onchange = () => {
+                        const f = el.files?.[0];
+                        if (f) onResumeUpload?.(u.id, f);
+                      };
+                      el.click();
+                    }}
+                  >
+                    Choose the file to continue
+                  </button>
+                  <button onClick={() => onDiscardUpload?.(u.id)}>Discard</button>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {/* Projects live INSIDE a folder. At the top level there is nothing to

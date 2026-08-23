@@ -121,6 +121,11 @@ interface Props {
    * and from the Images section when generation is.
    */
   onOpenSettings: () => void;
+  /** The trained voice denoiser — see the server's proxy of the same name. */
+  denoise: boolean;
+  onToggleDenoise: (enabled: boolean) => void;
+  /** False when the server has no denoiser installed; the control is then hidden. */
+  canCleanVoice: boolean;
   /**
    * Leave the inspector and go back to the picture. PHONE ONLY.
    *
@@ -208,6 +213,9 @@ export default function Rail(p: Props) {
     <>
       <div className="rail-head">Project</div>
       <ProjectPanel
+        denoise={p.denoise}
+        onToggleDenoise={p.onToggleDenoise}
+        canCleanVoice={p.canCleanVoice}
         safeArea={p.safeArea}
         onSafeArea={p.onSafeArea}
         project={p.project}

@@ -138,6 +138,10 @@ const MOBILE_TOOLS: Array<{ key: string; label: string; icon: IconName }> = (
     { label: 'Frame', icon: 'crop' },
     { label: 'Colour', icon: 'contrast' },
     { label: 'Background music', icon: 'music' },
+    // Beside Studio Sound because they are the two audio treatments and people
+    // reach for them together — but they are different things: that is a filter
+    // chain, this is a trained model. See the server's denoise.ts.
+    { label: 'Clean voice', icon: 'sparkle' },
     { label: 'Studio Sound', icon: 'sparkle' },
     { label: 'Push-ins', icon: 'target' },
     { label: 'Images', icon: 'image' },
@@ -2919,7 +2923,11 @@ export default function App() {
           </button>
           <span className="m-tools-sep" aria-hidden="true" />
 
-          {MOBILE_TOOLS.map((t) => {
+          {MOBILE_TOOLS.filter(
+            // The section renders null without a denoiser, so a tool button for
+            // it would open an empty panel. Hidden in both places or neither.
+            (t) => t.key !== sectionKey('Clean voice') || (caps.canCleanVoice ?? false),
+          ).map((t) => {
             const on = openSection === t.key;
             return (
               <button

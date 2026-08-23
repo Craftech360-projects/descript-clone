@@ -3050,6 +3050,9 @@ export default function App() {
               agentEnabled={caps.agent?.enabled ?? false}
               agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
               onOpenSettings={() => setSettingsOpen(true)}
+              /* Phone only: on a desk the rail is a permanent column and there
+                 is nothing to go back from. */
+              onLeave={() => setMobileTab('script')}
             />
         </SectionOpen.Provider>
 

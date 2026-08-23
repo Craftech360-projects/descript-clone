@@ -2397,6 +2397,11 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
    * In the Android WebView dvh === vh, so this changes nothing there. */
   body { height: 100dvh; }
 
+  /* The tool bar's height, named once. The bottom sheet offsets itself by this
+   * to sit ABOVE the bar; if the two ever disagree the sheet covers the bar and
+   * the only way out of the inspector disappears. */
+  .app { --h-mtabs: 58px; }
+
   .app {
     grid-template-columns: 1fr;
     /* The monitor gets a third of the height — enough to judge a frame by,
@@ -2670,7 +2675,13 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * ───────────────────────────────────────────────────────────────────────── */
 @media (max-width: 599px) and (min-height: 521px) {
   .app.m-view-tools .rail {
-    position: fixed; left: 0; right: 0; bottom: 0;
+    position: fixed; left: 0; right: 0;
+    /* ABOVE the tool bar, not over it. At bottom:0 this sheet covered the bar
+     * completely — measured, the overlap was exactly its 58px and
+     * elementFromPoint at the bar's buttons returned the sheet's panel. The bar
+     * carries the Watch/Script switcher, so covering it is what made the
+     * inspector a room with no door. */
+    bottom: var(--h-mtabs);
     height: 56vh; z-index: var(--z-hud);
     background: var(--chrome);
     border-top: 1px solid var(--line);
@@ -2783,7 +2794,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   /* ── watch: the picture gets the screen ──────────────────────────────── */
   .app.m-mode-watch,
   .app.m-mode-watch[data-frame='portrait'] {
-    grid-template-rows: 44px minmax(0, 1fr) auto 0 58px;
+    grid-template-rows: 44px minmax(0, 1fr) auto 0 var(--h-mtabs);
     grid-template-areas: 'title' 'center' 'dock' 'content' 'mtabs';
   }
   .app.m-mode-watch .script { display: none; }
@@ -2791,7 +2802,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   /* ── script: the transcript gets it, the picture keeps a strip ────────── */
   .app.m-mode-script,
   .app.m-mode-script[data-frame='portrait'] {
-    grid-template-rows: 44px 120px minmax(0, 1fr) auto 58px;
+    grid-template-rows: 44px 120px minmax(0, 1fr) auto var(--h-mtabs);
     grid-template-areas: 'title' 'center' 'content' 'dock' 'mtabs';
   }
 
@@ -3526,3 +3537,22 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   .resume-acts { width: 100%; }
   .resume-acts .primary { flex: 1; }
 }
+
+/* ---- the way out of the inspector, on a phone ----
+ * Pushed to the right of the tabs, into the space they leave. That space is
+ * where the user asked for it, and it is the half of the bar a thumb reaches
+ * without crossing the screen.
+ *
+ * Only rendered when onLeave is passed, which App does only on the phone — so
+ * no desktop rule is needed to hide it. Outlined rather than filled: it changes
+ * WHAT YOU ARE LOOKING AT, like the Watch/Timeline pair, rather than changing
+ * the video the way an accent-filled control does. */
+.rail-back {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px; padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: var(--sunk); color: var(--text);
+  font-size: var(--t-ui); font-weight: 550;
+}
+.rail-back:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }

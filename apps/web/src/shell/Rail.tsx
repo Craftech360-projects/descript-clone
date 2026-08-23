@@ -6,6 +6,7 @@ import { useAgent } from '../store/agent.ts';
 import SelectionPanel from '../rail/SelectionPanel.tsx';
 import AgentPanel from '../agent/AgentPanel.tsx';
 import { Empty } from '../ui/Field.tsx';
+import Icon from '../ui/Icon.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
@@ -120,6 +121,15 @@ interface Props {
    * and from the Images section when generation is.
    */
   onOpenSettings: () => void;
+  /**
+   * Leave the inspector and go back to the picture. PHONE ONLY.
+   *
+   * The tool bar carrying the view switcher sits BELOW this panel, and on a tall
+   * phone it is pushed off the bottom — so once you are in here nothing on
+   * screen gets you out. Absent on a desk, where the rail is a permanent column
+   * beside the work and there is nothing to go back FROM.
+   */
+  onLeave?: () => void;
 }
 
 /**
@@ -293,6 +303,15 @@ export default function Rail(p: Props) {
         >
           Jumpy
         </button>
+        {/* On the right of the tabs, in the space they leave — where the user
+          * asked for it, and the side a thumb reaches without crossing the
+          * screen. Phone only: App passes onLeave nowhere else. */}
+        {p.onLeave && (
+          <button className="rail-back" onClick={p.onLeave} aria-label="Back to the video">
+            <Icon name="video" size={16} />
+            <span>Back</span>
+          </button>
+        )}
       </div>
       {tab === 'chat' ? (
         <AgentPanel

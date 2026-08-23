@@ -2491,6 +2491,33 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
    * a bare `.m-tool.on` (0,2,0) — the selected tool then wore the grey hover fill
    * under its gold-expecting dark text and was unreadable. */
 
+
+  /* ---- getting back out of a section ----
+   * On a phone an open section fills the sheet: its own header scrolls away
+   * with the content and the tool bar below is pushed off screen, leaving
+   * nothing that returns you to the list. Pinning the header keeps the exit
+   * on screen however far you have scrolled, and Done says plainly what the
+   * caret only implies. */
+  .sect.open > .sect-head {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .sect-done {
+    flex: 0 0 auto; margin-left: auto;
+    min-height: 30px; padding: 0 var(--s-2);
+    border-radius: var(--r-full);
+    background: var(--accent); color: var(--accent-fg); border: 0;
+    font-size: var(--t-small); font-weight: 600;
+  }
+
+  /* The tool bar is drawn OVER the end of the rail, so the last control in a
+   * panel sat underneath it and could not be tapped. The padding belongs on
+   * .panel, not .rail: .panel is the element that actually SCROLLS (the rail
+   * only contains it), and padding on a non-scrolling parent reserves nothing
+   * at the end of the scrolled content. */
+  .panel { padding-bottom: calc(58px + var(--s-3)); }
+
   /* ---- banners ----
    * The in-script pair may be on the hidden surface, so the fixed copies from
    * App.tsx carry the message and the originals go quiet. */

@@ -103,6 +103,22 @@ export function Section({ icon, label, value, toggle, children, defaultOpen }: {
             hideLabel
           />
         )}
+        {/* The way out, and only where one is needed.
+          *
+          * `shared` is set only when the sections are an ACCORDION, which is the
+          * phone. There, opening a section fills the sheet, its own header
+          * scrolls away with the content, and the tool bar carrying the view
+          * switcher is pushed off the bottom — so there is nothing on screen
+          * that gets you back. On a desk every section is visible at once and
+          * this would be noise, so it is not rendered.
+          *
+          * The header is sticky (see app.css), so this stays reachable however
+          * far down a long panel you have scrolled. */}
+        {shared && open && (
+          <button type="button" className="sect-done" onClick={() => setOpen(false)}>
+            Done
+          </button>
+        )}
       </div>
       {/* Hidden rather than unmounted, so a search you ran in the music browser
         * — or a half-typed filler word — survives collapsing the section to

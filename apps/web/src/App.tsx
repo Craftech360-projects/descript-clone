@@ -32,6 +32,7 @@ import Splitter from './shell/Splitter.tsx';
 import Rail from './shell/Rail.tsx';
 import Icon, { type IconName } from './ui/Icon.tsx';
 import { SectionOpen, sectionKey } from './ui/Field.tsx';
+import { SwipeAway } from './ui/SwipeAway.tsx';
 import TranscribeDialog from './dialogs/TranscribeDialog.tsx';
 import ExportDialog from './dialogs/ExportDialog.tsx';
 import SettingsDialog from './dialogs/SettingsDialog.tsx';
@@ -645,6 +646,15 @@ export default function App() {
   const selectedWords = useMemo(
     () => words.filter((w) => selectedSet.has(w.id)),
     [words, selectedSet],
+  );
+
+  /**
+   * A selection that is already cut offers Restore rather than a second Cut —
+   * the phone bar below has room for one verb, so it must be the true one.
+   */
+  const selectionIsCut = useMemo(
+    () => selectedWords.length > 0 && selectedWords.every((w) => w.deleted),
+    [selectedWords],
   );
 
   /** The source range the script selection covers, so both surfaces agree. */
@@ -1832,7 +1842,30 @@ export default function App() {
     video.paused ? video.play() : video.pause();
   }, []);
 
-  const onPlaybackEnded = useCallback(() => setPlaying(false), []);
+  /**
+   * Rewind when the piece finishes. To the top of the EDIT, not to raw zero —
+   * with the head of the source cut, second 0 is material that was deliberately
+   * removed, and parking the playhead there means the next Play starts on
+   * something the viewer already decided to throw away.
+   */
+  const onPlaybackEnded = useCallback(() => {
+    setPlaying(false);
+    requestClipSeek(edl.keep[0]?.start ?? 0, false);
+  }, [edl, requestClipSeek]);
+
+  /**
+   * The skip loop that calls the above only mounts while FOLLOWING the edit, so
+   * with Preview edit off nothing noticed the source running out: the transport
+   * stayed lit as though still playing and the playhead sat on the last frame.
+   * The element's own event covers that case. Both may fire for one stop, which
+   * is harmless — pausing and rewinding twice lands in the same place.
+   */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.addEventListener('ended', onPlaybackEnded);
+    return () => video.removeEventListener('ended', onPlaybackEnded);
+  }, [onPlaybackEnded]);
 
   // Declared after onPlaybackEnded on purpose: a const is in its temporal dead
   // zone until its initialiser runs, so calling this above would throw.
@@ -2851,10 +2884,46 @@ export default function App() {
           * media query hides the in-script pair to keep the message single. */}
         {(error || notice) && (
           <div className="m-banners">
-            {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
-            {notice && !error && (
-              <p className="notice" onClick={() => setNotice(null)}>{notice}</p>
+            {error && (
+              <SwipeAway onDismiss={() => setError(null)}>
+                <p className="error">{error}</p>
+              </SwipeAway>
             )}
+            {notice && !error && (
+              <SwipeAway onDismiss={() => setNotice(null)}>
+                <p className="notice">{notice}</p>
+              </SwipeAway>
+            )}
+          </div>
+        )}
+
+        {/* ---- phone-only: the cut itself ----
+          * On a desk the cut is Backspace, and the script's own footer names it.
+          * A phone has no Backspace, so until this bar existed a touch user
+          * could select a word and then do nothing with it — the one edit the
+          * whole app is built around was unreachable, and an export came out
+          * with every word still in it. It rides above the dock where a thumb
+          * lands, and it names what it will do to THIS selection. */}
+        {selectedWords.length > 0 && (
+          <div className="m-cutbar" role="toolbar" aria-label="Selected words">
+            <button
+              className="m-cutbar-clear"
+              onClick={() => setSelection(null)}
+              aria-label="Clear selection"
+            >
+              ✕
+            </button>
+            <span className="m-cutbar-what">
+              {selectedWords.length === 1
+                ? selectedWords[0].text
+                : `${selectedWords.length} words`}
+            </span>
+            <button
+              className="m-cutbar-do"
+              onClick={() => setSelectionDeleted(!selectionIsCut)}
+            >
+              {selectionIsCut ? 'Restore' : 'Cut'}
+            </button>
           </div>
         )}
 

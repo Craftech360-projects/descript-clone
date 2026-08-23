@@ -10,7 +10,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test packages/core/src/*.test.ts apps/server/src/*.test.ts apps/mcp/src/*.test.ts",
+    "test": "node --test packages/core/src/*.test.ts apps/server/src/*.test.ts apps/mcp/src/*.test.ts apps/web/src/**/*.test.ts",
     "server": "node --env-file-if-exists=.env --watch apps/server/src/index.ts",
     "server:prod": "node --env-file-if-exists=.env apps/server/src/index.ts",
     "web": "npm run dev --workspace apps/web",
@@ -26,6 +26,7 @@
     "dev chains with '&', which is POSIX-only. On Windows run server and web",
     "in two terminals.",
     "app = the whole product as ONE process on one port: it builds the UI and then serves it from the API server via WEB_DIST, exactly the way the packaged desktop app does. No Vite, no proxy, and nothing that can half-die and leave the browser talking to a server that is not there. Use server + web instead when you want hot reload while editing the UI. POSIX-only (env prefix), like dev.",
+    "web tests cover the pieces of the UI that are pure and can be got wrong quietly — gesture thresholds and the like. They must live in .ts, never .tsx: node --test does not parse JSX, and a test glob that matches a component file fails the whole run.",
     "mcp = the MCP server Hermes (or any MCP host) connects to. It is a SEPARATE process from the app on purpose: if an agent breaks the server while editing code, the app dies but this does not, so the agent can still read logs, run tests and revert. Its tests are in the test glob above; apps/mcp/src/*.test.ts would otherwise never run."
   ]
 }

@@ -2376,7 +2376,7 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 /* The phone-only elements. They are always in the DOM (App.tsx renders them
  * unconditionally so no JS media-query mirror is needed); CSS decides. */
-.m-tools, .m-banners { display: none; }
+.m-tools, .m-banners, .m-cutbar { display: none; }
 
 /* Narrow (a phone, either orientation's portrait) OR short (a landscape
  * phone — 844×390 is WIDER than the desktop breakpoint but has no height for
@@ -2501,6 +2501,41 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
     z-index: var(--z-toast);
   }
   .m-banners .error, .m-banners .notice { margin-bottom: 0; box-shadow: var(--shadow-3); }
+  /* Each banner is its own swipe surface, so two stacked ones leave
+   * independently and the gap between them travels with the top one. */
+  .swipeaway + .swipeaway { margin-top: var(--s-2); }
+
+  /* ---- the cut bar ----
+   * Sits on the same rail as the Jumpy button and clears the dock by the same
+   * variable, so the two can never end up on top of each other. Centred and
+   * narrow: it is a statement about the selection, not a toolbar. */
+  .m-cutbar {
+    display: flex; align-items: center; gap: var(--s-2);
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: var(--fab-bottom, var(--s-5));
+    z-index: var(--z-toast);
+    max-width: calc(100vw - var(--s-4) * 2);
+    padding: 6px 6px 6px var(--s-2);
+    border-radius: var(--r-full);
+    background: var(--raised); border: 1px solid var(--line);
+    box-shadow: var(--shadow-3);
+  }
+  .m-cutbar-what {
+    font-size: var(--t-ui); color: var(--dim);
+    max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .m-cutbar-clear {
+    flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: transparent; border: 0; color: var(--faint); font-size: 13px;
+  }
+  /* The one thing this bar exists for, so it carries the accent and the mass. */
+  .m-cutbar-do {
+    flex: 0 0 auto; min-height: 34px; padding: 0 var(--s-3);
+    border-radius: var(--r-full); border: 0;
+    background: var(--accent); color: var(--accent-fg);
+    font-size: var(--t-ui); font-weight: 600;
+  }
 
   /* ---- title bar: keep the actions, drop the readouts ----
    * The output-length stat and the document name are things a phone user can

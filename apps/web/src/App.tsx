@@ -2368,7 +2368,13 @@ export default function App() {
       writePost: async (target) => {
         if (!project) throw new Error('No project is open.');
         const r = await api.social(project.id, { model: agentModel(), target });
-        return { ...r.draft, usedMemory: r.usedBrief, folder: r.folder };
+        return {
+          ...r.draft,
+          usedMemory: r.usedBrief,
+          folder: r.folder,
+          ranOn: r.ranOn,
+          fellBack: r.fellBack,
+        };
       },
 
       lookAtFrame: async (atSeconds) => {

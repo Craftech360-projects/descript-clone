@@ -22,7 +22,7 @@ import {
 } from '../../../packages/core/src/social.ts';
 
 /** One non-streaming completion from whichever backend the id names. */
-async function complete(model: string, prompt: string): Promise<{ text?: string; error?: string }> {
+async function once(model: string, prompt: string): Promise<{ text?: string; error?: string }> {
   if (local.isLocalModel(model)) {
     // No tools: this is a writing task, and tool schemas are the thing small
     // models handle worst. See agent-local's note on tool breadth.
@@ -62,6 +62,46 @@ async function complete(model: string, prompt: string): Promise<{ text?: string;
     error:
       'No model is available for writing. Start a local model (Ollama or LM Studio) and pick it in the assistant, or configure a hosted one.',
   };
+}
+
+/**
+ * The chosen model first, a local one as the safety net.
+ *
+ * Claude answers when it can, and is the default. But it is the only part of
+ * this that needs the network and a live token, and a title is not worth
+ * failing the request over — if the machine has a local runtime it is sitting
+ * idle at loopback and is good at exactly this shape of work: short, bounded,
+ * one answer, no tool loop to hold together.
+ *
+ * The fallback only ever runs DOWNHILL. A local model that fails has nowhere
+ * cheaper to go, so it is never retried against a hosted one — that would spend
+ * the user's money to paper over a runtime they chose deliberately.
+ *
+ * And it is never silent: the caller is told which model actually answered.
+ * Copy from a 7B and copy from Claude are not the same thing, and whoever is
+ * about to publish it should know which one they are reading.
+ */
+async function complete(
+  model: string,
+  prompt: string,
+): Promise<{ text?: string; error?: string; ranOn?: string; fellBack?: boolean }> {
+  const first = await once(model, prompt);
+  if (!first.error) return { ...first, ranOn: model };
+
+  if (local.isLocalModel(model) || !local.hasLocalAgent()) return first;
+
+  const backup = local.localAgent()?.models[0];
+  if (!backup) return first;
+
+  const second = await once(local.LOCAL_PREFIX + backup, prompt);
+  if (second.error) {
+    // Both failed: say so in one message. Reporting only the second would blame
+    // the backup for a problem that started upstream.
+    return {
+      error: `${model} failed (${first.error}) and the local backup ${backup} also failed (${second.error}).`,
+    };
+  }
+  return { ...second, ranOn: local.LOCAL_PREFIX + backup, fellBack: true };
 }
 
 export function registerSocial(app: Hono): void {
@@ -152,7 +192,7 @@ export function registerSocial(app: Hono): void {
       projectName: project.name,
     });
 
-    const { text, error } = await complete(model, prompt);
+    const { text, error, ranOn, fellBack } = await complete(model, prompt);
     if (error) return c.json({ error }, 502);
 
     const draft = parseDraft(text ?? '', target);
@@ -168,6 +208,15 @@ export function registerSocial(app: Hono): void {
       );
     }
 
-    return c.json({ draft, usedBrief: Boolean(folder?.brief?.trim()), folder: folder?.name ?? null });
+    return c.json({
+      draft,
+      usedBrief: Boolean(folder?.brief?.trim()),
+      folder: folder?.name ?? null,
+      // Which model actually answered, and whether that was the second choice.
+      // The panel and the agent both say so rather than presenting a local
+      // draft as though Claude had written it.
+      ranOn: ranOn ?? model,
+      fellBack: Boolean(fellBack),
+    });
   });
 }

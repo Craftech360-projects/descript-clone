@@ -517,7 +517,15 @@ export const api = {
   /** Write the post. The folder's brief is applied server-side. */
   social: (id: string, body: { model: string; target: string }) =>
     post(`/api/projects/${id}/social`, body).then(
-      json<{ draft: SocialDraft; usedBrief: boolean; folder: string | null }>,
+      json<{
+        draft: SocialDraft;
+        usedBrief: boolean;
+        folder: string | null;
+        /** Which model actually answered — not always the one that was asked. */
+        ranOn: string;
+        /** True when the chosen model failed and the local backup wrote this. */
+        fellBack: boolean;
+      }>,
     ),
 
   list: () => fetch('/api/projects').then(json<MediaItem[]>),

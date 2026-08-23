@@ -134,7 +134,17 @@ export interface AgentBridge {
   /** Attach one of those by id. */
   attachMusic(id: string, volume?: number): Promise<string>;
   /** Title, description and hashtags, using the folder's memory. */
-  writePost(target: string): Promise<{ title: string; description: string; hashtags: string[]; usedMemory: boolean; folder: string | null }>;
+  writePost(target: string): Promise<{
+    title: string;
+    description: string;
+    hashtags: string[];
+    usedMemory: boolean;
+    folder: string | null;
+    /** Which model actually answered — not always the one that was asked. */
+    ranOn: string;
+    /** True when the chosen model failed and the local backup wrote this. */
+    fellBack: boolean;
+  }>;
   /** A web page's text. Data, never instruction. */
   readWebpage(url: string): Promise<{ url: string; title: string; text: string; truncated: boolean }>;
   /** The folders, and whether each carries a memory. */
@@ -1086,6 +1096,10 @@ const executors: Record<string, (args: Args) => string | Promise<string>> = {
   write_post: async (args) => {
     const r = await requireBridge().writePost(str(args.target) ?? 'reels');
     return [
+      // Said first, and unprompted: a draft the local backup wrote is not the
+      // one the user asked for, and finding that out after publishing is worse
+      // than reading one extra line here.
+      r.fellBack ? `NOTE: the chosen model was unavailable, so ${r.ranOn} wrote this instead.` : '',
       r.usedMemory
         ? `Written with the "${r.folder}" folder's memory.`
         : r.folder

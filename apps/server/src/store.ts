@@ -35,6 +35,13 @@ export interface StoredClip {
   peaks: number[];
   thumbs?: Thumbs;
   /**
+   * A small H.264 stand-in for PLAYBACK, when one has been built. The renderer
+   * never looks at this — see proxy.ts for why that separation is the whole
+   * point. Absent until the proxy job finishes, and on projects imported before
+   * proxies existed; the client falls back to sourceUrl.
+   */
+  proxyUrl?: string;
+  /**
    * Where in its source file this clip begins, in seconds. Absent (≡ 0) for a
    * whole-file clip — every clip until one is split. Splitting a clip makes two
    * clips that share one file: the first keeps sourceStart 0 and a shortened
@@ -231,6 +238,8 @@ export interface Project {
   studioSound?: boolean;
   /** Clean the voice with DeepFilterNet before rendering. See denoise.ts. */
   denoise?: boolean;
+  /** Playback stand-in for the single-source case. See StoredClip.proxyUrl. */
+  proxyUrl?: string;
   /**
    * The cover frame shown on the dashboard card, as a /media URL. Absent on
    * audio, and on video whose cover has not been built yet — `list` builds any
@@ -680,5 +689,6 @@ function singleClipFrom(p: Project): StoredClip {
     fps: p.fps,
     peaks: p.peaks,
     thumbs: p.thumbs,
+    proxyUrl: p.proxyUrl,
   };
 }

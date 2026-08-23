@@ -55,6 +55,8 @@ export interface Project {
   /** Cut settings, wire shape (maxGapMs 0 = keep every pause). Absent on projects
    *  saved before cut settings were persisted; the client falls back to defaults. */
   cut?: CutSettings;
+  /** Playback stand-in for a single-source project. See Clip.proxyUrl. */
+  proxyUrl?: string;
   /** Studio sound voice enhancer */
   studioSound?: boolean;
   /** Clean the voice with the trained denoiser on export. See server denoise.ts. */
@@ -181,6 +183,12 @@ export interface MusicResult {
 export interface Clip {
   id: string;
   sourceUrl: string;
+  /**
+   * A small H.264 stand-in used for PLAYBACK only. Absent until the proxy job
+   * finishes, and on projects imported before proxies existed — the player falls
+   * back to sourceUrl. Exports always come from the original.
+   */
+  proxyUrl?: string;
   duration: number;
   hasVideo: boolean;
   width?: number;

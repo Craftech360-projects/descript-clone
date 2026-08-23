@@ -435,7 +435,13 @@ const Monitor = forwardRef<HTMLVideoElement, Props>(function Monitor(
             <GradeFilter id={MONITOR_GRADE_ID} grade={grade} />
             <video
               ref={ref}
-              src={clip.sourceUrl}
+              /* The proxy when one exists — a small H.264 stand-in that scrubs
+                 without buffering, especially over a network to a phone. Falls
+                 back to the original while the proxy is still being built, and
+                 forever on projects that predate it. The EXPORT is unaffected:
+                 the renderer reads the original off disk and never sees this.
+                 See apps/server/src/proxy.ts. */
+              src={clip.proxyUrl ?? clip.sourceUrl}
               onTimeUpdate={onTimeUpdate}
               onPlay={onPlay}
               onPause={onPause}

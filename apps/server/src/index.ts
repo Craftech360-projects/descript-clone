@@ -18,6 +18,7 @@ import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
 import * as denoise from './denoise.ts';
 import * as resumable from './resumable.ts';
+import * as proxy from './proxy.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
@@ -434,6 +435,7 @@ app.post('/api/projects', async (c) => {
     );
   }
   await store.save(project);
+  startProxy(project.id);
   return c.json(project);
 });
 
@@ -588,6 +590,7 @@ app.post('/api/uploads/:id/finish', async (c) => {
     );
   }
   await store.save(project);
+  startProxy(project.id);
   return c.json(project);
 });
 
@@ -596,6 +599,51 @@ app.delete('/api/uploads/:id', async (c) => {
   await resumable.discard(c.req.param('id'));
   return c.json({ ok: true });
 });
+
+
+/**
+ * Kick off the playback proxy for a project, in the background.
+ *
+ * Deliberately fire-and-forget: import must return the moment the media is on
+ * disk, because the user wants to start reading the transcript, not watch a
+ * progress bar for a file they already have. Until it lands the player falls
+ * back to the original, which is exactly what it did before proxies existed —
+ * so a failure here costs speed, never function.
+ */
+/**
+ * Build (or rebuild) the playback proxy for an existing project.
+ *
+ * Import does this on its own, but every project that predates proxies has none
+ * — and those are exactly the big 4K files that need one most. Returns the job
+ * so the client can watch it.
+ */
+app.post('/api/projects/:id/proxy', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project.hasVideo) return c.json({ error: 'Audio projects need no preview copy.' }, 400);
+  const job = startProxy(project.id);
+  return c.json({ jobId: job?.id ?? null });
+});
+
+function startProxy(projectId: string): { id: string } | null {
+  return jobs.start(projectId, 'proxy', 'Preparing preview', async (runner) => {
+    const fresh = await store.get(projectId);
+    if (!fresh) return {};
+    const clips = store.ensureClips(fresh);
+    for (const clip of clips) {
+      if (!clip.hasVideo) continue;
+      await proxy.build(clip.sourcePath, (stage) => runner.onProgress({ progress: -1, stage }));
+      clip.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      // Single-source projects are read through the flat fields too, so the top
+      // level has to carry it or clipsOf would hand back a clip with no proxy.
+      if (clips.length === 1) fresh.proxyUrl = clip.proxyUrl;
+      // Saved per clip rather than once at the end: a five-clip project should
+      // start playing smoothly from the first, not after the last.
+      await store.save(fresh);
+    }
+    return {};
+  });
+}
 
 app.get('/api/projects/:id', async (c) => {
   const project = await store.get(c.req.param('id'));

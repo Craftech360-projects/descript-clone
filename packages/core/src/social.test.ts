@@ -97,3 +97,40 @@ test('with no brief the prompt says so rather than inventing a personality', () 
   const p = buildPrompt({ transcript: 'hello', brief: '   ', target: reels, projectName: 'a.mp4' });
   assert.ok(/Nothing recorded yet/i.test(p));
 });
+
+/**
+ * Hashtags on a runtime with no ICU.
+ *
+ * The Android build ships nodejs-mobile, which has no ICU data, and there a
+ * `\p{...}` regex does not mis-match — it fails to COMPILE. Because a regex
+ * literal compiles when the module is PARSED, that took down the whole server
+ * bundle at import and the app died on its splash screen. These pin both the
+ * behaviour we want where ICU exists and the fallback's one non-negotiable
+ * property: it must never delete a script.
+ */
+test('hashtags keep combining marks, so Devanagari survives', () => {
+  // The case the property escape existed for: strip the matras and "यात्रा"
+  // becomes "यतर", which is not a word in any language.
+  const [tag] = normalizeHashtags(['#यात्रा'], 5);
+  assert.equal(tag, '#यात्रा');
+});
+
+test('hashtags strip punctuation and keep letters, digits, underscore', () => {
+  assert.deepEqual(normalizeHashtags(['#hello!world', '#a_1', '#with space'], 5), [
+    '#helloworld',
+    '#a_1',
+    '#withspace',
+  ]);
+});
+
+test('the ICU-free fallback keeps non-Latin scripts intact', () => {
+  // Exercising the fallback directly, since the test runtime HAS ICU: whatever
+  // the fallback does, it must not empty out a non-Latin string. A hashtag that
+  // is slightly too permissive is recoverable; one that deleted a language is not.
+  const fallback = /[^0-9A-Za-z_À-ɏͰ-￿]/g;
+  for (const s of ['यात्रा', '日本語', 'Ελλάδα', 'Россия', 'العربية']) {
+    assert.equal(s.replace(fallback, ''), s, `${s} must survive the no-ICU fallback`);
+  }
+  // and it still removes what a hashtag cannot contain
+  assert.equal('a!b c'.replace(fallback, ''), 'abc');
+});

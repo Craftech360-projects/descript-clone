@@ -151,6 +151,34 @@ export function parseDraft(raw: string, target: SocialTarget): SocialDraft | nul
   };
 }
 
+/**
+ * What may stay in a hashtag: letters, combining marks, digits, underscore.
+ *
+ * \p{M} — combining marks — is not optional. Without it Devanagari loses its
+ * matras and "#यात्रा" comes out "#यतर", which is not a word. Any script that
+ * builds letters from a base plus marks breaks the same way.
+ *
+ * But Unicode property escapes need ICU DATA, and the Android runtime
+ * (nodejs-mobile) ships without it. There the regex does not merely
+ * mis-match — it fails to COMPILE, and a regex literal is compiled when the
+ * module is parsed, so the whole server bundle failed to import and the app
+ * died on the splash screen with no way to say why.
+ *
+ * So it is built once, in a try, and falls back to a range that keeps digits,
+ * ASCII letters and everything from Greek upward. That is coarser — it lets
+ * some CJK punctuation through — but it keeps every non-Latin script INTACT,
+ * which is the property worth protecting. Being slightly permissive on a
+ * hashtag is a much smaller failure than deleting a language.
+ */
+const TAG_STRIP: RegExp = (() => {
+  try {
+    return new RegExp('[^\\p{L}\\p{M}\\p{N}_]', 'gu');
+  } catch {
+    return /[^0-9A-Za-z_\u00C0-\u024F\u0370-\uFFFF]/g;
+  }
+})();
+
+
 /** Accepts an array, or the comma/space separated string a small model often sends. */
 export function normalizeHashtags(value: unknown, max: number): string[] {
   const raw: string[] = Array.isArray(value)
@@ -162,10 +190,7 @@ export function normalizeHashtags(value: unknown, max: number): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const item of raw) {
-    // \p{M} — combining marks — is not optional. Without it Devanagari loses its
-    // matras and "#यात्रा" comes out "#यतर", which is not a word. Any script that
-    // builds letters from a base plus marks breaks the same way.
-    const tag = `#${item.trim().replace(/^#+/, '').replace(/[^\p{L}\p{M}\p{N}_]/gu, '')}`.toLowerCase();
+    const tag = `#${item.trim().replace(/^#+/, '').replace(TAG_STRIP, '')}`.toLowerCase();
     if (tag.length < 2) continue;
     if (seen.has(tag)) continue;
     seen.add(tag);

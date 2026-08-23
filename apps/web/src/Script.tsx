@@ -12,6 +12,11 @@ import {
 import { toParagraphs, speakerLabel, type Paragraph } from '../../../packages/core/src/paragraphs.ts';
 import type { Transcript, Word } from '../../../packages/core/src/types.ts';
 
+/** How long a finger must stay put before a press becomes a range selection. */
+const HOLD_MS = 350;
+/** How far it may wander in that time and still count as staying put. */
+const HOLD_SLOP = 10;
+
 interface Props {
   transcript: Transcript;
   selection: Set<string>;
@@ -43,6 +48,10 @@ interface Props {
   onMoveCursor: (id: string, extend: boolean) => void;
   /** Cut the selection — the same edit the global Backspace makes. */
   onDeleteSelection: () => void;
+  /** Put a cut selection back — the same edit Ctrl+D makes. */
+  onRestoreSelection: () => void;
+  /** Drop the selection entirely, the way Escape does. */
+  onClearSelection: () => void;
   /** Open the Transcribe dialog to redo the script. Sits at the end of the page. */
   onRetranscribe: () => void;
 }
@@ -67,6 +76,8 @@ export default function Script({
   onSelectRange,
   onMoveCursor,
   onDeleteSelection,
+  onRestoreSelection,
+  onClearSelection,
   onRetranscribe,
 }: Props) {
   const paragraphs = toParagraphs(transcript);
@@ -115,6 +126,12 @@ export default function Script({
   // all, so stepping onto one would focus nothing and strand the cursor
   // mid-transcript with no way out but the mouse.
   const visible = showDeleted ? transcript.words : transcript.words.filter((w) => !w.deleted);
+
+  // What the phone's cut bar is talking about. Derived rather than stored: the
+  // selection lives upstream, and a bar that kept its own copy could disagree
+  // with the highlight the user can see.
+  const selected = transcript.words.filter((w) => selection.has(w.id));
+  const allCut = selected.length > 0 && selected.every((w) => w.deleted);
 
   // A roving tabindex: exactly ONE word is tabbable and the rest are -1, so Tab
   // enters the script and then LEAVES it. Making every word tabbable would bury
@@ -300,6 +317,38 @@ export default function Script({
   // collapse everything the drag just painted.
   const dragFocusId = useRef<string | null>(null);
 
+  // ── holding a finger down to select a run ───────────────────────────────────
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pressAt = useRef<{ x: number; y: number } | null>(null);
+  const rangeMode = useRef(false);
+  // Mirrored into state ONLY so the page can show it is in range mode. The
+  // gesture itself runs off the ref, at pointer rate, and never re-renders.
+  const [ranging, setRanging] = useState(false);
+
+  /**
+   * Stop the page scrolling once a hold has turned into a selection.
+   *
+   * `touch-action` cannot do this: the browser reads it at touchstart and will
+   * not reconsider mid-gesture, and at touchstart we do not yet know whether
+   * this is a hold or a scroll. Setting it permanently would cost the script its
+   * scrolling, which is most of what a phone does here. preventDefault on a
+   * NON-PASSIVE touchmove is the only thing that decides late — and React's
+   * onTouchMove is passive, so the listener has to be attached by hand.
+   */
+  useEffect(() => {
+    const page = pageRef.current;
+    if (!page) return;
+    const eat = (e: TouchEvent) => {
+      if (rangeMode.current) e.preventDefault();
+    };
+    page.addEventListener('touchmove', eat, { passive: false });
+    return () => page.removeEventListener('touchmove', eat);
+  }, []);
+
+  // A hold that is interrupted by an unmount must not leave a timer running that
+  // sets state on a component that is gone.
+  useEffect(() => () => clearTimeout(pressTimer.current), []);
+
   // Double-click detection, done by hand rather than trusting the native
   // dblclick event or e.detail — both of which the drag-select machinery can
   // eat. Every word click records its id and time; a second click on the same
@@ -317,6 +366,26 @@ export default function Script({
     if (!wid) return;
     anchorId.current = wid;
     dragged.current = false;
+
+    // A finger that STAYS PUT starts a range selection.
+    //
+    // On a mouse a drag can just select, because nothing else wants the gesture.
+    // A finger dragging across the script is asking the browser to scroll, and
+    // the browser wins: it takes the gesture and sends pointercancel, so
+    // drag-select simply did not exist on a phone. Holding still first is how
+    // every phone says "I mean this one, not the page" — the same idiom as
+    // native text selection — and it is unambiguous, because a scroll never
+    // begins with a pause.
+    if (e.pointerType === 'touch') {
+      pressAt.current = { x: e.clientX, y: e.clientY };
+      clearTimeout(pressTimer.current);
+      pressTimer.current = setTimeout(() => {
+        rangeMode.current = true;
+        setRanging(true);
+        // The suppressor below is already listening; from here it eats the
+        // touchmoves so the page cannot scroll out from under the selection.
+      }, HOLD_MS);
+    }
     // NOTE: capture is deliberately NOT taken here. A pointer captured on press
     // redirects the click that follows to .page — and, worse, the SECOND click of
     // a double-click — so it never reaches the word. That silently broke
@@ -327,6 +396,19 @@ export default function Script({
   const onPointerMove = (e: ReactPointerEvent) => {
     // buttons === 1: left button still held. A hover with no press must not select.
     if (anchorId.current == null || e.buttons !== 1) return;
+
+    // Before the hold completes, a finger that wanders is scrolling, not
+    // selecting — let it go and take the timer with it, or a flick down the page
+    // would arm a selection the user never asked for.
+    if (e.pointerType === 'touch' && !rangeMode.current) {
+      const at = pressAt.current;
+      if (at && Math.hypot(e.clientX - at.x, e.clientY - at.y) > HOLD_SLOP) {
+        clearTimeout(pressTimer.current);
+        anchorId.current = null;
+      }
+      return;
+    }
+
     const wid = widUnder(e.clientX, e.clientY);
     if (!wid) return;
     // Stay a plain click until the cursor actually crosses onto another word, so
@@ -345,6 +427,12 @@ export default function Script({
 
   const onPointerUp = () => {
     anchorId.current = null;
+    clearTimeout(pressTimer.current);
+    pressAt.current = null;
+    if (rangeMode.current) {
+      rangeMode.current = false;
+      setRanging(false);
+    }
     if (dragged.current && dragFocusId.current) focusWord(dragFocusId.current);
     dragFocusId.current = null;
   };
@@ -365,7 +453,7 @@ export default function Script({
     // are NOT this element. Catching background clicks here left most of the
     // obvious "empty" space dead; the scroll container is the honest hit target.
     <div
-      className="page"
+      className={ranging ? 'page ranging' : 'page'}
       ref={pageRef}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -417,6 +505,41 @@ export default function Script({
           <kbd>Enter</kbd> fix a spelling · <kbd>Backspace</kbd> cut
         </p>
       </div>
+
+      {/* ---- phone-only: the verbs the legend above names ----
+        * Every edit on this surface is bound to a key a phone does not have, so
+        * a touch user could select a word and then do nothing with it. This bar
+        * carries the same three verbs for a thumb, and lives HERE rather than in
+        * App because two of them — the spelling editor and the selection — are
+        * this component's own state.
+        *
+        * Inside .script on purpose: the phone hides that whole surface in watch
+        * mode, and a bar offering to cut words nobody can see would be a lie.
+        * position:fixed still resolves against the viewport — nothing up the
+        * tree establishes a containing block (checked). */}
+      {selected.length > 0 && editingId === null && (
+        <div className="m-cutbar" role="toolbar" aria-label="Selected words">
+          <button className="m-cutbar-clear" onClick={onClearSelection} aria-label="Clear selection">
+            ✕
+          </button>
+          <span className="m-cutbar-what">
+            {selected.length === 1 ? selected[0].text : `${selected.length} words`}
+          </span>
+          {/* One word only: the editor fixes a spelling, and there is no such
+            * thing as the spelling of a run of five words. */}
+          {selected.length === 1 && (
+            <button className="m-cutbar-edit" onClick={() => setEditingId(selected[0].id)}>
+              Edit
+            </button>
+          )}
+          <button
+            className="m-cutbar-do"
+            onClick={allCut ? onRestoreSelection : onDeleteSelection}
+          >
+            {allCut ? 'Restore' : 'Cut'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

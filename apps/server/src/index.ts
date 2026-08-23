@@ -1140,8 +1140,11 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions, speed, cut, studioSound, frame, color, overlays } = await c.req.json<{
+  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, frame, color, overlays } =
+    await c.req.json<{
     deletedIds: string[];
+    texts?: Record<string, unknown>;
+    speakers?: Record<string, unknown>;
     captions?: CaptionSettings;
     speed?: number;
     cut?: Partial<CutSettings>;
@@ -1152,6 +1155,35 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
+
+  /**
+   * Corrected spellings, and the speaker labels beside them.
+   *
+   * Sanitised, not trusted, exactly like cut/frame/color below: only ids this
+   * transcript actually has are looked at, only strings are taken, and each is
+   * capped so a hostile or buggy client cannot grow the record without bound.
+   *
+   * `texts` is applied per word rather than replacing the array, so a word the
+   * map omits keeps the text it had — an OLDER client, which sends no `texts`
+   * at all, must not blank the script it cannot see. `speakers` is a whole
+   * replacement because clearing a label has to be expressible, and absent is
+   * the only way to say it.
+   */
+  const MAX_WORD = 200;
+  const MAX_SPEAKER = 80;
+  if (texts && typeof texts === 'object') {
+    for (const word of project.transcript.words) {
+      const t = texts[word.id];
+      if (typeof t === 'string') word.text = t.slice(0, MAX_WORD);
+    }
+  }
+  if (speakers && typeof speakers === 'object') {
+    for (const word of project.transcript.words) {
+      const s = speakers[word.id];
+      word.speaker = typeof s === 'string' && s ? s.slice(0, MAX_SPEAKER) : undefined;
+    }
+  }
+
   if (captions) project.captions = captions;
   // Distinguish "not sent" from "sent as 1": an older client omits the field and
   // must not have its speed reset, but a user picking 1x must have it saved.

@@ -613,6 +613,10 @@ export const api = {
     id: string,
     doc: {
       deletedIds: string[];
+      /** id → corrected spelling, for every word. See the call site in App. */
+      texts?: Record<string, string>;
+      /** id → speaker label, only for words that have one. */
+      speakers?: Record<string, string>;
       captions?: CaptionSettings;
       speed?: number;
       cut?: CutSettings;

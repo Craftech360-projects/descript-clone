@@ -566,6 +566,20 @@ export default function App() {
       try {
         await api.saveDoc(id, {
           deletedIds: d.words.filter((w) => w.deleted).map((w) => w.id),
+          // Corrected spellings and speaker labels. These are part of the
+          // DOCUMENT, not view state, and until now nothing ever wrote a word's
+          // text back to disk: a fixed name lived in this tab's memory, showed
+          // up in the preview, and was gone on reload — and the caption burn-in,
+          // which reads the stored transcript on the server, shipped the raw ASR
+          // text every time. That is the whole "export uses the old script" bug.
+          //
+          // Whole maps rather than a diff, for the reason deletedIds is a whole
+          // set: it is idempotent, needs no dirty-tracking, and a save that
+          // failed is repaired by the next one instead of being lost.
+          texts: Object.fromEntries(d.words.map((w) => [w.id, w.text])),
+          speakers: Object.fromEntries(
+            d.words.flatMap((w) => (w.speaker ? [[w.id, w.speaker] as const] : [])),
+          ),
           captions: d.captions,
           speed: d.speed,
           studioSound: d.studioSound,
@@ -646,15 +660,6 @@ export default function App() {
   const selectedWords = useMemo(
     () => words.filter((w) => selectedSet.has(w.id)),
     [words, selectedSet],
-  );
-
-  /**
-   * A selection that is already cut offers Restore rather than a second Cut —
-   * the phone bar below has room for one verb, so it must be the true one.
-   */
-  const selectionIsCut = useMemo(
-    () => selectedWords.length > 0 && selectedWords.every((w) => w.deleted),
-    [selectedWords],
   );
 
   /** The source range the script selection covers, so both surfaces agree. */
@@ -2735,6 +2740,8 @@ export default function App() {
             onSelectRange={(anchorId, focusId) => setSelection({ anchorId, focusId })}
             onMoveCursor={moveCursor}
             onDeleteSelection={() => setSelectionDeleted(true)}
+            onRestoreSelection={() => setSelectionDeleted(false)}
+            onClearSelection={() => setSelection(null)}
             onRetranscribe={() => setDialog('transcribe')}
           />
         )}
@@ -2894,36 +2901,6 @@ export default function App() {
                 <p className="notice">{notice}</p>
               </SwipeAway>
             )}
-          </div>
-        )}
-
-        {/* ---- phone-only: the cut itself ----
-          * On a desk the cut is Backspace, and the script's own footer names it.
-          * A phone has no Backspace, so until this bar existed a touch user
-          * could select a word and then do nothing with it — the one edit the
-          * whole app is built around was unreachable, and an export came out
-          * with every word still in it. It rides above the dock where a thumb
-          * lands, and it names what it will do to THIS selection. */}
-        {selectedWords.length > 0 && (
-          <div className="m-cutbar" role="toolbar" aria-label="Selected words">
-            <button
-              className="m-cutbar-clear"
-              onClick={() => setSelection(null)}
-              aria-label="Clear selection"
-            >
-              ✕
-            </button>
-            <span className="m-cutbar-what">
-              {selectedWords.length === 1
-                ? selectedWords[0].text
-                : `${selectedWords.length} words`}
-            </span>
-            <button
-              className="m-cutbar-do"
-              onClick={() => setSelectionDeleted(!selectionIsCut)}
-            >
-              {selectionIsCut ? 'Restore' : 'Cut'}
-            </button>
           </div>
         )}
 

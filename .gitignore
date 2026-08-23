@@ -33,3 +33,6 @@ apps/server/native/caption-render/jumpcut-captions
 data/
 .*-probe.mjs
 .DS_Store
+
+# Machine-specific: points gradle at THIS machine's Android SDK.
+desktop/android/local.properties

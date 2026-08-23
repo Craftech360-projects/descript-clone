@@ -55,7 +55,14 @@ set -euo pipefail
 # ── toolchain ─────────────────────────────────────────────────────────────────
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to your NDK r27 install}"
 API=29
-HOST_TAG=linux-x86_64
+# The NDK ships one prebuilt toolchain per BUILD host, and the directory name is
+# the host's, not the target's. Hardcoding linux-x86_64 meant this script only ran
+# on Linux; the NDK on a Mac has darwin-x86_64 (which runs under Rosetta on Apple
+# Silicon, and builds the same arm64 Android binaries either way).
+case "$(uname -s)" in
+  Darwin) HOST_TAG=darwin-x86_64 ;;
+  *)      HOST_TAG=linux-x86_64 ;;
+esac
 TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG"
 TARGET=aarch64-linux-android
 
@@ -73,7 +80,9 @@ OUT="$ROOT/out"
 mkdir -p "$BUILD" "$PREFIX" "$OUT"
 cd "$BUILD"
 
-JOBS=$(nproc)
+# nproc is coreutils and absent on macOS; sysctl is the BSD spelling. The `|| echo 4`
+# is the honest fallback rather than an empty -j, which would fork unboundedly.
+JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 clone() { # clone <url> <dir> <ref>
   if [ ! -d "$2" ]; then git clone --depth 1 --branch "$3" "$1" "$2"; fi

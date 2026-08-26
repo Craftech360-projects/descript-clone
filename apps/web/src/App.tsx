@@ -2992,7 +2992,29 @@ export default function App() {
               studioSound={doc?.studioSound ?? false}
               onToggleStudioSound={updateStudioSound}
               denoise={doc?.denoise ?? false}
-              onToggleDenoise={updateDenoise}
+              onToggleDenoise={(on) => {
+                updateDenoise(on);
+                // Do the work NOW, with a progress bar, rather than silently
+                // inside the next export. Turning the switch on and seeing
+                // nothing happen is what made this look broken. Off needs no
+                // job — the cleaned file simply stops being used.
+                if (!on || !project) return;
+                void (async () => {
+                  try {
+                    const { jobId } = await api.cleanVoice(project.id);
+                    if (!jobId) return;
+                    setJob({ id: jobId, progress: -1, stage: 'Cleaning voice', kind: 'denoise' });
+                    await waitForJob(jobId, (j) =>
+                      setJob({ id: jobId, progress: j.progress, stage: j.stage, kind: 'denoise' }),
+                    );
+                    setJob(null);
+                    setNotice('Voice cleaned — the export will use it.');
+                  } catch (e) {
+                    setJob(null);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                })();
+              }}
               canCleanVoice={caps.canCleanVoice ?? false}
               frame={frame}
               setFrame={updateFrame}

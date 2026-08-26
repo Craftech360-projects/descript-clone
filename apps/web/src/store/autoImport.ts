@@ -45,15 +45,35 @@ export interface AutoImport {
   captions: boolean;
 }
 
+/**
+ * What happens to a file on import, and what does NOT.
+ *
+ * Everything that CHANGES THE VIDEO is off. An import should hand you your
+ * footage as you shot it; cleaning it up is an edit, and an edit is something
+ * you ask for. With fillers, pauses and speed all on by default, a freshly
+ * imported clip skipped in a dozen places and ran 1.2x fast before its owner had
+ * touched anything — which reads as the tool being broken, not as it having been
+ * helpful. The controls are all still there, one tap away, for when you do want
+ * them.
+ *
+ * `transcribe` stays on because without words there is nothing to edit with —
+ * it adds information and removes none. `captions` stays on because it is a
+ * display setting this editor exists to drive, it cuts nothing, and it is
+ * visible and reversible the moment you see it.
+ *
+ * The values (50ms, 1.2x) are kept, not zeroed: they are the right settings for
+ * when the switch IS turned on, and forgetting them would make the feature worse
+ * the first time someone reaches for it.
+ */
 export const AUTO_IMPORT_DEFAULTS: AutoImport = {
   transcribe: true,
   asrProvider: 'sarvam',
-  fillers: true,
-  pauses: true,
+  fillers: false,
+  pauses: false,
   pauseCapMs: 50,
-  speed: true,
+  speed: false,
   speedValue: 1.2,
-  studioSound: true,
+  studioSound: false,
   captions: true,
 };
 

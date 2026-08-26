@@ -17,7 +17,7 @@ import { CONFIG } from './config.ts';
  * process. In-memory jobs would vanish and the client would poll a 404 forever.
  */
 
-export type JobKind = 'transcribe' | 'render' | 'thumbs' | 'proxy';
+export type JobKind = 'transcribe' | 'render' | 'thumbs' | 'proxy' | 'denoise';
 export type JobState = 'queued' | 'running' | 'done' | 'error' | 'canceled';
 
 export interface Job {

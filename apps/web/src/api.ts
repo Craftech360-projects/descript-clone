@@ -431,7 +431,7 @@ export interface RenderSettings extends CutSettings {
   overlays?: ImageOverlay[];
 }
 
-export type JobKind = 'transcribe' | 'render' | 'thumbs';
+export type JobKind = 'transcribe' | 'render' | 'thumbs' | 'proxy' | 'denoise';
 export type JobState = 'queued' | 'running' | 'done' | 'error' | 'canceled';
 
 export interface Job {
@@ -541,6 +541,13 @@ export const api = {
     ),
 
   list: () => fetch('/api/projects').then(json<MediaItem[]>),
+
+  /**
+   * Run the voice cleaner now, as a job with progress, instead of silently
+   * inside the next export. Returns the job to watch.
+   */
+  cleanVoice: (id: string) =>
+    post(`/api/projects/${id}/clean-voice`, {}).then(json<{ jobId: string | null }>),
 
   /** Uploads that started and never finished, newest first. */
   unfinishedUploads: () =>

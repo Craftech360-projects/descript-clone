@@ -611,6 +611,39 @@ app.delete('/api/uploads/:id', async (c) => {
  * so a failure here costs speed, never function.
  */
 /**
+ * Clean the voice NOW, rather than at export.
+ *
+ * The denoise always ran — but only inside the render, where the user had
+ * already pressed Export and was waiting anyway. Turning the switch on did
+ * nothing visible, so it read as a control that was not wired up. Running it
+ * here gives the work a job, and therefore a progress bar, and leaves the result
+ * cached so the export that follows is no slower than an uncleaned one.
+ */
+app.post('/api/projects/:id/clean-voice', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!(await denoise.available())) {
+    return c.json({ error: 'Voice cleanup is not installed on this server.' }, 400);
+  }
+
+  const job = jobs.start(project.id, 'denoise', 'Cleaning voice', async (runner) => {
+    const fresh = await store.get(project.id);
+    if (!fresh) return {};
+    const clips = store.clipsOf(fresh);
+    let n = 0;
+    for (const clip of clips) {
+      n++;
+      const of = clips.length > 1 ? ` (${n}/${clips.length})` : '';
+      await denoise.ensureCleaned(clip.sourcePath, (stage) =>
+        runner.onProgress({ progress: -1, stage: `${stage}${of}` }),
+      );
+    }
+    return {};
+  });
+  return c.json({ jobId: job?.id ?? null });
+});
+
+/**
  * Build (or rebuild) the playback proxy for an existing project.
  *
  * Import does this on its own, but every project that predates proxies has none

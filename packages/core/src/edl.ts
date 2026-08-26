@@ -245,6 +245,77 @@ export function outputDuration(edl: Edl, speed = 1): number {
 }
 
 /**
+ * Per-clip playback rates, by clip id. Absent ids run at `fallback`.
+ *
+ * A project used to have ONE speed applied to the finished program. Clips are
+ * shot differently — a walk-up wants 2x, a piece to camera wants 1x — so the
+ * rate belongs to the clip. The project-wide value survives as the default for
+ * clips that have not been given one of their own, which is what makes "set
+ * them all to 1.2x" a single number rather than an edit to every clip.
+ */
+export interface SpeedMap {
+  byClip: Record<string, number>;
+  fallback: number;
+}
+
+export const flatSpeed = (speed = 1): SpeedMap => ({ byClip: {}, fallback: speed });
+
+/** The rate a given clip plays at. */
+export function speedOf(speeds: SpeedMap, clipId: string | undefined): number {
+  const own = clipId === undefined ? undefined : speeds.byClip[clipId];
+  const rate = own ?? speeds.fallback;
+  return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+
+/**
+ * How long the render runs when each clip carries its own rate.
+ *
+ * Not `total / speed` any more: every clip's kept seconds shrink by ITS rate, so
+ * the finished length is the sum of those, not the sum divided by one number.
+ * Everything that sizes itself against the program — the music bed's length
+ * above all — has to ask this rather than do the division itself.
+ */
+export function outputDurationWith(edl: Edl, speeds: SpeedMap): number {
+  let total = 0;
+  for (const r of keepByClip(edl)) total += (r.end - r.start) / speedOf(speeds, r.clipId);
+  return total;
+}
+
+/**
+ * Where a CUT-clock moment lands once each clip has been re-timed.
+ *
+ * sourceToOutput gives the position on the cut timeline, which is the clock the
+ * captions, push-ins and image overlays are all authored on. With one speed for
+ * everything, that clock and the final one differ by a constant and nothing had
+ * to think about it. With a rate per clip they differ piecewise, so anything
+ * that must line up with the finished video maps through here.
+ */
+export function cutToFinal(edl: Edl, speeds: SpeedMap, cutTime: number): number {
+  let cut = 0;
+  let fin = 0;
+  for (const r of keepByClip(edl)) {
+    const len = r.end - r.start;
+    const rate = speedOf(speeds, r.clipId);
+    if (cutTime < cut + len) return fin + (cutTime - cut) / rate;
+    cut += len;
+    fin += len / rate;
+  }
+  return fin;
+}
+
+/** The keep ranges, each tagged with the clip it belongs to. */
+function keepByClip(edl: Edl): Array<{ start: number; end: number; clipId?: string }> {
+  const clips = edl.clips;
+  if (!clips || clips.length === 0) return edl.keep.map((r) => ({ ...r }));
+  return edl.keep.map((r) => {
+    // The clip whose span contains this range's start. Ranges never straddle a
+    // seam — compileSequenceEdl emits them per clip — so the start decides it.
+    const owner = clips.find((c) => r.start >= c.offset && r.start < c.offset + c.sourceDuration);
+    return { ...r, clipId: (owner ?? clips[clips.length - 1]).clipId };
+  });
+}
+
+/**
  * The output timestamps where the render jumps from one source range to the
  * next — i.e. where the picture visibly cuts.
  *

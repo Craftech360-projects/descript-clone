@@ -1,5 +1,5 @@
 import type { Edl } from './types.ts';
-import { outputDuration } from './edl.ts';
+import { outputDuration, outputDurationWith, speedOf, flatSpeed, type SpeedMap } from './edl.ts';
 import { bedFadeOut } from './music.ts';
 import { colorFilterStages, type Grade } from './color.ts';
 import { frameFilterStages, type FrameRender } from './frame.ts';
@@ -790,6 +790,12 @@ export interface SequenceRenderOptions {
  * CLIPS (a handful), not the number of cuts. The per-clip cut stays linear.
  */
 export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions): RenderPlan {
+  /**
+   * One rate map for the whole plan. A caller that passes only `speed` gets a
+   * flat map, so the single-speed path is the same code with every clip agreeing
+   * — there is no second branch to keep in step.
+   */
+  const speeds: SpeedMap = options.clipSpeeds ?? flatSpeed(options.speed ?? 1);
   const { clips, output, hasVideo, width, height, fps, subtitlePath, speed = 1, fontsDir, bgMusic } =
     options;
   const burnIn = Boolean(hasVideo && subtitlePath);
@@ -822,6 +828,7 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
 
     const expr = local.map((r) => `between(t,${f(r.start)},${f(r.end)})`).join('+');
     const srcFps = clips[i]?.fps;
+    const rate = speedOf(speeds, clip.clipId);
 
     if (hasVideo) {
       // select cuts; setpts renumbers kept frames against the clip's OWN rate;
@@ -829,8 +836,13 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       // rate — both mandatory, because concat rejects clips that disagree on
       // size, SAR, rate, or pixel format.
       const vRenum = srcFps && srcFps > 0 ? f(srcFps) : 'FRAME_RATE';
+      // This clip's own rate, applied HERE rather than once on the joined
+      // stream: ffmpeg cannot vary a rate along a single stream, so the only
+      // place a sequence can hold several is on the per-clip chains. `fps=`
+      // below then resamples to the canonical rate, which concat requires.
+      const vRate = rate !== 1 ? `setpts=PTS/${f(rate)},` : '';
       lines.push(
-        `[${i}:v]select='${expr}',setpts=N/${vRenum}/TB,` +
+        `[${i}:v]select='${expr}',setpts=N/${vRenum}/TB,${vRate}` +
           `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
           `pad=${width}:${height}:(${width}-iw)/2:(${height}-ih)/2,` +
           `setsar=1,fps=${f(fps)},format=yuv420p[v${i}];`,
@@ -849,9 +861,10 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
         `afade=t=out:st=${f(outStart)}:d=${f(fade)}:enable='between(t,${f(outStart)},${f(range.end)})'`,
       ];
     });
+    const aRate = rate !== 1 ? `atempo=${f(rate)},` : '';
     lines.push(
       `[${i}:a]${fades.length > 0 ? `${fades.join(',')},` : ''}asetnsamples=n=64:p=0,` +
-        `aselect='${expr}',asetpts=N/SR/TB,aresample=48000,` +
+        `aselect='${expr}',asetpts=N/SR/TB,${aRate}aresample=48000,` +
         `aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}];`,
     );
     aLabels.push(`[a${i}]`);
@@ -919,7 +932,10 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
       postImageStages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
     }
-    if (retime) postImageStages.push(`setpts=PTS/${f(speed)}`);
+      // NO global setpts here: every clip was retimed on its own chain before
+      // the concat, because ffmpeg cannot vary a rate along one stream. The
+      // joined picture is already on the finished clock; doing it again would
+      // apply the rate twice.
 
     if (imageInputs.length > 0) {
       imageChain = imageChainLines(
@@ -944,7 +960,7 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
     const aStages: string[] = [];
     if (options.studioSound) aStages.push(...studioSoundStages(seqProgramLoudness, options.denoised));
     else if (seqProgramLoudness) aStages.push(...loudnessOnlyStages(seqProgramLoudness));
-    if (retime) aStages.push(`atempo=${f(speed)}`);
+    // As above: the rate is already in the joined stream.
     lines.push(`[ac]${aStages.join(',')}${programLabel};`);
   }
   // The music bed rides on top of the joined program: its input index is the
@@ -954,7 +970,9 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       ...bgMusicMixLines(
         programLabel,
         clips.length,
-        { programSec: outputDuration(edl, speed), ...bgMusic },
+        // The finished length, summed per clip at each clip's own rate — not
+        // total/speed, which is only right when every clip agrees.
+        { programSec: outputDurationWith(edl, speeds), ...bgMusic },
         seqLoudnessAfterMix ? options.loudness : null,
       ),
     );

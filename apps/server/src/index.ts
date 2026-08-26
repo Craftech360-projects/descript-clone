@@ -1393,7 +1393,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, denoise: denoise2, frame, color, overlays } =
+  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, denoise: denoise2, clipSpeeds, frame, color, overlays } =
     await c.req.json<{
     deletedIds: string[];
     texts?: Record<string, unknown>;
@@ -1403,6 +1403,7 @@ app.patch('/api/projects/:id/transcript', async (c) => {
     cut?: Partial<CutSettings>;
     studioSound?: boolean;
     denoise?: boolean;
+    clipSpeeds?: Record<string, unknown>;
     frame?: Partial<FrameSettings>;
     color?: Partial<ColorSettings>;
     overlays?: unknown;
@@ -1448,6 +1449,19 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   if (cut) project.cut = sanitizeCut(cut);
   if (studioSound !== undefined) project.studioSound = Boolean(studioSound);
   if (denoise2 !== undefined) project.denoise = Boolean(denoise2);
+  /**
+   * Per-clip rates, coerced at the boundary like every sibling here: only ids
+   * this project actually has, and every value through clampSpeed — an unchecked
+   * 0 is `setpts=PTS/0` and a failed render rather than a silly one.
+   */
+  if (clipSpeeds && typeof clipSpeeds === 'object') {
+    const ids = new Set(store.clipsOf(project).map((c) => c.id));
+    const clean: Record<string, number> = {};
+    for (const [id, v] of Object.entries(clipSpeeds)) {
+      if (ids.has(id)) clean[id] = clampSpeed(v);
+    }
+    project.clipSpeeds = clean;
+  }
   // normalizeFrame is the coercion, same contract as sanitizeCut above: a bad
   // width, a NaN zoom, or an unknown preset off the wire cannot reach the graph.
   if (frame !== undefined) project.frame = normalizeFrame(frame);
@@ -1869,6 +1883,16 @@ app.post('/api/projects/:id/render', async (c) => {
         // Tells the voice chain the model already cleaned this input, so it does
         // not denoise twice or amplify what the model left behind.
         denoised: wantsClean,
+        /**
+         * Per-clip rates. Live options win over the stored record for the same
+         * reason captions and frame do — an Export fired mid-debounce must use
+         * what is on screen. `speed` remains the fallback for clips with no rate
+         * of their own, which is what makes "all clips 1.2x" one number.
+         */
+        clipSpeeds: {
+          byClip: (options.clipSpeeds ?? project.clipSpeeds ?? {}) as Record<string, number>,
+          fallback: speed,
+        },
         // The Studio Sound voice chain, run on the program before the bed. Live
         // settings win over the stored flag for the same reason the music ones do:
         // an Export fired mid-debounce should use the toggle on screen.

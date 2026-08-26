@@ -238,6 +238,8 @@ export interface Project {
   studioSound?: boolean;
   /** Clean the voice with DeepFilterNet before rendering. See denoise.ts. */
   denoise?: boolean;
+  /** Playback rate per clip id. Absent ids run at `speed`. See doc.ts. */
+  clipSpeeds?: Record<string, number>;
   /** Playback stand-in for the single-source case. See StoredClip.proxyUrl. */
   proxyUrl?: string;
   /**

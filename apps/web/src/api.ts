@@ -61,6 +61,8 @@ export interface Project {
   studioSound?: boolean;
   /** Clean the voice with the trained denoiser on export. See server denoise.ts. */
   denoise?: boolean;
+  /** Playback rate per clip id; a clip absent from here runs at the project `speed`. */
+  clipSpeeds?: Record<string, number>;
   /** Output frame: target resolution plus the zoom/pan that fills it. Absent on
    *  projects that have never left the source's own resolution. */
   frame?: FrameSettings;
@@ -659,6 +661,8 @@ export const api = {
       studioSound?: boolean;
       /** Clean the voice with DeepFilterNet on export. See denoise.ts. */
       denoise?: boolean;
+      /** Playback rate per clip id; a clip absent from here runs at `speed`. */
+      clipSpeeds?: Record<string, number>;
       frame?: FrameSettings;
       color?: ColorSettings;
       overlays?: ImageOverlay[];

@@ -144,6 +144,7 @@ export function loadDoc(
   speed?: number,
   studioSound?: boolean,
   denoise?: boolean,
+  clipSpeeds?: Record<string, number>,
   frame?: Partial<FrameSettings> | null,
   color?: Partial<ColorSettings> | null,
   overlays?: unknown,
@@ -157,6 +158,7 @@ export function loadDoc(
       clampSpeed(speed),
       Boolean(studioSound),
       Boolean(denoise),
+      clipSpeeds ?? {},
       normalizeFrame(frame),
       normalizeColor(color),
       // Coerced on the way in for the same reason frame and colour are: this is
@@ -304,6 +306,44 @@ export function updateDenoise(denoise: boolean): void {
   const { doc } = state;
   if (!doc || doc.denoise === denoise) return;
   apply({ kind: 'denoise', prev: doc.denoise, next: denoise }, { label: denoise ? 'Enable voice cleanup' : 'Disable voice cleanup' });
+}
+
+/**
+ * Set ONE clip's playback rate.
+ *
+ * Setting a clip to the project default removes its entry rather than storing
+ * the same number twice — so a later "make everything 1.5x" moves that clip too,
+ * instead of it silently keeping an override nobody remembers making.
+ */
+export function updateClipSpeed(clipId: string, speed: number): void {
+  const { doc } = state;
+  if (!doc) return;
+  const next = { ...doc.clipSpeeds };
+  if (Math.abs(speed - doc.speed) < 1e-9) delete next[clipId];
+  else next[clipId] = speed;
+  if (JSON.stringify(next) === JSON.stringify(doc.clipSpeeds)) return;
+  apply(
+    { kind: 'clipSpeeds', prev: doc.clipSpeeds, next },
+    { label: `Set clip to ${speed}x` },
+  );
+}
+
+/**
+ * Put every clip at one rate.
+ *
+ * Clears the per-clip overrides as well as moving the default — otherwise "make
+ * them all 1.2x" would leave the clips someone had tuned by hand untouched,
+ * which is the opposite of what it says.
+ */
+export function updateAllClipSpeeds(speed: number): void {
+  const { doc } = state;
+  if (!doc) return;
+  if (doc.speed === speed && Object.keys(doc.clipSpeeds).length === 0) return;
+  apply(
+    { kind: 'clipSpeeds', prev: doc.clipSpeeds, next: {} },
+    { label: `All clips ${speed}x` },
+  );
+  updateSpeed(speed);
 }
 
 export function updateStudioSound(studioSound: boolean): void {

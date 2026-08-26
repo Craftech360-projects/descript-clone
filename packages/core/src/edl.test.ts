@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  outputDurationWith,
+  cutToFinal,
+  speedOf,
+  flatSpeed,
   compileEdl,
   compileSequenceEdl,
   outputDuration,
@@ -416,4 +420,63 @@ test('a silent clip in a SEQUENCE holds its place on the timeline', () => {
   const silent = edl.keep.find((r) => r.start >= 10 && r.end <= 15);
   assert.ok(silent, 'the silent clip contributes a range of its own');
   assert.deepEqual(silent, { start: 10, end: 15 }, 'and it is the whole clip');
+});
+
+/**
+ * A rate per clip.
+ *
+ * The old model divided the whole program by one number, so the cut clock and
+ * the finished clock differed by a constant and nothing had to think about it.
+ * Per clip they differ PIECEWISE, and everything that has to line up with the
+ * finished video — the music bed's length above all — depends on these two
+ * functions agreeing about where a moment lands.
+ */
+const twoClips = () =>
+  compileSequenceEdl(
+    [
+      { clipId: 'A', duration: 10, words: [] },
+      { clipId: 'B', duration: 10, words: [] },
+    ],
+    { padMs: 0, mergeWithinMs: 0 },
+  );
+
+test('a clip with no rate of its own runs at the fallback', () => {
+  const speeds = { byClip: { B: 2 }, fallback: 1 };
+  assert.equal(speedOf(speeds, 'A'), 1, 'A falls back');
+  assert.equal(speedOf(speeds, 'B'), 2, 'B has its own');
+  assert.equal(speedOf(speeds, 'missing'), 1);
+});
+
+test('a nonsensical rate is ignored rather than dividing by zero', () => {
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(speedOf({ byClip: { A: bad }, fallback: 1 }, 'A'), 1, `${bad} must not apply`);
+  }
+});
+
+test('each clip shortens by its OWN rate, not the project average', () => {
+  const edl = twoClips();
+  // 10s at 1x + 10s at 2x = 10 + 5 = 15, NOT 20 / 1.5 = 13.33.
+  assert.equal(outputDurationWith(edl, { byClip: { B: 2 }, fallback: 1 }), 15);
+  // And a flat map reproduces the old single-speed answer exactly.
+  assert.equal(outputDurationWith(edl, flatSpeed(2)), outputDuration(edl, 2));
+});
+
+test('cutToFinal maps through the piecewise clock', () => {
+  const edl = twoClips();
+  const speeds = { byClip: { B: 2 }, fallback: 1 };
+  assert.equal(cutToFinal(edl, speeds, 0), 0);
+  assert.equal(cutToFinal(edl, speeds, 5), 5, 'inside A, which runs at 1x');
+  assert.equal(cutToFinal(edl, speeds, 10), 10, 'the seam');
+  assert.equal(cutToFinal(edl, speeds, 15), 12.5, 'halfway into B, which runs at 2x');
+  assert.equal(cutToFinal(edl, speeds, 20), 15, 'the end === outputDurationWith');
+});
+
+test('cutToFinal and outputDurationWith agree about the end', () => {
+  const edl = twoClips();
+  for (const speeds of [flatSpeed(1), flatSpeed(1.2), { byClip: { A: 0.5, B: 3 }, fallback: 1 }]) {
+    assert.ok(
+      Math.abs(cutToFinal(edl, speeds, 20) - outputDurationWith(edl, speeds)) < 1e-9,
+      'the two must never disagree, or the music bed is sized against a different clock',
+    );
+  }
 });

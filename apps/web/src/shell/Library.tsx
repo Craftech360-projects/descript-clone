@@ -1,4 +1,5 @@
 import Icon from '../ui/Icon.tsx';
+import { SPEEDS } from '../../../../packages/core/src/doc.ts';
 import { Check, Field, Hint, Segmented, Slider, Warn } from '../ui/Field.tsx';
 import { formatSpeed } from '../store/editor.ts';
 import {
@@ -22,6 +23,13 @@ interface Props {
   onAddClip: (file: File) => void;
   onRemoveClip: (clipId: string) => void;
   onMoveClip: (clipId: string, delta: -1 | 1) => void;
+  /** The project-wide rate: what a clip runs at until it is given one of its own. */
+  speed: number;
+  /** Rates by clip id. A clip absent from here follows `speed`. */
+  clipSpeeds: Record<string, number>;
+  onClipSpeed: (clipId: string, speed: number) => void;
+  /** Put every clip at one rate, clearing the per-clip overrides. */
+  onAllClipSpeeds: (speed: number) => void;
   onSelectClip: (clip: Clip) => void;
   /** The drawer is open. When closed it stays mounted (off-canvas) so it slides. */
   open: boolean;
@@ -183,6 +191,10 @@ export default function Library({
   onAddClip,
   onRemoveClip,
   onMoveClip,
+  speed,
+  clipSpeeds,
+  onClipSpeed,
+  onAllClipSpeeds,
   onSelectClip,
   open,
   onClose,
@@ -254,6 +266,22 @@ export default function Library({
             </label>
           </div>
 
+          {/* Every clip at once. Sits above the list because it is the thing
+            * most people want — "make the whole day 1.2x" — and the per-clip
+            * control below is the exception you reach for after. */}
+          <div className="clip-allspeed">
+            <span>All clips</span>
+            <select
+              aria-label="Speed for every clip"
+              value={Object.keys(clipSpeeds).length > 0 ? '' : String(speed)}
+              onChange={(e) => e.target.value && onAllClipSpeeds(Number(e.target.value))}
+            >
+              {Object.keys(clipSpeeds).length > 0 && <option value="">Mixed</option>}
+              {SPEEDS.map((v) => (
+                <option key={v} value={v}>{v}x</option>
+              ))}
+            </select>
+          </div>
           <ul className="clip-list">
             {clips.map((c, i) => (
               <li key={c.id} className={c.id === activeClipId ? 'clip-row on' : 'clip-row'}>
@@ -264,6 +292,20 @@ export default function Library({
                   <span className="clip-nm">Clip {i + 1}</span>
                   <span className="clip-dur">{clipTime(c.duration)}</span>
                 </button>
+                {/* This clip's own rate. Shows the project default until it is
+                  * given one, so the list reads as "everything is 1.2x except
+                  * clip 16" rather than as twenty-one identical settings. */}
+                <select
+                  className={`clip-speed${clipSpeeds[c.id] ? ' set' : ''}`}
+                  aria-label={`Speed for clip ${i + 1}`}
+                  title={clipSpeeds[c.id] ? 'This clip has its own speed' : 'Following the project speed'}
+                  value={clipSpeeds[c.id] ?? speed}
+                  onChange={(e) => onClipSpeed(c.id, Number(e.target.value))}
+                >
+                  {SPEEDS.map((v) => (
+                    <option key={v} value={v}>{v}x</option>
+                  ))}
+                </select>
                 <span className="clip-order">
                   <button
                     className="icon clip-move"

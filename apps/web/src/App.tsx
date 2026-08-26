@@ -64,6 +64,8 @@ import {
   updateSpeed,
   updateStudioSound,
   updateDenoise,
+  updateClipSpeed,
+  updateAllClipSpeeds,
   updateFrame,
   beginFrameDrag,
   endFrameDrag,
@@ -2743,6 +2745,10 @@ export default function App() {
         onAddClip={addClip}
         onRemoveClip={removeClip}
         onMoveClip={moveClip}
+        speed={doc?.speed ?? 1}
+        clipSpeeds={doc?.clipSpeeds ?? {}}
+        onClipSpeed={updateClipSpeed}
+        onAllClipSpeeds={updateAllClipSpeeds}
         onSelectClip={(c) => seek(c.offset)}
         open={libOpen}
         onClose={() => setLibOpen(false)}

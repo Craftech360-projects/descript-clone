@@ -56,6 +56,7 @@ import {
   compileEdl,
   compileSequenceEdl,
   outputDuration,
+  outputDurationWith,
   sourceToOutput,
 } from '../../../packages/core/src/edl.ts';
 import { movesToOutput } from '../../../packages/core/src/frame-track.ts';
@@ -1846,6 +1847,16 @@ app.post('/api/projects/:id/render', async (c) => {
      * A multi-clip project cleans each clip; they are separate files and the
      * stitch reads them individually.
      */
+    /**
+     * One rate map for this render: per-clip overrides, with the project speed as
+     * the fallback. Built once and used by the plan, the music bed AND the
+     * reported length — those three disagreeing is how a bed gets trimmed to a
+     * program length that does not exist.
+     */
+    const speeds = {
+      byClip: (options.clipSpeeds ?? project.clipSpeeds ?? {}) as Record<string, number>,
+      fallback: speed,
+    };
     const wantsClean = Boolean(options.denoise ?? project.denoise);
     let input = project.sourcePath;
     let clipInputs = render?.clips;
@@ -1889,10 +1900,7 @@ app.post('/api/projects/:id/render', async (c) => {
          * what is on screen. `speed` remains the fallback for clips with no rate
          * of their own, which is what makes "all clips 1.2x" one number.
          */
-        clipSpeeds: {
-          byClip: (options.clipSpeeds ?? project.clipSpeeds ?? {}) as Record<string, number>,
-          fallback: speed,
-        },
+        clipSpeeds: speeds,
         // The Studio Sound voice chain, run on the program before the bed. Live
         // settings win over the stored flag for the same reason the music ones do:
         // an Export fired mid-debounce should use the toggle on screen.
@@ -1979,7 +1987,9 @@ app.post('/api/projects/:id/render', async (c) => {
       // dropping the option the user ticked.
       captionsSkipped: wantsCaptions && !project.hasVideo,
       sourceDuration: project.duration,
-      outputDuration: outputDuration(edl, speed),
+      // Summed per clip at each clip's own rate — total/speed is only right when
+      // every clip agrees, and it reported 740s for a render that ran 706s.
+      outputDuration: outputDurationWith(edl, speeds),
       speed,
       renderMs: Date.now() - started,
     };

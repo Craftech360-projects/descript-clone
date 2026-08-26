@@ -3556,3 +3556,28 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   font-size: var(--t-ui); font-weight: 550;
 }
 .rail-back:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+/* ---- per-clip speed ----
+ * The select sits in the clip row beside its duration. Quiet until the clip has
+ * a rate of ITS OWN: a list of twenty-one identical "1x" selects is noise, and
+ * the one clip you set to 1.5x should be the thing your eye lands on. */
+.clip-speed {
+  flex: 0 0 auto; margin-left: var(--s-1);
+  font-size: var(--t-small); font-variant-numeric: tabular-nums;
+  padding: 1px 4px; border-radius: var(--r-1);
+  background: transparent; border: 1px solid transparent; color: var(--faint);
+}
+.clip-row:hover .clip-speed { border-color: var(--line); color: var(--dim); }
+.clip-speed.set {
+  border-color: var(--accent); color: var(--accent); font-weight: 600;
+}
+.clip-allspeed {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) 0 var(--s-2);
+  font-size: var(--t-small); color: var(--dim);
+}
+.clip-allspeed select {
+  font-size: var(--t-small); padding: 2px 6px;
+  border-radius: var(--r-1); border: 1px solid var(--line);
+  background: var(--sunk); color: var(--text);
+}

@@ -363,3 +363,47 @@ test('speed divides the output duration', () => {
   // order, because that is the order the filtergraph does it in.
   assert.equal(outputDuration(edl, 1.2), 2 / 1.2);
 });
+
+/**
+ * Footage nobody spoke over.
+ *
+ * A time-lapse, a slow-mo, a silent B-roll shot: imported deliberately, with an
+ * empty transcript because there was nothing to transcribe. These used to
+ * compile to no ranges at all and so disappeared from the timeline and from the
+ * export — 8 of the 21 clips in one real project. Silence is not an edit.
+ *
+ * The distinction these pin: NEVER HAD words (keep it) versus words ALL DELETED
+ * (an edit, stays gone). Empty-vs-nonempty is the only signal that separates
+ * them, so it must keep working.
+ */
+test('a clip with no words at all is kept whole', () => {
+  const edl = compileEdl({ mediaId: 'm', duration: 12, words: [] });
+  assert.deepEqual(edl.keep, [{ start: 0, end: 12 }], 'silent footage survives');
+});
+
+test('a clip whose words were ALL deleted stays cut', () => {
+  const edl = compileEdl({
+    mediaId: 'm',
+    duration: 12,
+    words: [
+      { id: 'w0', text: 'a', start: 1, end: 2, deleted: true },
+      { id: 'w1', text: 'b', start: 3, end: 4, deleted: true },
+    ],
+  });
+  assert.deepEqual(edl.keep, [], 'a deliberate edit is not undone by this rule');
+});
+
+test('a silent clip in a SEQUENCE holds its place on the timeline', () => {
+  // The real shape of the bug: one silent clip between two spoken ones. It has
+  // to occupy its own span, or everything after it slides earlier and the
+  // pictures stop matching the words.
+  const edl = compileSequenceEdl([
+    { clipId: 'a', duration: 10, words: [{ id: 'w0', text: 'hi', start: 1, end: 2 }] },
+    { clipId: 'b', duration: 5, words: [] },
+    { clipId: 'c', duration: 10, words: [{ id: 'w1', text: 'bye', start: 1, end: 2 }] },
+  ]);
+  assert.equal(edl.sourceDuration, 25);
+  const silent = edl.keep.find((r) => r.start >= 10 && r.end <= 15);
+  assert.ok(silent, 'the silent clip contributes a range of its own');
+  assert.deepEqual(silent, { start: 10, end: 15 }, 'and it is the whole clip');
+});

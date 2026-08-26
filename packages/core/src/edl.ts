@@ -82,7 +82,23 @@ function compileClipRanges(words: Word[], duration: number, opts: Required<Compi
     if (!word.deleted) kept.push({ word, index });
   });
 
-  if (kept.length === 0) return [];
+  if (kept.length === 0) {
+    /**
+     * Nothing survives — but there are two very different reasons for that, and
+     * conflating them threw away footage.
+     *
+     * A clip that NEVER HAD WORDS is a time-lapse, a slow-mo, a silent B-roll
+     * shot: material deliberately imported, which nobody happened to speak over.
+     * Silence is not an edit, and dropping it because the transcript is empty
+     * made those clips vanish from the timeline AND from the export. Keep the
+     * whole thing; it is the user's footage until they say otherwise.
+     *
+     * A clip whose words were all DELETED is the opposite: that IS an edit, made
+     * deliberately, and it must stay gone. The two are told apart by whether any
+     * words exist at all, which is the only signal that distinguishes them.
+     */
+    return words.length === 0 ? [{ start: 0, end: duration }] : [];
+  }
 
   const raw: Range[] = [];
   let openStart = kept[0].word.start;

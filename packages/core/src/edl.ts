@@ -100,8 +100,65 @@ function compileClipRanges(words: Word[], duration: number, opts: Required<Compi
     return words.length === 0 ? [{ start: 0, end: duration }] : [];
   }
 
+  /**
+   * "Keep every pause" means keep the WHOLE clip, not just its talking.
+   *
+   * Building ranges from the kept WORDS meant a clip survived only between its
+   * first and last recognised word. That is fine when the recogniser heard
+   * everything; it is data loss when it did not. On a real clip: 99.5 seconds
+   * long, words only between 39.4s and 64.3s because the people either side
+   * were speaking Chinese and an English recogniser returned nothing — so 75
+   * seconds of footage were dropped, and it looked like the editor was randomly
+   * skipping. The recogniser's vocabulary is not a licence to delete video.
+   *
+   * So with no pause cap the clip is kept whole and only DELETED words are
+   * removed from it. That is the honest reading of the setting, and it makes
+   * cutting something you do rather than something done to you: the timeline
+   * holds everything you imported until you take a word out of it.
+   *
+   * With a cap set, the tightening logic below still runs — that is a request
+   * to shorten, and shortening is what it does.
+   */
+  if (!Number.isFinite(maxGap)) {
+    const cuts = mergeAdjacent(
+      words
+        .filter((w) => w.deleted)
+        .map((w) => ({ start: clamp(w.start, 0, duration), end: clamp(w.end, 0, duration) })),
+      mergeWithin,
+    );
+    const out: Range[] = [];
+    let cursor = 0;
+    for (const cut of cuts) {
+      if (cut.start > cursor) out.push({ start: cursor, end: cut.start });
+      cursor = Math.max(cursor, cut.end);
+    }
+    if (cursor < duration) out.push({ start: cursor, end: duration });
+    // Padded and merged exactly as the tightening path is: pad gives the seam
+    // either side of a deletion room to breathe rather than clipping the words
+    // that survived, and merging stops a pad that closes a hole from emitting a
+    // zero-length cut. Clamped to the clip, so padding never invents footage.
+    const padded = out.map((r) => ({
+      start: clamp(r.start - pad, 0, duration),
+      end: clamp(r.end + pad, 0, duration),
+    }));
+    return mergeAdjacent(padded, mergeWithin).filter((r) => r.end - r.start > minTrim);
+  }
+
   const raw: Range[] = [];
-  let openStart = kept[0].word.start;
+  /**
+   * The clip's own start, not its first word.
+   *
+   * A pause cap is a request to shorten dead air BETWEEN words. It was also
+   * silently dropping everything before the first word and after the last —
+   * which on a clip where the recogniser missed the speech (someone talking in
+   * a language it does not have) meant most of the shot. It also made the
+   * saving Tighten promises wrong, because countPauses only ever measured the
+   * gaps between words and knew nothing of the head and tail it was removing.
+   *
+   * Head and tail are now always kept, at any cap. What the cap governs is the
+   * silence in the middle, which is what it says it does.
+   */
+  let openStart = 0;
 
   for (let i = 1; i < kept.length; i++) {
     const prev = kept[i - 1];
@@ -127,7 +184,7 @@ function compileClipRanges(words: Word[], duration: number, opts: Required<Compi
     // it is within the cap, or shortening it would not buy enough to pay for
     // the cut. See minTrimMs.
   }
-  raw.push({ start: openStart, end: kept[kept.length - 1].word.end });
+  raw.push({ start: openStart, end: duration });
 
   const padded = raw.map((r) => ({
     start: clamp(r.start - pad, 0, duration),

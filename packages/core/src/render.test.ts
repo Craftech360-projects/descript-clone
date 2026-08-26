@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenderPlan, buildSequenceRenderPlan } from './render.ts';
+import { buildRenderPlan, buildSequenceRenderPlan, studioSoundStages } from './render.ts';
 import { presetSettings, resolveColor } from './color.ts';
 import { MAX_SPEED } from './doc.ts';
 import type { Edl } from './types.ts';
@@ -276,12 +276,19 @@ test('a clip entirely cut drops out, and concat counts only the survivors', () =
   assert.ok(/concat=n=1:v=1:a=1/.test(filterScript), 'one survivor, concat n=1');
 });
 
-test('burn-in and speed happen once, after the join', () => {
+test('a sequence retimes each clip before the join, never after it', () => {
   const { filterScript } = seqPlan(seqEdl, { speed: 1.5, subtitlePath: 'C:/caps.ass' });
+  // Each clip carries the rate on its own chain: ffmpeg cannot vary a rate
+  // along one stream, so this is the only place a sequence can hold several.
+  assert.ok(/\[0:v\][^\n]*setpts=PTS\/1\.5000/.test(filterScript), 'clip 0 retimed');
+  assert.ok(/\[1:v\][^\n]*setpts=PTS\/1\.5000/.test(filterScript), 'clip 1 retimed');
+  assert.ok(/\[0:a\][^\n]*atempo=1\.5000/.test(filterScript), 'clip 0 audio retimed');
+  // And NOT again on the joined stream, which would apply it twice.
+  const joined = filterScript.split('\n').filter((l) => l.startsWith('[vc]') || l.startsWith('[ac]'));
+  assert.ok(!joined.some((l) => /setpts=PTS\/|atempo=/.test(l)), joined.join('\n'));
+  // The burn still rides the joined picture, which is already on the final clock.
   const line = filterScript.split('\n').find((l) => l.includes('subtitles='))!;
   assert.ok(line.startsWith('[vc]'), 'operates on the joined stream, not a clip');
-  assert.ok(line.indexOf('subtitles=') < line.indexOf('setpts=PTS/'), 'glyphs ride the speed change');
-  assert.ok(/\[ac\]atempo=1\.5000\[outa\]/.test(filterScript), filterScript);
 });
 
 test('audio-only sequence joins audio alone, no video map', () => {
@@ -392,8 +399,10 @@ test('a sequence mixes music under the joined program, at the clip-count input i
   });
   // Music is the input after the two clips.
   assert.deepEqual(args.filter((a, i) => args[i - 1] === '-i'), ['a.mp4', 'b.mp4', 'song.mp3']);
-  // The joined+retimed program lands in [aprog]; the mix on input 2 owns [outa].
-  assert.ok(/\[ac\]atempo=1\.5000\[aprog\]/.test(filterScript), filterScript);
+  // The clips were retimed individually, so the joined program reaches [aprog]
+  // with no atempo of its own; the mix on input 2 owns [outa].
+  assert.ok(/\[0:a\][^\n]*atempo=1\.5000/.test(filterScript), 'rate is on the clip');
+  assert.ok(filterScript.includes('[aprog]'), filterScript);
   assert.ok(filterScript.includes('[2:a]volume=0.600'), filterScript);
   assert.ok(/amix=inputs=2:duration=first:normalize=0,/.test(filterScript), filterScript);
 });
@@ -481,10 +490,14 @@ test('a sequence runs the voice chain on the joined program', () => {
   assert.ok(/concat=n=2:v=1:a=1\[outv\]\[ac\]/.test(filterScript), filterScript);
 });
 
-test('a sequence with studio sound AND speed keeps the enhancer first', () => {
+test('a sequence with studio sound AND speed enhances the JOINED program', () => {
   const { filterScript } = seqPlan(seqEdl, { speed: 1.5, studioSound: true });
+  // The rate is on the clips now; the voice chain still runs once, on the join,
+  // because measuring loudness per clip would make every clip a different level.
   const chain = filterScript.split('\n').find((l) => l.startsWith('[ac]'))!;
-  assert.ok(chain.indexOf('loudnorm=') < chain.indexOf('atempo=1.5000'), chain);
+  assert.ok(chain.includes('loudnorm='), chain);
+  assert.ok(!chain.includes('atempo='), 'the rate was already applied per clip');
+  assert.ok(/\[0:a\][^\n]*atempo=1\.5000/.test(filterScript), 'and it IS on the clip');
 });
 
 // ── output frame: the crop into a target resolution ───────────────────────────
@@ -561,7 +574,8 @@ test('a sequence keeps crop before burn before speed', () => {
   const { filterScript } = seqPlan(seqEdl, { frame: REEL, speed: 1.5, subtitlePath: '/tmp/c.ass' });
   const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
   assert.ok(chain.indexOf('crop=') < chain.indexOf('subtitles='), chain);
-  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+  // The rate rides each CLIP now, before the join — not this chain.
+  assert.ok(!chain.includes('setpts=PTS/'), chain);
 });
 
 // ── the animated push-in ──────────────────────────────────────────────────────
@@ -643,7 +657,8 @@ test('a sequence punches once on the joined stream, in the same order', () => {
   const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
   assert.ok(chain.indexOf('crop=') < chain.indexOf('zoompan='), chain);
   assert.ok(chain.indexOf('zoompan=') < chain.indexOf('subtitles='), chain);
-  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+  // The rate rides each CLIP now, before the join — not this chain.
+  assert.ok(!chain.includes('setpts=PTS/'), chain);
   // Once. Punching each clip before the join would restart every move at every
   // seam, since each clip's own clock begins at zero.
   assert.equal(filterScript.match(/zoompan=/g)?.length, 1, filterScript);
@@ -736,7 +751,8 @@ test('a sequence keeps crop before grade before burn before speed', () => {
   const chain = filterScript.split('\n').find((l) => l.startsWith('[vc]'))!;
   assert.ok(chain.indexOf('crop=') < chain.indexOf('colorchannelmixer='), chain);
   assert.ok(chain.indexOf('colorchannelmixer=') < chain.indexOf('subtitles='), chain);
-  assert.ok(chain.indexOf('subtitles=') < chain.indexOf('setpts=PTS/'), chain);
+  // The rate rides each CLIP now, before the join — not this chain.
+  assert.ok(!chain.includes('setpts=PTS/'), chain);
 });
 
 // ── the image track ───────────────────────────────────────────────────────────
@@ -853,4 +869,47 @@ test('a sequence with images but no other video work still opens its stage', () 
   const { filterScript } = seqPlan(seqEdl, { images: IMAGES([{}]) });
   assert.ok(/concat=n=2:v=1:a=1\[vc\]/.test(filterScript), filterScript);
   assert.ok(filterScript.includes('[vc][img0]overlay='), filterScript);
+});
+
+/**
+ * The voice chain's emitted filter STRINGS.
+ *
+ * These are asserted literally because ffmpeg validates them at render time, not
+ * at build time: `makeup=0` looked like a reasonable "no gain" and is in fact
+ * outside acompressor's [1, 64] range, so it failed the whole encode after the
+ * denoise pass had already run. A green suite said nothing about it. Parameter
+ * ranges that only a subprocess can reject are exactly what needs pinning here.
+ */
+test('studioSoundStages emits acompressor makeup inside ffmpeg’s allowed range', () => {
+  for (const denoised of [false, true]) {
+    const comp = studioSoundStages(null, denoised).find((s) => s.startsWith('acompressor='));
+    assert.ok(comp, 'the chain always compresses');
+    const makeup = Number(/makeup=([\d.]+)/.exec(comp!)?.[1]);
+    assert.ok(makeup >= 1 && makeup <= 64, `makeup=${makeup} is outside [1, 64] and ffmpeg refuses it`);
+  }
+});
+
+test('the trained denoiser replaces afftdn rather than stacking with it', () => {
+  const plain = studioSoundStages(null, false);
+  const cleaned = studioSoundStages(null, true);
+  assert.ok(plain.some((s) => s.startsWith('afftdn=')), 'without the model, the chain denoises itself');
+  assert.ok(
+    !cleaned.some((s) => s.startsWith('afftdn=')),
+    'with the model, subtracting a noise estimate from already-clean audio over-processes',
+  );
+});
+
+test('a denoised chain does not apply makeup gain to the silence the model left', () => {
+  const plain = studioSoundStages(null, false).find((s) => s.startsWith('acompressor='))!;
+  const cleaned = studioSoundStages(null, true).find((s) => s.startsWith('acompressor='))!;
+  const gain = (s: string) => Number(/makeup=([\d.]+)/.exec(s)?.[1]);
+  assert.ok(gain(cleaned) < gain(plain), 'makeup on near-silence is amplified artefacts');
+});
+
+test('both chains still normalise and resample, denoised or not', () => {
+  for (const denoised of [false, true]) {
+    const stages = studioSoundStages(null, denoised);
+    assert.ok(stages.some((s) => s.startsWith('loudnorm=')), 'arriving at the right level is not optional');
+    assert.equal(stages.at(-1), 'aresample=48000', 'loudnorm leaves the stream at 192kHz; AAC then lands on 96k');
+  }
 });

@@ -18,6 +18,8 @@ export interface Thumbs {
 }
 
 export interface Project {
+  /** Which folder's brief informs this project's social copy. Absent = none. */
+  folderId?: string;
   id: string;
   name: string;
   sourceUrl: string;
@@ -53,8 +55,14 @@ export interface Project {
   /** Cut settings, wire shape (maxGapMs 0 = keep every pause). Absent on projects
    *  saved before cut settings were persisted; the client falls back to defaults. */
   cut?: CutSettings;
+  /** Playback stand-in for a single-source project. See Clip.proxyUrl. */
+  proxyUrl?: string;
   /** Studio sound voice enhancer */
   studioSound?: boolean;
+  /** Clean the voice with the trained denoiser on export. See server denoise.ts. */
+  denoise?: boolean;
+  /** Playback rate per clip id; a clip absent from here runs at the project `speed`. */
+  clipSpeeds?: Record<string, number>;
   /** Output frame: target resolution plus the zoom/pan that fills it. Absent on
    *  projects that have never left the source's own resolution. */
   frame?: FrameSettings;
@@ -177,6 +185,12 @@ export interface MusicResult {
 export interface Clip {
   id: string;
   sourceUrl: string;
+  /**
+   * A small H.264 stand-in used for PLAYBACK only. Absent until the proxy job
+   * finishes, and on projects imported before proxies existed — the player falls
+   * back to sourceUrl. Exports always come from the original.
+   */
+  proxyUrl?: string;
   duration: number;
   hasVideo: boolean;
   width?: number;
@@ -290,14 +304,21 @@ export interface CustomFont {
 
 export interface Capabilities {
   hasAsr: boolean;
+  /** Whether the server has DeepFilterNet installed — gates the Clean voice control. */
+  canCleanVoice?: boolean;
   asrModels: Array<{
     id: string;
-    provider: 'elevenlabs' | 'sarvam' | 'mock';
+    // Kept in step with ASR_MODELS in apps/server/src/config.ts. This union had
+    // drifted — 'apple' was added server-side and never here — which nothing
+    // catches, since the repo runs type-stripping rather than a type checker.
+    provider: 'elevenlabs' | 'sarvam' | 'deepgram' | 'apple' | 'mock';
     label: string;
     hint: string;
     verbatim: boolean;
     verified: boolean;
     available: boolean;
+    /** What it needs before it can run, phrased for a person. May be absent on older servers. */
+    requires?: string;
   }>;
   asrDefaults: AsrOptions;
   editDefaults: CutSettings;
@@ -366,7 +387,27 @@ export interface ProjectChat {
 }
 
 /** Everything the Export panel lets the user decide. */
+/** A folder, and the standing brief that teaches the AI what this channel is. */
+export interface Folder {
+  id: string;
+  name: string;
+  brief: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SocialDraft {
+  title: string;
+  description: string;
+  hashtags: string[];
+}
+
 export interface RenderSettings extends CutSettings {
+  /**
+   * Where the file is going: an export preset id. Fixes the output size and the
+   * loudness target, and beats the stored frame — see packages/core/export-preset.
+   */
+  preset?: string;
   /** Burn captions into the picture. Video only — pixels, not a sidecar track. */
   burnCaptions: boolean;
   /** Look and placement. Sent so a render uses what is on screen right now,
@@ -392,7 +433,7 @@ export interface RenderSettings extends CutSettings {
   overlays?: ImageOverlay[];
 }
 
-export type JobKind = 'transcribe' | 'render' | 'thumbs';
+export type JobKind = 'transcribe' | 'render' | 'thumbs' | 'proxy' | 'denoise';
 export type JobState = 'queued' | 'running' | 'done' | 'error' | 'canceled';
 
 export interface Job {
@@ -444,7 +485,80 @@ export const api = {
   // response would tell refreshCaps the ASR key is still missing right after the
   // user added it, so the on-import chain would keep refusing to transcribe.
   capabilities: () => fetch('/api/capabilities', { cache: 'no-store' }).then(json<Capabilities>),
+  /** A web page's text, for the assistant. Guarded server-side against private addresses. */
+  readPage: (url: string) =>
+    post('/api/read-page', { url }).then(
+      json<{ url: string; title: string; text: string; truncated: boolean }>,
+    ),
+
+  preferences: {
+    get: () => fetch('/api/preferences').then(json<{ model: string; socialTarget: string; safeArea: string }>),
+    patch: (patch: Partial<{ model: string; socialTarget: string; safeArea: string }>) =>
+      fetch('/api/preferences', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      }).then(json<{ model: string; socialTarget: string; safeArea: string }>),
+  },
+
+  folders: {
+    list: () => fetch('/api/folders').then(json<Folder[]>),
+    create: (name: string, brief = '') =>
+      post('/api/folders', { name, brief }).then(json<Folder>),
+    update: (id: string, patch: { name?: string; brief?: string }) =>
+      fetch(`/api/folders/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      }).then(json<Folder>),
+    remove: (id: string) =>
+      fetch(`/api/folders/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
+  },
+
+  setProjectFolder: (id: string, folderId: string | null) =>
+    fetch(`/api/projects/${id}/folder`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folderId }),
+    }).then(json<Project>),
+
+  /** One finished frame as a data URL — what the assistant looks at. */
+  projectFrame: (id: string, body: { atSeconds?: number; captions?: CaptionSettings }) =>
+    post(`/api/projects/${id}/frame`, body).then(
+      json<{ image: string; atSeconds: number; width: number; note: string }>,
+    ),
+
+  /** Write the post. The folder's brief is applied server-side. */
+  social: (id: string, body: { model: string; target: string }) =>
+    post(`/api/projects/${id}/social`, body).then(
+      json<{
+        draft: SocialDraft;
+        usedBrief: boolean;
+        folder: string | null;
+        /** Which model actually answered — not always the one that was asked. */
+        ranOn: string;
+        /** True when the chosen model failed and the local backup wrote this. */
+        fellBack: boolean;
+      }>,
+    ),
+
   list: () => fetch('/api/projects').then(json<MediaItem[]>),
+
+  /**
+   * Run the voice cleaner now, as a job with progress, instead of silently
+   * inside the next export. Returns the job to watch.
+   */
+  cleanVoice: (id: string) =>
+    post(`/api/projects/${id}/clean-voice`, {}).then(json<{ jobId: string | null }>),
+
+  /** Uploads that started and never finished, newest first. */
+  unfinishedUploads: () =>
+    fetch('/api/uploads').then(
+      json<Array<{ id: string; name: string; size: number; offset: number; updatedAt: string }>>,
+    ),
+
+  /** Give up on one and reclaim its bytes. */
+  discardUpload: (id: string) => fetch(`/api/uploads/${id}`, { method: 'DELETE' }).then(json<{ ok: boolean }>),
   get: (id: string) => fetch(`/api/projects/${id}`).then(json<Project>),
 
   /**
@@ -537,10 +651,18 @@ export const api = {
     id: string,
     doc: {
       deletedIds: string[];
+      /** id → corrected spelling, for every word. See the call site in App. */
+      texts?: Record<string, string>;
+      /** id → speaker label, only for words that have one. */
+      speakers?: Record<string, string>;
       captions?: CaptionSettings;
       speed?: number;
       cut?: CutSettings;
       studioSound?: boolean;
+      /** Clean the voice with DeepFilterNet on export. See denoise.ts. */
+      denoise?: boolean;
+      /** Playback rate per clip id; a clip absent from here runs at `speed`. */
+      clipSpeeds?: Record<string, number>;
       frame?: FrameSettings;
       color?: ColorSettings;
       overlays?: ImageOverlay[];
@@ -689,7 +811,15 @@ export const api = {
    */
   agent: {
     models: () =>
-      fetch('/api/agent/models').then(json<{ models: string[]; default: string; enabled: boolean }>),
+      fetch('/api/agent/models').then(
+        json<{
+          models: string[];
+          /** Where each model runs and why you'd pick it. */
+          catalogue?: { id: string; label: string; hint: string; where: string }[];
+          default: string;
+          enabled: boolean;
+        }>,
+      ),
     chat: (body: { model: string; context: string; messages: AgentWireMessage[] }) =>
       post('/api/agent', body).then(json<{ message: AgentAssistantMessage }>),
   },
@@ -734,7 +864,37 @@ export const api = {
     save: (patch: Record<string, string>) =>
       post('/api/settings/keys', patch).then(json<KeysResponse>),
   },
+
+  /** The outside-agent bridge. See apps/server/src/bridge.ts. */
+  bridge: {
+    status: () => fetch('/api/bridge/status').then(json<BridgeStatus>),
+    setEnabled: (enabled: boolean) => post('/api/bridge', { enabled }).then(json<{ enabled: boolean }>),
+    token: () => fetch('/api/bridge/token').then(json<{ token: string }>),
+    rotate: () => post('/api/bridge/rotate', {}).then(json<{ token: string }>),
+  },
 };
+
+/** One editor window attached to the bridge, ready to execute tools. */
+export interface BridgeSession {
+  id: string;
+  projectId: string | null;
+  projectName: string | null;
+  since: string;
+  busy: boolean;
+}
+
+export interface BridgeStatus {
+  enabled: boolean;
+  url: string;
+  mode: string;
+  pid: number;
+  startedAt: string;
+  logPath: string | null;
+  /** Started under --watch, so editing a server file will restart it. */
+  watch: boolean;
+  sessions: BridgeSession[];
+  windows: number;
+}
 
 /** One listing of a folder the user shared with the assistant. Names and sizes only. */
 export interface LocalListing {

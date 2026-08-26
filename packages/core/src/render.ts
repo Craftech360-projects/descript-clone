@@ -1,5 +1,5 @@
 import type { Edl } from './types.ts';
-import { outputDuration } from './edl.ts';
+import { outputDuration, outputDurationWith, speedOf, flatSpeed, type SpeedMap } from './edl.ts';
 import { bedFadeOut } from './music.ts';
 import { colorFilterStages, type Grade } from './color.ts';
 import { frameFilterStages, type FrameRender } from './frame.ts';
@@ -72,6 +72,16 @@ export interface RenderOptions {
    * studioSoundStages.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on the input — see studioSoundStages. */
+  denoised?: boolean;
+  /**
+   * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
+   * the level as mixed.
+   *
+   * Passed as the built filter rather than a number so packages/core keeps one
+   * place that knows how loudnorm is spelt — see export-preset.ts.
+   */
+  loudness?: string | null;
   /**
    * Reframe the picture to a target resolution, cropping to fill it. Already
    * resolved to concrete pixels by the caller — resolveFrame returns null when the
@@ -268,7 +278,21 @@ export interface BgMusicRender {
  *    With it off, the program stays at unity and only the music carries the gain
  *    the user dialled in.
  */
-function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRender): string[] {
+function bgMusicMixLines(
+  programLabel: string,
+  musicIndex: number,
+  bg: BgMusicRender,
+  /**
+   * The export preset's loudnorm stage, applied AFTER the bed is mixed in.
+   *
+   * It cannot run before. Normalising the voice and then summing music on top
+   * gives a file whose integrated loudness is whatever the sum happens to be —
+   * measured on this project, a -14 target landed at -15.6 because the bed was
+   * added after the measurement. The target is a claim about the DELIVERED file,
+   * so it has to be the last thing that touches the mix.
+   */
+  loudness?: string | null,
+): string[] {
   const vol = Math.max(0, bg.volume);
   const dur = bg.durationSec;
   // Zero when the bed plays to the last frame: there is nothing after it to ease
@@ -296,7 +320,11 @@ function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRe
     // that Studio Sound may already have normalised to TP -1.5, so a loud bed can
     // push the sum past full scale. alimiter catches only those peaks — below the
     // ceiling it is transparent, so a quiet bed sounds exactly as it did.
-    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0,alimiter=limit=-1.0dB:level=disabled[outa];`,
+    // loudnorm sits between the sum and the limiter: it needs the finished mix to
+    // measure, and the limiter stays last so it can still catch a stray peak.
+    `[bgprog][bgm]amix=inputs=2:duration=first:normalize=0` +
+      `${loudness ? `,${loudness},aresample=48000` : ''}` +
+      `,alimiter=limit=-1.0dB:level=disabled[outa];`,
   ];
 }
 
@@ -336,17 +364,47 @@ function bgMusicMixLines(programLabel: string, musicIndex: number, bg: BgMusicRe
  *    to resample anyway, so without this the bug appears only on music-free
  *    renders — which is exactly the sort of thing that ships.
  */
-export function studioSoundStages(): string[] {
+export function studioSoundStages(loudness?: string | null, alreadyDenoised = false): string[] {
   return [
     'highpass=f=85',
-    'afftdn=nr=12:nf=-30:tn=1',
+    // Skipped when the trained denoiser has already run: afftdn would be
+    // subtracting a noise estimate from audio that no longer has that noise, and
+    // the pair audibly over-processes. The rest of the chain still earns its
+    // place — the model cleans, it does not shape.
+    ...(alreadyDenoised ? [] : ['afftdn=nr=12:nf=-30:tn=1']),
     'deesser=i=0.35',
     'equalizer=f=220:t=q:w=1.0:g=-2',
     'equalizer=f=3200:t=q:w=1.2:g=3',
-    'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
-    'loudnorm=I=-16:TP=-1.5:LRA=11',
+    // Unity makeup after a denoise pass. The model leaves near-silence between
+    // words, and makeup gain on near-silence is amplified artefacts — measured,
+    // this was most of why a cleaned export scored barely better than an
+    // uncleaned one. `makeup=1` IS unity: acompressor's range is [1, 64] and 0
+    // is rejected outright, which is a render that fails rather than one that
+    // sounds wrong.
+    alreadyDenoised
+      ? 'acompressor=threshold=-18dB:ratio=2.5:attack=8:release=180:makeup=1'
+      : 'acompressor=threshold=-18dB:ratio=3:attack=8:release=180:makeup=2',
+    // -16 is the speech-broadcast number and the right default for a voice. When
+    // an export preset names a target instead, THAT one runs here rather than
+    // after — two loudnorm passes in one chain is not twice as normalised, it is
+    // one pass measuring a signal the other already moved.
+    loudness ?? 'loudnorm=I=-16:TP=-1.5:LRA=11',
     'aresample=48000',
   ];
+}
+
+/**
+ * Loudness on its own, for an export that names a destination without asking for
+ * the voice chain.
+ *
+ * Normalisation used to live only inside studioSoundStages, so the only way to
+ * hit a platform's target was to accept denoise, de-essing, EQ and compression
+ * with it. Those are a creative choice; arriving at the right level is not.
+ */
+export function loudnessOnlyStages(loudness: string): string[] {
+  // aresample for the same reason it is in the chain above: loudnorm leaves the
+  // stream at 192kHz and AAC then silently lands on 96kHz.
+  return [loudness, 'aresample=48000'];
 }
 
 /**
@@ -550,7 +608,19 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // Before atempo: the enhancer's compressor and loudness measurement want the
   // voice at its natural rate, and atempo does not change level enough to undo
   // the normalisation.
-  if (options.studioSound) audioStages.push(...studioSoundStages());
+  /**
+   * Where the loudness target runs depends on whether there is a bed.
+   *
+   * With music, normalising here would measure the voice ALONE and the bed would
+   * then be summed on top — so the delivered file misses the target by however
+   * loud the bed is. Measured: a -14 target landed at -15.6. With a bed the
+   * stage moves into the mix chain instead; see bgMusicMixLines.
+   */
+  const loudnessAfterMix = Boolean(options.loudness && bgMusic);
+  const programLoudness = loudnessAfterMix ? null : options.loudness;
+
+  if (options.studioSound) audioStages.push(...studioSoundStages(programLoudness, options.denoised));
+  else if (programLoudness) audioStages.push(...loudnessOnlyStages(programLoudness));
   if (retime) audioStages.push(`atempo=${f(speed)}`);
 
   // With no images the halves rejoin into one chain, in the order they were in
@@ -588,10 +658,14 @@ export function buildRenderPlan(edl: Edl, options: RenderOptions): RenderPlan {
   // asked of the caller — the EDL and the speed are what decide it, and both are
   // already in hand, so the two cannot disagree.
   if (bgMusic) {
-    lines.push(...bgMusicMixLines(programLabel, 1, {
-      programSec: outputDuration(edl, speed),
-      ...bgMusic,
-    }));
+    lines.push(
+      ...bgMusicMixLines(
+        programLabel,
+        1,
+        { programSec: outputDuration(edl, speed), ...bgMusic },
+        loudnessAfterMix ? options.loudness : null,
+      ),
+    );
   }
 
   const args = [
@@ -660,6 +734,16 @@ export interface SequenceRenderOptions {
    * studioSoundStages.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on the input — see studioSoundStages. */
+  denoised?: boolean;
+  /**
+   * A ready-made `loudnorm=...` stage from an export preset, or absent to leave
+   * the level as mixed.
+   *
+   * Passed as the built filter rather than a number so packages/core keeps one
+   * place that knows how loudnorm is spelt — see export-preset.ts.
+   */
+  loudness?: string | null;
   /**
    * Reframe the picture to a target resolution, cropping to fill it. Already
    * resolved to concrete pixels by the caller — resolveFrame returns null when the
@@ -706,6 +790,12 @@ export interface SequenceRenderOptions {
  * CLIPS (a handful), not the number of cuts. The per-clip cut stays linear.
  */
 export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions): RenderPlan {
+  /**
+   * One rate map for the whole plan. A caller that passes only `speed` gets a
+   * flat map, so the single-speed path is the same code with every clip agreeing
+   * — there is no second branch to keep in step.
+   */
+  const speeds: SpeedMap = options.clipSpeeds ?? flatSpeed(options.speed ?? 1);
   const { clips, output, hasVideo, width, height, fps, subtitlePath, speed = 1, fontsDir, bgMusic } =
     options;
   const burnIn = Boolean(hasVideo && subtitlePath);
@@ -738,6 +828,7 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
 
     const expr = local.map((r) => `between(t,${f(r.start)},${f(r.end)})`).join('+');
     const srcFps = clips[i]?.fps;
+    const rate = speedOf(speeds, clip.clipId);
 
     if (hasVideo) {
       // select cuts; setpts renumbers kept frames against the clip's OWN rate;
@@ -745,8 +836,13 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       // rate — both mandatory, because concat rejects clips that disagree on
       // size, SAR, rate, or pixel format.
       const vRenum = srcFps && srcFps > 0 ? f(srcFps) : 'FRAME_RATE';
+      // This clip's own rate, applied HERE rather than once on the joined
+      // stream: ffmpeg cannot vary a rate along a single stream, so the only
+      // place a sequence can hold several is on the per-clip chains. `fps=`
+      // below then resamples to the canonical rate, which concat requires.
+      const vRate = rate !== 1 ? `setpts=PTS/${f(rate)},` : '';
       lines.push(
-        `[${i}:v]select='${expr}',setpts=N/${vRenum}/TB,` +
+        `[${i}:v]select='${expr}',setpts=N/${vRenum}/TB,${vRate}` +
           `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
           `pad=${width}:${height}:(${width}-iw)/2:(${height}-ih)/2,` +
           `setsar=1,fps=${f(fps)},format=yuv420p[v${i}];`,
@@ -765,9 +861,10 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
         `afade=t=out:st=${f(outStart)}:d=${f(fade)}:enable='between(t,${f(outStart)},${f(range.end)})'`,
       ];
     });
+    const aRate = rate !== 1 ? `atempo=${f(rate)},` : '';
     lines.push(
       `[${i}:a]${fades.length > 0 ? `${fades.join(',')},` : ''}asetnsamples=n=64:p=0,` +
-        `aselect='${expr}',asetpts=N/SR/TB,aresample=48000,` +
+        `aselect='${expr}',asetpts=N/SR/TB,${aRate}aresample=48000,` +
         `aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}];`,
     );
     aLabels.push(`[a${i}]`);
@@ -835,7 +932,10 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       const dir = fontsDir ? `:fontsdir='${escapeSubtitlePath(fontsDir)}'` : '';
       postImageStages.push(`subtitles=filename='${escapeSubtitlePath(subtitlePath!)}'${dir}`);
     }
-    if (retime) postImageStages.push(`setpts=PTS/${f(speed)}`);
+      // NO global setpts here: every clip was retimed on its own chain before
+      // the concat, because ffmpeg cannot vary a rate along one stream. The
+      // joined picture is already on the finished clock; doing it again would
+      // apply the rate twice.
 
     if (imageInputs.length > 0) {
       imageChain = imageChainLines(
@@ -851,19 +951,31 @@ export function buildSequenceRenderPlan(edl: Edl, options: SequenceRenderOptions
       lines.push(`[vc]${[...stages, ...postImageStages].join(',')}[outv];`);
     }
   }
+  // Same rule as the single-clip path: with a bed, the target has to be measured
+  // on the finished sum, not on the voice before the bed is added.
+  const seqLoudnessAfterMix = Boolean(options.loudness && bgMusic);
+  const seqProgramLoudness = seqLoudnessAfterMix ? null : options.loudness;
+
   if (wantsAudioStage) {
     const aStages: string[] = [];
-    if (options.studioSound) aStages.push(...studioSoundStages());
-    if (retime) aStages.push(`atempo=${f(speed)}`);
+    if (options.studioSound) aStages.push(...studioSoundStages(seqProgramLoudness, options.denoised));
+    else if (seqProgramLoudness) aStages.push(...loudnessOnlyStages(seqProgramLoudness));
+    // As above: the rate is already in the joined stream.
     lines.push(`[ac]${aStages.join(',')}${programLabel};`);
   }
   // The music bed rides on top of the joined program: its input index is the
   // clip count, since the clips occupy inputs 0..n-1. programSec as above.
   if (bgMusic) {
-    lines.push(...bgMusicMixLines(programLabel, clips.length, {
-      programSec: outputDuration(edl, speed),
-      ...bgMusic,
-    }));
+    lines.push(
+      ...bgMusicMixLines(
+        programLabel,
+        clips.length,
+        // The finished length, summed per clip at each clip's own rate — not
+        // total/speed, which is only right when every clip agrees.
+        { programSec: outputDurationWith(edl, speeds), ...bgMusic },
+        seqLoudnessAfterMix ? options.loudness : null,
+      ),
+    );
   }
 
   const inputs = clips.flatMap((c) => ['-i', c.input]);

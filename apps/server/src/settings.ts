@@ -15,9 +15,11 @@ import { CONFIG } from './config.ts';
  * SDK reads `process.env` directly — so neither captures a stale value.
  *
  * ⚠️ Two honest limitations, stated here and in the UI:
- *   1. This API is unauthenticated (see the CORS note in index.ts). A key-setting
- *      route means anyone who can reach the server can change keys. That is fine
- *      for a local, single-user desktop app and wrong the moment it is exposed.
+ *   1. Anyone holding the app's token can change these keys. That used to read
+ *      "this API is unauthenticated", which it no longer is (auth.ts) — but the
+ *      token is a single shared credential with no scopes, so a caller who can
+ *      list projects can also rewrite every key. Treat holding it as holding the
+ *      keys, because it is.
  *   2. Keys are stored in PLAINTEXT on disk, exactly as a .env file would be. The
  *      file lives OUTSIDE the media directory, so it is never served over /media.
  */
@@ -46,6 +48,7 @@ export const MANAGED_KEYS: ManagedKey[] = [
   { id: 'claudeOauth', env: 'CLAUDE_CODE_OAUTH_TOKEN', label: 'Claude subscription token', hint: 'From `claude setup-token` — uses your Claude plan' },
   { id: 'elevenlabs', env: 'ELEVENLABS_API_KEY', label: 'ElevenLabs API key', hint: 'Transcription (Scribe)' },
   { id: 'sarvam', env: 'SARVAM_API_KEY', label: 'Sarvam API key', hint: 'Transcription (Saaras v3)' },
+  { id: 'deepgram', env: 'DEEPGRAM_API_KEY', label: 'Deepgram API key', hint: 'Transcription (Nova-3) — works on Macs without on-device speech' },
   { id: 'gemini', env: 'GEMINI_API_KEY', label: 'Gemini API key', hint: 'Generating image inserts — aistudio.google.com' },
   { id: 'jamendo', env: 'JAMENDO_CLIENT_ID', label: 'Jamendo client ID', hint: 'Larger background-music catalogue (optional)' },
 ];

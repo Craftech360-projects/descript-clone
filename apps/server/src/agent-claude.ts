@@ -1,12 +1,20 @@
 import type { Hono } from 'hono';
 import type { UpgradeWebSocket, WSContext } from 'hono/ws';
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import { z, type ZodTypeAny } from 'zod';
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 import { CONFIG } from './config.ts';
+import { zodShapeFor, toToolContent } from './tool-schema.ts';
+import {
+  callEditor,
+  closeSession,
+  newSession,
+  send,
+  settleToolResult,
+  type EditorSession,
+} from './editor-bridge.ts';
 import {
   AGENT_TOOLS,
   AGENT_TOOL_NAMES,
@@ -46,7 +54,41 @@ import {
  * workload at. The first is the default. Availability ultimately depends on what
  * the account's plan grants; an unavailable id surfaces as a model_not_found error.
  */
-export const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as const;
+/**
+ * The Claude models the picker offers.
+ *
+ * Hand-maintained, because the Agent SDK has no catalogue endpoint to ask — so
+ * this list is the one thing here that goes stale silently. It was three entries
+ * and had drifted a generation behind, which is why the picker looked empty of
+ * choice.
+ *
+ * Ordered by capability, heaviest first, so the top of the list is the strongest
+ * answer and the bottom is the cheapest. An id the account cannot reach fails at
+ * request time with the provider's own message rather than being hidden here —
+ * guessing entitlement client-side would hide models people are paying for.
+ */
+export const CLAUDE_MODELS = [
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-opus-4-8',
+  'claude-sonnet-4-6',
+] as const;
+
+/**
+ * What each id is FOR, shown beside it in the picker.
+ *
+ * A dropdown of bare model ids asks the user to already know the lineup. This
+ * app's workload is agentic and tool-heavy, so the useful distinction is not
+ * benchmark scores but "does this one hold a long tool loop together".
+ */
+export const CLAUDE_MODEL_HINTS: Record<string, string> = {
+  'claude-opus-5': 'Strongest reasoning. Best for long multi-step edits.',
+  'claude-sonnet-5': 'Balanced. A good default for everyday editing.',
+  'claude-haiku-4-5': 'Fastest and cheapest. Fine for short, direct commands.',
+  'claude-opus-4-8': 'Previous generation, still very capable.',
+  'claude-sonnet-4-6': 'Previous generation, balanced.',
+};
 
 /** The MCP server name our tools live under; the SDK prefixes tool ids with it. */
 const MCP_NAME = 'jumpcut';
@@ -54,22 +96,6 @@ const MCP_NAME = 'jumpcut';
 const ALLOWED_TOOLS = AGENT_TOOL_NAMES.map((n) => `mcp__${MCP_NAME}__${n}`);
 /** A confused model cannot spin forever — same guard as the Grok loop's MAX_STEPS. */
 const MAX_TURNS = 12;
-/** How long a single tool round-trip to the browser may take before we give up on it. */
-const TOOL_TIMEOUT_MS = 60_000;
-
-/**
- * Tools that run an encoder rather than edit a document, and so are allowed to
- * take far longer than a minute.
- *
- * Every other tool is a state change the browser answers in milliseconds, and a
- * minute of silence there means something broke. These two spawn ffmpeg and wait
- * — bounded on the server by CONFIG.summonOpTimeoutMs, which the Android shell
- * raises to seven minutes because software H.264 on a phone is slow. Timing them
- * out here at sixty seconds would abandon a job that is running perfectly well
- * and leave the model to report a failure that did not happen.
- */
-const SLOW_TOOLS = new Set(['run_media_op', 'summon_media']);
-const SLOW_TOOL_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Find the Claude Code CLI the SDK will spawn, so a missing native binary does
@@ -128,63 +154,53 @@ function claudeExecutable(): string | null {
   return cachedExecutable;
 }
 
+/**
+ * One bounded, tool-free completion through the Claude SDK.
+ *
+ * The Social panel writes a title and description — a single answer, no tool
+ * loop, no session to resume. That is a different shape from the editing agent
+ * this file otherwise serves, and it needs its own entry point: the WebSocket
+ * branch exists to drive an interactive loop, and putting a one-shot write
+ * through it would mean inventing a fake session and a fake client.
+ *
+ * `tools: []` and no MCP server, because the model is being asked to write prose
+ * and every tool offered is one more way for a turn to end without any.
+ */
+export async function completeOnce(model: string, prompt: string): Promise<string> {
+  const exe = claudeExecutable();
+  const q = query({
+    prompt,
+    options: {
+      model,
+      tools: [],
+      settingSources: [],
+      permissionMode: 'bypassPermissions',
+      ...(exe ? { pathToClaudeCodeExecutable: exe } : {}),
+    },
+  });
+
+  let text = '';
+  for await (const message of q) {
+    const m = message as { type?: string; message?: { content?: Array<{ type?: string; text?: string }> } };
+    if (m.type === 'assistant') {
+      for (const block of m.message?.content ?? []) {
+        if (block.type === 'text' && block.text) text += block.text;
+      }
+    }
+  }
+  return text;
+}
+
 // ── JSON Schema → Zod ────────────────────────────────────────────────────────
 //
 // AGENT_TOOLS carry plain JSON Schema (they were written for Grok's OpenAI-format
-// function specs). The SDK's tool() wants a Zod raw shape, which it turns back into
-// JSON Schema for the model — so we convert once here. The schemas only use a small
-// slice of JSON Schema (string/integer/number/boolean, string enums, type unions
-// with "null", descriptions, required), which keeps this converter small and total.
-
-function zodForProperty(spec: Record<string, unknown>): ZodTypeAny {
-  if (Array.isArray(spec.enum)) {
-    // Every enum in AGENT_TOOLS is a set of string literals (modes, presets, fonts).
-    return z.enum(spec.enum as [string, ...string[]]);
-  }
-  const types = Array.isArray(spec.type) ? spec.type : [spec.type];
-  const nullable = types.includes('null');
-  const base = types.find((t) => t !== 'null');
-  let t: ZodTypeAny;
-  switch (base) {
-    case 'string':
-      t = z.string();
-      break;
-    case 'integer':
-    case 'number':
-      t = z.number();
-      break;
-    case 'boolean':
-      t = z.boolean();
-      break;
-    case 'array':
-      // Arrays are always arrays of a scalar here (clip ids, filler words), so
-      // the item type recurses through this same function. Without this branch
-      // they fell through to z.unknown(), which reaches the model as "any" — and
-      // an argument the model cannot see the shape of is one it gets wrong.
-      t = z.array(zodForProperty((spec.items as Record<string, unknown>) ?? { type: 'string' }));
-      break;
-    default:
-      t = z.unknown();
-  }
-  return nullable ? t.nullable() : t;
-}
-
-function zodShapeFor(spec: AgentToolSpec): Record<string, ZodTypeAny> {
-  const { properties, required = [] } = spec.function.parameters;
-  const req = new Set(required);
-  const shape: Record<string, ZodTypeAny> = {};
-  for (const [key, raw] of Object.entries(properties)) {
-    const prop = raw as Record<string, unknown>;
-    let t = zodForProperty(prop);
-    if (typeof prop.description === 'string') t = t.describe(prop.description);
-    if (!req.has(key)) t = t.optional();
-    shape[key] = t;
-  }
-  return shape;
-}
+// function specs). Both MCP surfaces need Zod instead, so the conversion lives in
+// tool-schema.ts — shared with apps/mcp so the external server and this one cannot
+// drift into two different contracts for the same 70 tools.
 
 // ── per-connection state ─────────────────────────────────────────────────────
 
+/** What this socket sends the panel. Kept as documentation of the wire. */
 interface WireOut {
   /** Streamed/whole assistant text to append in the panel. */
   text?: string;
@@ -199,48 +215,25 @@ interface WireOut {
   error?: string;
 }
 
-interface Conn {
-  ws: WSContext;
-  /** Resolvers for tool calls awaiting the browser's reply, keyed by call id. */
-  pending: Map<string, (result: string) => void>;
-  /** The SDK session to resume, so history is not resent each turn. */
-  sessionId: string | null;
-  /** Guards against two overlapping turns on one socket (mirrors the client's busy flag). */
-  busy: boolean;
-  seq: number;
-}
+/**
+ * The Jumpy panel's session is PINNED, not registered.
+ *
+ * Its tool calls go back over the same socket the chat arrived on, so a turn
+ * started in this window can only ever touch this window. Registering it would
+ * make it addressable by an outside caller and let a Hermes tool call land in a
+ * window someone is typing into. See editor-bridge.ts.
+ */
+type Conn = EditorSession & { sessionId: string | null; busy: boolean };
 
-function send(conn: Conn, msg: WireOut): void {
-  try {
-    conn.ws.send(JSON.stringify(msg));
-  } catch {
-    /* socket closed mid-turn — nothing to do */
-  }
-}
-
-/** Forward one tool call to the browser and await its result string. */
-function callBrowser(conn: Conn, name: string, args: Record<string, unknown>): Promise<string> {
-  return new Promise((resolve) => {
-    const id = `t${conn.seq++}`;
-    conn.pending.set(id, resolve);
-    send(conn, { tool: { id, name, args } });
-    setTimeout(() => {
-      if (conn.pending.delete(id)) resolve('Error: the editor did not respond in time.');
-    }, SLOW_TOOLS.has(name) ? SLOW_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS);
-  });
+function newConn(ws: WSContext): Conn {
+  return Object.assign(newSession(ws, { registered: false }), { sessionId: null, busy: false });
 }
 
 /** Build the in-process MCP tools (one per AGENT_TOOLS entry); each handler bridges to the browser over `conn`. */
 function buildTools(conn: Conn) {
   return AGENT_TOOLS.map((spec) =>
-    tool(
-      spec.function.name,
-      spec.function.description,
-      zodShapeFor(spec),
-      async (args) => {
-        const result = await callBrowser(conn, spec.function.name, args as Record<string, unknown>);
-        return { content: [{ type: 'text' as const, text: result }] };
-      },
+    tool(spec.function.name, spec.function.description, zodShapeFor(spec), async (args) =>
+      toToolContent(await callEditor(conn, spec.function.name, args as Record<string, unknown>)),
     ),
   );
 }
@@ -363,7 +356,7 @@ export function registerClaudeAgent(app: Hono, upgradeWebSocket: UpgradeWebSocke
       let conn: Conn | null = null;
       return {
         onOpen(_evt, ws) {
-          conn = { ws, pending: new Map(), sessionId: null, busy: false, seq: 0 };
+          conn = newConn(ws);
           if (!CONFIG.hasClaude()) {
             send(conn, {
               error:
@@ -372,7 +365,7 @@ export function registerClaudeAgent(app: Hono, upgradeWebSocket: UpgradeWebSocke
           }
         },
         onMessage(evt, ws) {
-          if (!conn) conn = { ws, pending: new Map(), sessionId: null, busy: false, seq: 0 };
+          if (!conn) conn = newConn(ws);
           let data: {
             t?: string;
             id?: string;
@@ -388,11 +381,7 @@ export function registerClaudeAgent(app: Hono, upgradeWebSocket: UpgradeWebSocke
             return;
           }
           if (data.t === 'tool_result' && typeof data.id === 'string') {
-            const resolve = conn.pending.get(data.id);
-            if (resolve) {
-              conn.pending.delete(data.id);
-              resolve(typeof data.result === 'string' ? data.result : String(data.result ?? ''));
-            }
+            settleToolResult(conn, data.id, typeof data.result === 'string' ? data.result : String(data.result ?? ''));
             return;
           }
           if (data.t === 'user' && typeof data.text === 'string' && CONFIG.hasClaude()) {
@@ -405,8 +394,7 @@ export function registerClaudeAgent(app: Hono, upgradeWebSocket: UpgradeWebSocke
           }
         },
         onClose() {
-          // Free any tool calls still waiting so their promises settle.
-          if (conn) for (const resolve of conn.pending.values()) resolve('Error: the panel was closed.');
+          if (conn) closeSession(conn, 'Error: the panel was closed.');
           conn = null;
         },
       };

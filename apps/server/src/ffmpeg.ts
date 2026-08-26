@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { SpeedMap } from '../../../packages/core/src/edl.ts';
 import { writeFile, unlink, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -49,6 +50,144 @@ export async function checkTools(): Promise<{ ffmpeg: string | null; ffprobe: st
   return { ffmpeg, ffprobe };
 }
 
+/**
+ * Can this ffmpeg BURN captions into the picture?
+ *
+ * Burning goes through libass, reached by the `subtitles` filter. That filter is
+ * a BUILD OPTION, not a given: a Homebrew ffmpeg configured without
+ * `--enable-libass` runs everything else in this app perfectly and then dies on
+ * the one filter the caption burn needs, with
+ *
+ *     No such filter: 'subtitles'
+ *
+ * after the render has already been queued. Measured on this machine: ffmpeg
+ * 8.1.2, built with x264/x265/opus/vpx and no libass at all — so every export of
+ * a project with captions enabled failed, and the only clue was a line of ffmpeg
+ * stderr in a job record.
+ *
+ * Asking once, at startup, turns that into something the UI can say up front and
+ * the render route can refuse cleanly. Cached because it cannot change while the
+ * process lives.
+ */
+let subtitlesFilter: boolean | null = null;
+
+/**
+ * The encoder flags for a render, honouring CONFIG.videoEncoder.
+ *
+ * Probed rather than assumed. A build of ffmpeg without VideoToolbox — every
+ * Linux one, and some Homebrew formulae — fails with "Unknown encoder" partway
+ * into a render that has already spent a minute on the earlier passes, which is
+ * the worst moment to find out. Falling back to software costs speed and finishes.
+ *
+ * Cached: this shells out to ffmpeg, and a render should not pay for the probe
+ * every time.
+ */
+let encoderArgs: string[] | null = null;
+
+export async function renderEncoderArgs(): Promise<string[]> {
+  if (encoderArgs) return encoderArgs;
+
+  const SOFTWARE = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18'];
+
+  if (CONFIG.videoEncoder !== 'videotoolbox') {
+    encoderArgs = SOFTWARE;
+    return encoderArgs;
+  }
+
+  const available = await hasEncoder('h264_videotoolbox');
+  if (!available) {
+    console.warn('VIDEO_ENCODER=videotoolbox, but this ffmpeg has no h264_videotoolbox — using libx264.');
+    encoderArgs = SOFTWARE;
+    return encoderArgs;
+  }
+
+  /**
+   * -q:v rather than -crf: VideoToolbox has no CRF, and passing one is silently
+   * ignored, so a render that looked configured would come out at whatever
+   * default bitrate the encoder chose. 55 is roughly comparable to crf 18 for
+   * this kind of footage — high quality, not visually lossless.
+   */
+  encoderArgs = ['-c:v', 'h264_videotoolbox', '-q:v', '55'];
+  return encoderArgs;
+}
+
+/** Does this ffmpeg have the named encoder compiled in? */
+async function hasEncoder(name: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(CONFIG.ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true });
+    let out = '';
+    child.stdout.on('data', (c) => { out += String(c); });
+    child.on('error', () => resolve(false));
+    child.on('close', () => resolve(new RegExp(`\\b${name}\\b`).test(out)));
+  });
+}
+
+export async function canBurnCaptions(): Promise<boolean> {
+  if (subtitlesFilter !== null) return subtitlesFilter;
+  try {
+    const out = await run(CONFIG.ffmpegPath, ['-hide_banner', '-filters']);
+    // The filter table lists one filter per line; the name is the second column.
+    subtitlesFilter = /^\s*\S+\s+subtitles\s/m.test(out);
+  } catch {
+    // If ffmpeg cannot even be asked, the honest answer is "no" — the render
+    // would fail anyway, and claiming the capability would only move the error.
+    subtitlesFilter = false;
+  }
+  return subtitlesFilter;
+}
+
+/** Synchronous read of the cached answer, for request handlers that cannot await. */
+export function burnCaptionsReady(): boolean {
+  return subtitlesFilter === true;
+}
+
+/**
+ * The rotation a container asks a player to apply, as 0 / 90 / 180 / 270.
+ *
+ * Vertical phone video is almost never STORED vertical. It is stored in the
+ * sensor's own landscape orientation with a Display Matrix that says "turn this
+ * 90 degrees on the way out" — so ffprobe reports 3840x2160 for a clip that every
+ * player, including this app's own `<video>`, shows as 2160x3840.
+ *
+ * Reading the stored numbers and ignoring the matrix is why an imported reel came
+ * out STRETCHED: the editor sized a landscape box around a portrait picture, and
+ * `frameSize` then aimed the render at the wrong target shape entirely.
+ *
+ * Both spellings are handled. `side_data_list` carries the Display Matrix on
+ * modern files; `tags.rotate` is the older QuickTime spelling that some phones
+ * and most transcoders still emit.
+ */
+export function rotationOf(video: any): 0 | 90 | 180 | 270 {
+  const raw =
+    video?.side_data_list?.find((d: any) => d?.rotation !== undefined)?.rotation ??
+    video?.tags?.rotate;
+
+  const deg = Number(raw);
+  if (!Number.isFinite(deg)) return 0;
+
+  // -90 and 270 are the same instruction. Normalize into [0, 360) and snap to
+  // the quarter turns a display matrix can actually express.
+  const normalized = ((Math.round(deg / 90) * 90) % 360 + 360) % 360;
+  return normalized === 90 || normalized === 180 || normalized === 270 ? normalized : 0;
+}
+
+/**
+ * The size the picture is SEEN at, which is the only size the rest of this app
+ * should ever know about.
+ *
+ * Verified against ffmpeg 8.1 rather than assumed: decoding this project's own
+ * phone clip with default flags yields 2160x3840, and only `-noautorotate` yields
+ * the stored 3840x2160. Autorotation is on by default, so every filter graph, every
+ * thumbnail and every render downstream already works in DISPLAY space. Reporting
+ * display dimensions here is what makes the probe agree with them.
+ */
+export function displaySize(video: any): { width?: number; height?: number } {
+  const width = video?.width;
+  const height = video?.height;
+  const turned = rotationOf(video) % 180 !== 0;
+  return turned ? { width: height, height: width } : { width, height };
+}
+
 export async function probe(path: string): Promise<MediaInfo> {
   const out = await run(CONFIG.ffprobePath, [
     '-v', 'error',
@@ -66,12 +205,18 @@ export async function probe(path: string): Promise<MediaInfo> {
     throw new Error('This file has no audio track, so there is nothing to transcribe.');
   }
 
+  // Display size, not stored size — see displaySize(). A vertical phone clip is
+  // stored landscape with a 90-degree Display Matrix, and every consumer of these
+  // numbers (the monitor's geometry, frameSize, the render target) means the
+  // shape the viewer sees.
+  const { width, height } = displaySize(video);
+
   return {
     duration: Number(data.format?.duration ?? 0),
     hasVideo: Boolean(video),
     hasAudio: true,
-    width: video?.width,
-    height: video?.height,
+    width,
+    height,
     // avg_frame_rate FIRST, and the order is the whole ballgame. The render's
     // video cut renumbers kept frames to a constant rate with setpts=N/fps, so
     // fps must be frames÷duration — the AVERAGE rate — to reproduce real time.
@@ -112,6 +257,13 @@ export async function probeImage(path: string): Promise<{ width: number; height:
       '-print_format', 'json',
       '-show_format',
       '-show_streams',
+      // A JPEG's EXIF Orientation does NOT appear on the stream — verified:
+      // ffprobe reports neither side_data_list nor tags.rotate for a rotated
+      // photo, so the stream alone says 400x300 for an image every viewer shows
+      // as 300x400. It is only visible as a display matrix on a FRAME, so ask
+      // for exactly one.
+      '-show_frames',
+      '-read_intervals', '%+#1',
       path,
     ]);
   } catch (e) {
@@ -152,7 +304,23 @@ export async function probeImage(path: string): Promise<{ width: number; height:
     );
   }
 
-  return { width: video.width, height: video.height };
+  /**
+   * Same rule as video, different place to read it.
+   *
+   * ffmpeg's decoder applies EXIF Orientation (measured: a 400x300 JPEG with
+   * Orientation=6 decodes to 300x400), and so does every browser. Reporting the
+   * stored numbers described a portrait photo as landscape — to the panel that
+   * warns "this is a 400px image on a 1080p frame", and to the assistant.
+   */
+  const frame = data.frames?.[0];
+  const { width, height } = displaySize({
+    width: video.width,
+    height: video.height,
+    side_data_list: frame?.side_data_list ?? video.side_data_list,
+    tags: video.tags,
+  });
+
+  return { width: width ?? video.width, height: height ?? video.height };
 }
 
 /**
@@ -186,6 +354,57 @@ export async function extractAudioForAsr(input: string, output: string): Promise
     output,
   ]);
   return output;
+}
+
+/**
+ * Composite a pre-rendered caption strip onto a finished render.
+ *
+ * A SECOND pass, deliberately. The main graph is intricate — cuts, speed, frame,
+ * grade, images, music, all interdependent — and threading another input through
+ * both of its builders to work around a missing filter is a poor trade for the
+ * risk. This is one input and one overlay against a file that is already
+ * correct, so it cannot break the edit; the cost is a re-encode of the video
+ * track, which for a reel is seconds.
+ *
+ * `eof_action=pass` matters: the caption stream is shorter than the programme
+ * whenever the last words are not at the very end, and without it ffmpeg holds
+ * the final tile — or stops — instead of letting the clean picture through.
+ */
+export async function burnCaptionStrip(
+  input: string,
+  output: string,
+  strip: { listPath: string; x: number; y: number },
+  hooks: RenderHooks = {},
+): Promise<void> {
+  const args = [
+    '-hide_banner', '-v', 'error', '-y',
+    '-i', input,
+    '-f', 'concat', '-safe', '0', '-i', strip.listPath,
+    '-filter_complex',
+    `[1:v]format=rgba,setpts=PTS-STARTPTS[cap];` +
+      `[0:v][cap]overlay=x=${Math.round(strip.x)}:y=${Math.round(strip.y)}:eof_action=pass:format=auto[v]`,
+    '-map', '[v]',
+    '-map', '0:a?',
+    // Audio is already mixed, cut and normalised by the first pass. Copying it
+    // keeps this pass from touching the one thing it has no business changing.
+    '-c:a', 'copy',
+    ...(await renderEncoderArgs()),
+    '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart',
+    output,
+  ];
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(CONFIG.ffmpegPath, args, { windowsHide: true });
+    hooks.onSpawn?.(child);
+    let stderr = '';
+    child.stderr.on('data', (c) => { stderr = (stderr + String(c)).slice(-2000); });
+    child.on('error', (e) => reject(new Error(`ffmpeg could not be started: ${e.message}`)));
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`burning captions failed (${code}): ${stderr.trim().slice(0, 400)}`));
+    });
+  });
 }
 
 /**
@@ -245,6 +464,10 @@ export interface RenderJob {
    * the bed. See studioSoundStages in render.ts.
    */
   studioSound?: boolean;
+  /** The trained denoiser already ran on `input` — gentles the voice chain. */
+  denoised?: boolean;
+  /** Per-clip playback rates. Sequence renders only; see render.ts. */
+  clipSpeeds?: SpeedMap;
   /**
    * The crop into a target resolution, already resolved to concrete pixels by the
    * caller — resolveFrame returns null when the setting would change nothing, and
@@ -298,7 +521,7 @@ export async function renderEdl(
   job: RenderJob,
   hooks: RenderHooks = {},
 ): Promise<{ output: string; segments: number; burnedIn: boolean }> {
-  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound, frame, color } =
+  const { input, output, hasVideo, subtitles, speed = 1, fontsDir, bgMusic, studioSound, denoised, clipSpeeds, frame, color } =
     job;
   // A multi-clip stitch when the caller handed us one file per EDL clip. A single
   // clip falls through to the original single-input path, byte-identical.
@@ -357,6 +580,8 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      denoised,
+      clipSpeeds,
       frame,
       color,
       // The canonical rate every clip was resampled to — not any one clip's, or
@@ -377,6 +602,7 @@ export async function renderEdl(
       fontsDir: subtitlePath ? fontsDir : undefined,
       bgMusic,
       studioSound,
+      denoised,
       frame,
       color,
       // The same freshly-probed rate the frame renumber uses. Undefined when the

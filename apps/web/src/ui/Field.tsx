@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import Icon, { type IconName } from './Icon.tsx';
 
 /**
@@ -28,6 +28,27 @@ import Icon, { type IconName } from './Icon.tsx';
  * means the row is no longer one element. So: an explicit button/aria-expanded
  * disclosure, which is the same contract <details> implements, spelled out.
  */
+/**
+ * Lets something outside a Section decide which one is open.
+ *
+ * The phone tool bar needs to open a named section — "Captions", say — and the
+ * sections each held their own boolean, so nothing outside could reach them.
+ * A context rather than props threaded through eleven call sites, because the
+ * panel that renders them does not care about this and should not have to.
+ *
+ * It also makes the phone an accordion: setting one key closes the rest. That is
+ * the right behaviour on a small screen, where eleven open sections is a very
+ * long scroll and you only came here for one of them. On a desk there is no
+ * provider, so sections keep their own state and any number can be open at once.
+ */
+export const SectionOpen = createContext<{
+  key: string | null;
+  set: (key: string | null) => void;
+} | null>(null);
+
+/** Stable key for a section, derived from its label so nothing has to be typed twice. */
+export const sectionKey = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
 export function Section({ icon, label, value, toggle, children, defaultOpen }: {
   icon: IconName;
   label: string;
@@ -44,11 +65,20 @@ export function Section({ icon, label, value, toggle, children, defaultOpen }: {
   children: ReactNode;
   defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(Boolean(defaultOpen));
+  const [selfOpen, setSelfOpen] = useState(Boolean(defaultOpen));
   const bodyId = useId();
 
+  // Controlled when a provider is present (the phone), self-managed otherwise.
+  const shared = useContext(SectionOpen);
+  const key = sectionKey(label);
+  const open = shared ? shared.key === key : selfOpen;
+  const setOpen = (next: boolean) => {
+    if (shared) shared.set(next ? key : null);
+    else setSelfOpen(next);
+  };
+
   return (
-    <section className={`sect${open ? ' open' : ''}`}>
+    <section className={`sect${open ? ' open' : ''}`} data-sect={key}>
       <div className="sect-head">
         <button
           type="button"
@@ -72,6 +102,22 @@ export function Section({ icon, label, value, toggle, children, defaultOpen }: {
             label={toggle.label}
             hideLabel
           />
+        )}
+        {/* The way out, and only where one is needed.
+          *
+          * `shared` is set only when the sections are an ACCORDION, which is the
+          * phone. There, opening a section fills the sheet, its own header
+          * scrolls away with the content, and the tool bar carrying the view
+          * switcher is pushed off the bottom — so there is nothing on screen
+          * that gets you back. On a desk every section is visible at once and
+          * this would be noise, so it is not rendered.
+          *
+          * The header is sticky (see app.css), so this stays reachable however
+          * far down a long panel you have scrolled. */}
+        {shared && open && (
+          <button type="button" className="sect-done" onClick={() => setOpen(false)}>
+            Done
+          </button>
         )}
       </div>
       {/* Hidden rather than unmounted, so a search you ran in the music browser
@@ -104,6 +150,19 @@ export function SectionGroup({ label, children }: { label: string; children: Rea
  * reach should already be on screen. Native <details> keeps full keyboard and
  * screen-reader support with no JS.
  */
+/**
+ * The nearest Field's label, so a Slider inside it has a name without every call
+ * site repeating one.
+ *
+ * 18 sliders had no accessible name at all. Threading a `label` prop through all
+ * of them would have worked and would also have been 18 chances to forget. A
+ * Field already knows what it is called; a Slider inside it is almost always
+ * "that Field's value", so the heading is the right default. A Field holding
+ * SEVERAL sliders (the push-in zoom and ease, the six colour knobs) should still
+ * pass an explicit `label` — this makes the floor "named", not "named well".
+ */
+const FieldLabel = createContext<string | undefined>(undefined);
+
 export function Field({ label, children, collapsible, defaultOpen }: {
   label: string;
   children: ReactNode;
@@ -112,17 +171,21 @@ export function Field({ label, children, collapsible, defaultOpen }: {
 }) {
   if (collapsible) {
     return (
-      <details className="field field-c" open={defaultOpen}>
-        <summary>{label}</summary>
-        <div className="field-body">{children}</div>
-      </details>
+      <FieldLabel.Provider value={label}>
+        <details className="field field-c" open={defaultOpen}>
+          <summary>{label}</summary>
+          <div className="field-body">{children}</div>
+        </details>
+      </FieldLabel.Provider>
     );
   }
   return (
-    <section className="field">
-      <h3>{label}</h3>
-      {children}
-    </section>
+    <FieldLabel.Provider value={label}>
+      <section className="field">
+        <h3>{label}</h3>
+        {children}
+      </section>
+    </FieldLabel.Provider>
   );
 }
 
@@ -270,17 +333,32 @@ export function Color({ value, onChange, onCommit, label }: {
  * thumb is a 16px target on a 22px-tall hit strip instead of the ~10px sliver
  * Windows hands out. See `.slider` in app.css.
  */
-export function Slider({ value, min, max, step, onChange, format, onPointerDown, onPointerUp }: {
+export function Slider({ value, min, max, step, onChange, format, label, onPointerDown, onPointerUp }: {
   value: number;
   min: number;
   max: number;
   step: number;
   onChange: (v: number) => void;
   format: (v: number) => string;
+  /**
+   * What this slider controls, spoken.
+   *
+   * Without it the input has no accessible name at all: the `<h3>` a Field
+   * renders above is a heading, not a label, and the formatted readout beside
+   * the bar is an unassociated `<span>`. Every slider in the Inspector — pause
+   * cap, frame zoom, all six colour knobs, caption size — announced itself as a
+   * bare "slider", while the − and + buttons flanking it were properly named
+   * "Less" and "More". Optional so no call site breaks, but pass it.
+   */
+  label?: string;
   /** Bracket the gesture so a drag is ONE undo step rather than one per frame. */
   onPointerDown?: () => void;
   onPointerUp?: () => void;
 }) {
+  // An explicit label wins; otherwise inherit the enclosing Field's heading.
+  const inherited = useContext(FieldLabel);
+  const name = label ?? inherited;
+
   /* A nudge is a whole gesture in one click, so it has to open AND close the
    * history bracket. Closing it inline would seal the entry with the label the
    * parent built from the OLD value — the label closes over the props of the
@@ -312,7 +390,7 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
         <button
           type="button"
           className="nudge"
-          aria-label="Less"
+          aria-label={name ? `Less ${name}` : 'Less'}
           disabled={value <= min}
           onClick={() => nudge(-1)}
         >
@@ -324,6 +402,11 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
           max={max}
           step={step}
           value={value}
+          aria-label={name}
+          // The raw number is meaningless read aloud — "40" against a range of
+          // 0..500 says nothing. `format` is already the human reading of this
+          // value ("40ms padding"), so it is what gets announced.
+          aria-valuetext={format(value)}
           onPointerDown={onPointerDown}
           onPointerUp={onPointerUp}
           // A keyboard nudge has no pointerup to seal the group, so treat blur as
@@ -334,7 +417,7 @@ export function Slider({ value, min, max, step, onChange, format, onPointerDown,
         <button
           type="button"
           className="nudge"
-          aria-label="More"
+          aria-label={name ? `More ${name}` : 'More'}
           disabled={value >= max}
           onClick={() => nudge(1)}
         >

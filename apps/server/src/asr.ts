@@ -4,10 +4,12 @@ import {
   ASR_ENDPOINT,
   ASR_MODELS,
   CONFIG,
+  DEEPGRAM_ASR_ENDPOINT,
   SARVAM_ASR_ENDPOINT,
   type AsrModelId,
 } from './config.ts';
 import type { Word } from '../../../packages/core/src/types.ts';
+import * as appleSpeech from './apple-speech.ts';
 
 /** Everything the Transcribe panel lets the user decide. */
 export interface AsrOptions {
@@ -35,7 +37,12 @@ export const ASR_DEFAULTS: AsrOptions = {
 
 /** The first usable real provider keeps existing ElevenLabs installs unchanged. */
 export function defaultAsrOptions(): AsrOptions {
+  // ElevenLabs still leads when its key is present: it is the only provider here
+  // that is BOTH verbatim and diarized, and losing speaker labels is a visible
+  // downgrade. On-device wins over Sarvam for an English-first editor, and over
+  // nothing at all — it is verbatim, free, and needs no key.
   if (CONFIG.hasElevenLabsAsr()) return ASR_DEFAULTS;
+  if (CONFIG.hasAppleSpeech()) return { ...ASR_DEFAULTS, model: 'apple_speech', diarize: false };
   if (CONFIG.hasSarvamAsr()) return { ...ASR_DEFAULTS, model: 'saaras_v3' };
   return ASR_DEFAULTS;
 }
@@ -73,16 +80,123 @@ export async function transcribe(
     // there is no progress to report and a fake one would be a lie.
     return mockTranscribe(duration);
   }
+  if (options.model === 'apple_speech' && CONFIG.hasAppleSpeech()) {
+    return appleTranscribe(audioPath, options, onProgress);
+  }
   if (options.model === 'saaras_v3' && CONFIG.hasSarvamAsr()) {
     return sarvamTranscribe(audioPath, options, onProgress);
   }
   if (options.model === 'scribe_v1' && CONFIG.hasElevenLabsAsr()) {
     return elevenLabsTranscribe(audioPath, options, onProgress);
   }
+  if (options.model === 'nova_3' && CONFIG.hasDeepgramAsr()) {
+    return deepgramTranscribe(audioPath, options, onProgress);
+  }
   // A saved on-import preference may name a provider whose key was later
-  // removed. With one real key left, that provider is the only useful choice.
+  // removed. With one real provider left, that provider is the only useful choice.
   if (CONFIG.hasSarvamAsr()) return sarvamTranscribe(audioPath, { ...options, model: 'saaras_v3' }, onProgress);
+  if (CONFIG.hasAppleSpeech()) return appleTranscribe(audioPath, { ...options, model: 'apple_speech' }, onProgress);
+  if (CONFIG.hasDeepgramAsr()) return deepgramTranscribe(audioPath, { ...options, model: 'nova_3' }, onProgress);
   return elevenLabsTranscribe(audioPath, options, onProgress);
+}
+
+// ---------------------------------------------------------------------------
+// Deepgram
+// ---------------------------------------------------------------------------
+
+/**
+ * Deepgram Nova-3.
+ *
+ * Here mainly for Macs that cannot run the on-device model. SpeechTranscriber
+ * needs macOS 26, which rules out every Intel Mac mini — and a machine with no
+ * provider at all silently falls through to the mock, which produces convincing
+ * fake words. A cloud key is the honest alternative.
+ *
+ * `filler_words=true` is the setting that matters and it is NOT the default.
+ * Deepgram strips "um"/"uh" unless asked not to, and this product exists to cut
+ * them — you cannot cut what the transcript never recorded. Same reason
+ * ElevenLabs is used in verbatim mode and Whisper was dropped entirely.
+ *
+ * One request, audio as the body: no upload step, no public URL, and nothing of
+ * the user's recording left sitting at a guessable address.
+ */
+async function deepgramTranscribe(
+  audioPath: string,
+  options: AsrOptions,
+  onProgress?: (p: AsrProgress) => void,
+): Promise<AsrResult> {
+  const params = new URLSearchParams({
+    model: 'nova-3',
+    // Punctuation and casing. Cosmetic, but a transcript you have to read while
+    // editing should look like writing.
+    smart_format: 'true',
+    punctuate: 'true',
+    filler_words: String(options.verbatim !== false),
+  });
+  if (options.diarize) params.set('diarize', 'true');
+  // 'auto' is ours, not theirs; omitting the parameter is how Deepgram detects.
+  if (options.language && options.language !== 'auto') params.set('language', options.language);
+
+  onProgress?.({ progress: -1, stage: 'Uploading audio to Deepgram' });
+  const bytes = await readFile(audioPath);
+  const res = await fetch(`${DEEPGRAM_ASR_ENDPOINT}?${params}`, {
+    method: 'POST',
+    headers: {
+      // Deepgram uses "Token", not "Bearer". A Bearer header authenticates as
+      // nobody and comes back 401 with no hint that the scheme was the problem.
+      authorization: `Token ${CONFIG.deepgramApiKey}`,
+      'content-type': 'audio/wav',
+    },
+    body: new Uint8Array(bytes),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(
+      `Deepgram returned ${res.status}${detail ? `: ${detail.slice(0, 400)}` : '.'}` +
+        (res.status === 401 ? ' Check the Deepgram key in Settings.' : ''),
+    );
+  }
+
+  onProgress?.({ progress: -1, stage: 'Reading Deepgram transcript' });
+  const payload = (await res.json()) as any;
+  const words = deepgramWords(payload);
+
+  if (words.length === 0) {
+    throw new Error(
+      'Deepgram returned no word-level timings. Either the audio was silent, or the ' +
+        'response shape differs from results.channels[0].alternatives[0].words — see deepgramWords().',
+    );
+  }
+
+  return { words, provider: 'nova_3', verbatim: options.verbatim !== false };
+}
+
+/**
+ * Deepgram nests the words four levels down; everything else is decoration.
+ *
+ * `punctuated_word` carries the capitalised, punctuated form and `word` the bare
+ * one. The editor shows this text to a human, so prefer the punctuated form —
+ * and note fillers.ts normalizes punctuation away before matching, so "um," still
+ * reads as a filler.
+ */
+export function deepgramWords(payload: any): Word[] {
+  const raw: any[] = payload?.results?.channels?.[0]?.alternatives?.[0]?.words ?? [];
+
+  return raw
+    .map((item, i) => {
+      const text = String(item?.punctuated_word ?? item?.word ?? '').trim();
+      if (!text || typeof item.start !== 'number' || typeof item.end !== 'number') return null;
+      return {
+        id: `w${i}`,
+        text,
+        start: item.start,
+        end: item.end,
+        // Deepgram numbers speakers from 0; the rest of the app expects a label.
+        speaker: typeof item.speaker === 'number' ? `Speaker ${item.speaker + 1}` : undefined,
+      } as Word;
+    })
+    .filter((w): w is Word => w !== null && w.end > w.start);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +506,46 @@ const MOCK_SCRIPT: Array<[string, string]> = [
   ['SPEAKER_00', 'Exactly'], ['SPEAKER_00', 'that'], ['SPEAKER_00', 'is'], ['SPEAKER_00', 'the'],
   ['SPEAKER_00', 'whole'], ['SPEAKER_00', 'insight'],
 ];
+
+// ---------------------------------------------------------------------------
+// Apple on-device speech (macOS 26+)
+// ---------------------------------------------------------------------------
+
+/**
+ * The local provider. No key, no upload, no cost — and verbatim, which is the
+ * property the filler remover needs and the reason this is worth a third code
+ * path at all.
+ *
+ * It returns no speaker labels. Rather than fake them, the words come back
+ * without a `speaker` and the editor simply shows no margin — `Word.speaker` is
+ * optional precisely so a provider may decline to guess.
+ */
+async function appleTranscribe(
+  audioPath: string,
+  options: AsrOptions,
+  onProgress?: (p: AsrProgress) => void,
+): Promise<AsrResult> {
+  onProgress?.({ progress: -1, stage: 'Starting on-device speech' });
+
+  const { words } = await appleSpeech.transcribe(audioPath, options.language, (p) =>
+    onProgress?.({ progress: p.progress, stage: p.stage }),
+  );
+
+  if (words.length === 0) {
+    throw new Error(
+      'On-device speech returned no words. If the media has no speech that is the ' +
+        'right answer; otherwise check the server log for the helper\'s own error.',
+    );
+  }
+
+  const declared = ASR_MODELS.find((m) => m.id === 'apple_speech');
+
+  return {
+    words,
+    provider: 'apple_speech',
+    verbatim: declared?.verbatim ?? true,
+  };
+}
 
 function mockTranscribe(duration: number): AsrResult {
   const n = MOCK_SCRIPT.length;

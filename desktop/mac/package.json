@@ -1,6 +1,6 @@
 {
-  "name": "transcript-editor",
-  "productName": "Transcript Editor",
+  "name": "jumpstart",
+  "productName": "Jumpstart",
   "version": "0.1.0",
   "description": "Edit video and audio by editing the transcript.",
   "author": "You <you@example.com>",
@@ -11,7 +11,7 @@
     "start": "npm run build && electron .",
     "dist": "npm run tools -- --arch=arm64 --cpu=arm64 && npm run build -- --platform=darwin --arch=arm64 && electron-builder --mac --arm64",
     "dist:intel": "npm run tools -- --arch=x64 --cpu=x64 && npm run build -- --platform=darwin --arch=x64 && electron-builder --mac --x64",
-    "tools": "npm install --force ffmpeg-static @ffprobe-installer/ffprobe"
+    "tools": "node -e \"const{rmSync}=require('fs');for(const p of ['node_modules/ffmpeg-static','node_modules/@ffprobe-installer'])rmSync(p,{recursive:true,force:true})\" && npm install --no-save ffmpeg-static @ffprobe-installer/ffprobe"
   },
   "dependencies": {
     "@ffprobe-installer/ffprobe": "^2.1.2",
@@ -23,8 +23,8 @@
     "esbuild": "^0.24.2"
   },
   "build": {
-    "appId": "com.example.transcript-editor",
-    "productName": "Transcript Editor",
+    "appId": "com.jumpstart.editor",
+    "productName": "Jumpstart",
     "directories": {
       "output": "dist"
     },
@@ -48,7 +48,11 @@
       "category": "public.app-category.video",
       "identity": null,
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
-  }
+  },
+  "//": [
+    "tools: the media binaries are per-ARCHITECTURE, and npm will not re-download them just because you asked for a different one \u2014 the package is already present at the right version, so the fetch is skipped and you get the previous arch. Building arm64 and then x64 on the same machine therefore packaged an arm64 ffmpeg into the Intel app, which afterPack.cjs caught. Deleting them first is what makes the arch flags actually take effect. Run it as `npm run tools -- --arch=<a> --cpu=<a>`."
+  ]
 }

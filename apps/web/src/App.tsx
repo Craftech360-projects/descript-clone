@@ -9,6 +9,7 @@ import {
   type Capabilities,
   type Clip,
   type CustomFont,
+  type Folder,
   type ImageAsset,
   type JobKind,
   type MediaItem,
@@ -29,6 +30,10 @@ import Monitor from './shell/Monitor.tsx';
 import Transport from './shell/Transport.tsx';
 import Splitter from './shell/Splitter.tsx';
 import Rail from './shell/Rail.tsx';
+import Icon, { type IconName } from './ui/Icon.tsx';
+import { SectionOpen, sectionKey } from './ui/Field.tsx';
+import { SwipeAway } from './ui/SwipeAway.tsx';
+import { uploadResumable } from './upload.ts';
 import TranscribeDialog from './dialogs/TranscribeDialog.tsx';
 import ExportDialog from './dialogs/ExportDialog.tsx';
 import SettingsDialog from './dialogs/SettingsDialog.tsx';
@@ -58,6 +63,9 @@ import {
   updateCaptions,
   updateSpeed,
   updateStudioSound,
+  updateDenoise,
+  updateClipSpeed,
+  updateAllClipSpeeds,
   updateFrame,
   beginFrameDrag,
   endFrameDrag,
@@ -93,7 +101,10 @@ import {
   type AutoImport,
 } from './store/autoImport.ts';
 import { cutFromWire, cutToWire, DEFAULT_SPEED, type CutSettings } from '../../../packages/core/src/doc.ts';
-import { DEFAULT_FRAME, frameLayout } from '../../../packages/core/src/frame.ts';
+import { DEFAULT_FRAME, frameLayout, frameSize } from '../../../packages/core/src/frame.ts';
+import SafeAreaOverlay from './shell/SafeAreaOverlay.tsx';
+import FloatingAssistant from './agent/FloatingAssistant.tsx';
+import { agentModel } from './store/agent.ts';
 import {
   MIN_MOVE_SEC,
   boxToPunch,
@@ -111,6 +122,34 @@ import type { Edl, Transcript, Word } from '../../../packages/core/src/types.ts'
 import { wordAt } from '../../../packages/core/src/paragraphs.ts';
 import { setAgentBridge, type AgentBridge } from './agent/tools.ts';
 import { setChatProject } from './store/agent.ts';
+import { connectEditorBridge, reportProject } from './store/bridge.ts';
+
+/**
+ * The phone tool bar, ordered the way a cut actually happens: tidy the words,
+ * then shape the picture, then dress it, then the odds and ends.
+ *
+ * Labels and icons match the rail's own sections, and the keys come from the same
+ * `sectionKey` the sections use — so renaming a section cannot silently strand it
+ * behind a button that no longer opens anything.
+ */
+const MOBILE_TOOLS: Array<{ key: string; label: string; icon: IconName }> = (
+  [
+    { label: 'Clean up', icon: 'scissors' },
+    { label: 'Pauses', icon: 'clock' },
+    { label: 'Captions', icon: 'captions' },
+    { label: 'Frame', icon: 'crop' },
+    { label: 'Colour', icon: 'contrast' },
+    { label: 'Background music', icon: 'music' },
+    // Beside Studio Sound because they are the two audio treatments and people
+    // reach for them together — but they are different things: that is a filter
+    // chain, this is a trained model. See the server's denoise.ts.
+    { label: 'Clean voice', icon: 'sparkle' },
+    { label: 'Studio Sound', icon: 'sparkle' },
+    { label: 'Push-ins', icon: 'target' },
+    { label: 'Images', icon: 'image' },
+    { label: 'Advanced', icon: 'sliders' },
+  ] as Array<{ label: string; icon: IconName }>
+).map((t) => ({ ...t, key: sectionKey(t.label) }));
 
 const CUSTOM_FILLERS_KEY = 'jumpcut.customFillers';
 
@@ -184,6 +223,94 @@ export default function App() {
 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Which platform's furniture to outline over the picture.
+   *
+   * A VIEW preference, not part of the document: it changes nothing about the
+   * output, so persisting it into the project would put a render-irrelevant
+   * field in every saved file and mark the doc dirty for looking at something.
+   * localStorage, the same as the pane widths.
+   */
+  const [safeArea, setSafeArea] = useState<'off' | 'reels' | 'tiktok' | 'shorts' | 'all'>(() => {
+    try {
+      const v = localStorage.getItem('ui.safeArea');
+      return v === 'reels' || v === 'tiktok' || v === 'shorts' || v === 'all' ? v : 'off';
+    } catch {
+      return 'off';
+    }
+  });
+  const chooseSafeArea = useCallback((v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => {
+    setSafeArea(v);
+    try { localStorage.setItem('ui.safeArea', v); } catch { /* private mode */ }
+  }, []);
+  /** Why the workspace could not boot. Read by the gate, not by the banner. */
+  const [bootError, setBootError] = useState<string | null>(null);
+
+  /**
+   * Folders, and which one is open.
+   *
+   * `null` is the top level (a list of folders); a folder id is inside that one;
+   * `''` is the Unfiled bucket. Navigation state, deliberately not persisted —
+   * coming back to the app should show you the whole shelf, not wherever you
+   * happened to stop.
+   */
+  const [folders, setFolders] = useState<Folder[]>([]);
+  /**
+   * The last music search, so attach_music can resolve an id the model was
+   * shown. Kept in a ref rather than state: nothing renders from it, and a
+   * re-render per search would be churn for a lookup table.
+   */
+  const musicHits = useRef<MusicResult[]>([]);
+  const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+
+  const loadFolders = useCallback(
+    () => api.folders.list().then(setFolders).catch((e) => setError(`Could not load folders: ${e.message}`)),
+    [],
+  );
+
+  const createFolder = async (name: string) => {
+    try {
+      const made = await api.folders.create(name);
+      await loadFolders();
+      // Straight into it: you made a folder in order to put something in it.
+      setOpenFolderId(made.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const patchFolder = async (id: string, patch: { name?: string; brief?: string }) => {
+    try {
+      await api.folders.update(id, patch);
+      await loadFolders();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  /** Put a project in a folder, or take it out. '' is Unfiled. */
+  const moveProject = async (id: string, folderId: string) => {
+    try {
+      await api.setProjectFolder(id, folderId || null);
+      setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const removeFolder = async (id: string) => {
+    try {
+      await api.folders.remove(id);
+      await loadFolders();
+      // The videos survive; only the label is gone. Show them rather than
+      // leaving the user staring at a folder that no longer exists.
+      await api.list().then(setLibrary).catch(() => {});
+      setOpenFolderId(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
   const [notice, setNotice] = useState<string | null>(null);
 
   /** The long-running job in flight, if any: what it is and how far along. */
@@ -196,8 +323,12 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Re-read capabilities after keys change so the assistant/transcription light up
   // (or dim) without a reload. setAsr keeps the transcribe defaults in step too.
+  // Errors here are reported, not swallowed: after saving an API key a failed
+  // refresh used to leave the assistant reading "off" forever with no reason given.
   const refreshCaps = useCallback(() => {
-    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch(() => {});
+    api.capabilities()
+      .then((c) => { setCaps(c); setAsr(c.asrDefaults); })
+      .catch((e) => setError(`Could not refresh what this workspace can do: ${e.message}`));
   }, []);
   /** The media/speakers drawer behind the title-bar ☰. */
   const [libOpen, setLibOpen] = useState(false);
@@ -206,6 +337,68 @@ export default function App() {
   // Desktop never sees this — the .m-* elements are display:none outside the
   // mobile media query, and the m-view-* class matches no desktop rule.
   const [mobileTab, setMobileTab] = useState<'script' | 'tools'>('script');
+  /**
+   * Which rail section the phone has open — one at a time, see SectionOpen.
+   * null means the sheet is closed and the script has the screen to itself.
+   */
+  const [openSection, setOpenSection] = useState<string | null>(null);
+
+  /**
+   * The phone shows ONE of two things properly rather than three badly.
+   *
+   * 'watch' gives the picture the screen; 'script' gives it to the transcript.
+   * Trying to fit both at once is what the first attempt did, and the result was
+   * a medium picture above a three-line transcript above a squeezed timeline —
+   * every surface compromised and none of them good.
+   *
+   * The timeline is hidden in both until asked for. On a 390px screen it is a
+   * ruler with colliding labels and clip stubs you cannot aim at; it is worth
+   * having when you go looking for it and worth nothing the rest of the time.
+   */
+  const [phoneMode, setPhoneMode] = useState<'watch' | 'script'>('watch');
+  const [showTimeline, setShowTimeline] = useState(false);
+
+  /**
+   * Bring the section the tool bar just opened into view.
+   *
+   * Without this the bar is only half a feature: tapping "Captions" switched to
+   * the tools surface and showed it from the top — the Inspector tabs, the
+   * project header, "Tighten for reels", then Clean up — with Captions open
+   * somewhere below the fold. You still had to hunt for it, which is the cost the
+   * bar exists to remove.
+   *
+   * rAF because the section only stops being `hidden` after the render that
+   * opened it, and scrolling to an element with no height puts you in the wrong
+   * place. `block: 'start'` so the header you tapped for is the first thing
+   * under your thumb.
+   */
+  useEffect(() => {
+    if (!openSection) return;
+    /**
+     * Scroll the panel itself rather than calling scrollIntoView.
+     *
+     * scrollIntoView walks up for a scrollable ancestor, and here that walk
+     * happens while the sheet is still being laid out — it picked the document,
+     * moved nothing, and the section stayed a thousand pixels down. Measuring the
+     * two rects and moving the panel by the difference needs no guess about which
+     * ancestor scrolls, and works whether the sheet has settled or not.
+     *
+     * Two frames, not one: the first is the render that opens the section, the
+     * second is after the sheet has taken its height. Measuring in between gives
+     * an offset that is correct for a layout no longer on screen.
+     */
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(`[data-sect="${openSection}"]`);
+        const panel = el?.closest<HTMLElement>('.panel');
+        if (!el || !panel) return;
+        const delta = el.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+        panel.scrollTo({ top: panel.scrollTop + delta, behavior: 'smooth' });
+      });
+    });
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [openSection]);
   const [asr, setAsr] = useState<AsrOptions | null>(null);
   const [fillerMode, setFillerMode] = useState<FillerMode>('hesitations');
   const [customFillers, setCustomFillers] = useState<string[]>(loadCustomFillers);
@@ -229,6 +422,10 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [followEdit, setFollowEdit] = useState(true);
   const [result, setResult] = useState<RenderResult | null>(null);
+  /** Uploads that stopped partway, offered on the dashboard so they can be finished. */
+  const [unfinished, setUnfinished] = useState<
+    Array<{ id: string; name: string; size: number; offset: number }>
+  >([]);
 
   // Imported caption fonts are global — one library backs every project — so they
   // live at the top of the app, not on a project. See importFont / the @font-face
@@ -254,6 +451,26 @@ export default function App() {
   const cut = doc?.cut ?? null;
   const captions = doc?.captions ?? DEFAULT_CAPTIONS;
   const frame = doc?.frame ?? DEFAULT_FRAME;
+
+  /**
+   * The output's SHAPE, published to CSS.
+   *
+   * The stylesheet had no way to know whether it was laying out a landscape or a
+   * vertical programme, so every rule assumed landscape — which is why a 9:16
+   * frame sat in a wide centre column surrounded by mat. `frameSize` is the same
+   * function the render uses, so the layout reacts to the shape that will
+   * actually ship rather than to the shape of the source.
+   */
+  const frameOut = frameSize(frame, {
+    width: project?.width ?? 1920,
+    height: project?.height ?? 1080,
+  });
+  const frameOrientation =
+    frameOut.width === frameOut.height
+      ? 'square'
+      : frameOut.width < frameOut.height
+        ? 'portrait'
+        : 'landscape';
   const color = doc?.color ?? DEFAULT_COLOR;
   const overlays = doc?.overlays ?? EMPTY_OVERLAYS;
   /**
@@ -308,11 +525,31 @@ export default function App() {
     setActiveClipId(clips[0]?.id ?? null);
   }, [project?.id]);
 
-  useEffect(() => {
-    api.capabilities().then((c) => { setCaps(c); setAsr(c.asrDefaults); }).catch((e) => setError(e.message));
-    api.list().then(setLibrary).catch(() => {});
-    api.fonts.list().then(setCustomFonts).catch(() => {});
+  /**
+   * The boot fetch, and the reason it has its OWN error state.
+   *
+   * The workspace does not render until `caps` and `asr` arrive, so a failure
+   * here is not one more banner among many — it is the whole screen. Routing it
+   * through `setError` looked like it reported the problem, but the banner is
+   * rendered further down than the "Loading workspace…" early return, so nobody
+   * ever saw it: with the API server down the app sat on the loading line
+   * forever, with no message and no way to retry. `bootError` is what the gate
+   * itself reads.
+   */
+  const loadWorkspace = useCallback(() => {
+    setBootError(null);
+    api.capabilities()
+      .then((c) => { setCaps(c); setAsr(c.asrDefaults); })
+      .catch((e) => setBootError(e.message || 'The server did not respond.'));
+    // Say so when the listing fails. Swallowing this rendered the Dashboard's
+    // "Nothing yet" empty state over a server that was simply unreachable — the
+    // user is told their entire library is gone.
+    api.list().then(setLibrary).catch((e) => setError(`Could not load your projects: ${e.message}`));
+    api.fonts.list().then(setCustomFonts).catch((e) => setError(`Could not load your fonts: ${e.message}`));
+    void loadFolders();
   }, []);
+
+  useEffect(() => { loadWorkspace(); }, [loadWorkspace]);
 
   // Make every imported font available to the preview by declaring an @font-face
   // for it — the same family libass gets from fontsdir at render, so the monitor
@@ -342,9 +579,25 @@ export default function App() {
       try {
         await api.saveDoc(id, {
           deletedIds: d.words.filter((w) => w.deleted).map((w) => w.id),
+          // Corrected spellings and speaker labels. These are part of the
+          // DOCUMENT, not view state, and until now nothing ever wrote a word's
+          // text back to disk: a fixed name lived in this tab's memory, showed
+          // up in the preview, and was gone on reload — and the caption burn-in,
+          // which reads the stored transcript on the server, shipped the raw ASR
+          // text every time. That is the whole "export uses the old script" bug.
+          //
+          // Whole maps rather than a diff, for the reason deletedIds is a whole
+          // set: it is idempotent, needs no dirty-tracking, and a save that
+          // failed is repaired by the next one instead of being lost.
+          texts: Object.fromEntries(d.words.map((w) => [w.id, w.text])),
+          speakers: Object.fromEntries(
+            d.words.flatMap((w) => (w.speaker ? [[w.id, w.speaker] as const] : [])),
+          ),
           captions: d.captions,
           speed: d.speed,
           studioSound: d.studioSound,
+          denoise: d.denoise,
+          clipSpeeds: d.clipSpeeds,
           frame: d.frame,
           color: d.color,
           overlays: d.overlays,
@@ -461,6 +714,12 @@ export default function App() {
     speed,
   };
 
+  // On first paint, not only after an import: the whole point is that the page
+  // was reloaded and the user has no idea an upload is still half-done.
+  useEffect(() => {
+    api.unfinishedUploads().then(setUnfinished).catch(() => {});
+  }, []);
+
   const run = async <T,>(label: string, fn: () => Promise<T>) => {
     setBusy(label);
     setError(null);
@@ -470,7 +729,9 @@ export default function App() {
   };
 
   const cancelJob = useCallback(() => {
-    if (job) void api.cancelJob(job.id).catch(() => {});
+    // A failed cancel used to look exactly like a successful one — the job kept
+    // running and the UI implied it had stopped.
+    if (job) void api.cancelJob(job.id).catch((e) => setError(`Could not cancel the job: ${e.message}`));
   }, [job]);
 
   const openTranscript = (p: Project, defaults: CutSettings) => {
@@ -494,6 +755,8 @@ export default function App() {
         normalizeCaptions(p.captions),
         p.speed,
         p.studioSound,
+        p.denoise,
+        p.clipSpeeds,
         p.frame,
         p.color,
         p.overlays,
@@ -553,6 +816,7 @@ export default function App() {
       setProject(p);
       openTranscript(p, editDefaults(caps));
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       transcribed = true;
     }
 
@@ -583,13 +847,51 @@ export default function App() {
   };
 
   // --- library -----------------------------------------------------------------
-  const importFile = (file: File) =>
+  /**
+   * Give the project the name the user typed before picking files.
+   *
+   * A rename, not an import parameter: the import endpoint takes the filename
+   * from a header and naming it there would mean a second way to set the same
+   * field. This is one PATCH that moves no bytes.
+   *
+   * A failed rename keeps the import. The project exists and is openable; it just
+   * carries the filename until it is renamed by hand, which is strictly better
+   * than discarding an upload that already landed.
+   */
+  const applyName = async (p: Project, name?: string): Promise<Project> => {
+    const wanted = name?.trim();
+    if (!wanted || wanted === p.name) return p;
+    try {
+      const { project } = await api.rename(p.id, wanted);
+      return project;
+    } catch {
+      return p;
+    }
+  };
+
+  const importFile = (file: File, name?: string) =>
     run('import', async () => {
-      const p = await api.import(file);
+      // A percentage, because an upload of holiday footage over Tailscale is
+      // long enough that a silent spinner reads as a hang.
+      let p = await uploadResumable(file, (f) => setBusy(`uploading ${Math.round(f * 100)}%`));
+      p = await applyName(p, name);
+      // Land it where the user is standing. An import made inside a folder
+      // belongs to that folder — otherwise the folder is a label you have to
+      // remember to apply, which is the thing folders are supposed to replace.
+      if (openFolderId) {
+        try {
+          await api.setProjectFolder(p.id, openFolderId);
+          p.folderId = openFolderId;
+        } catch {
+          // A failed filing must not lose the import — the project exists and is
+          // openable; it just sits in Unfiled until it is moved.
+        }
+      }
       setProject(p);
       openTranscript(p, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       // Import still does not transcribe on its own — but if you have asked for
       // the on-import chain, this is where it runs. With every step off this
       // returns immediately and importing means exactly what it always did.
@@ -611,7 +913,7 @@ export default function App() {
    */
   const addClip = (file: File, atIndex?: number) =>
     run('addClip', async () => {
-      flushSave();
+      await flushSave();
       // The clips present before the append — used both to spot which id is the
       // newcomer and to rebuild the order when inserting somewhere other than end.
       const before = clips.map((c) => c.id);
@@ -638,6 +940,7 @@ export default function App() {
       openTranscript(fresh, editDefaults(caps));
       setResult(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
 
       // The on-import chain applies here too, but only its filler step, and only
       // over the clip that just arrived. The rest are DOCUMENT settings — pauses,
@@ -661,8 +964,78 @@ export default function App() {
   /** Remove a clip from the open project. Refused server-side if it is the last. */
   const removeClip = (clipId: string) =>
     run('removeClip', async () => {
-      flushSave();
+      await flushSave();
       await api.removeClip(project!.id, clipId);
+      const fresh = await api.get(project!.id);
+      setProject(fresh);
+      openTranscript(fresh, editDefaults(caps));
+      setResult(null);
+      return fresh;
+    });
+
+  /**
+   * Several files as ONE project, clips in the order they were picked.
+   *
+   * The first file makes the project — that is the only call that can create one —
+   * and the rest are appended as clips. Sequential rather than parallel on
+   * purpose: each upload streams to disk and then gets probed, and firing five at
+   * once at a laptop or a Mac mini turns a predictable wait into contention with
+   * no progress anyone can read.
+   *
+   * A failure partway through keeps what landed. Four of five clips imported is a
+   * project you can work with and add the fifth to; throwing all four away
+   * because the fifth was a HEIC would be worse, and the error names which one.
+   */
+  const importMany = (files: File[], name?: string) =>
+    run('import', async () => {
+      let p = await uploadResumable(files[0], (f) => setBusy(`uploading 1/${files.length} · ${Math.round(f * 100)}%`));
+      p = await applyName(p, name);
+      if (openFolderId) {
+        try {
+          await api.setProjectFolder(p.id, openFolderId);
+          p.folderId = openFolderId;
+        } catch {
+          // Same reasoning as importFile: a failed filing must not lose the import.
+        }
+      }
+
+      const failed: string[] = [];
+      for (let i = 1; i < files.length; i++) {
+        setBusy(`import ${i + 1}/${files.length}`);
+        try {
+          const r = await api.addClip(p.id, files[i]);
+          p = r.project;
+        } catch (e) {
+          failed.push(files[i].name);
+        }
+      }
+
+      setProject(p);
+      openTranscript(p, editDefaults(caps));
+      setResult(null);
+      setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
+      if (failed.length) {
+        setError(
+          `Imported ${files.length - failed.length} of ${files.length}. ` +
+            `Could not add: ${failed.join(', ')}.`,
+        );
+      }
+      return p;
+    });
+
+  /**
+   * Commit a whole new play order at once — what dragging a clip along the
+   * timeline's clip lane produces.
+   *
+   * Reordering, not repositioning: clips are a gapless sequence whose offsets
+   * are the sum of the durations before them, so the only thing a drag can
+   * change is which slot a clip occupies.
+   */
+  const reorderClips = (ids: string[]) =>
+    run('reorderClip', async () => {
+      await flushSave();
+      await api.reorderClips(project!.id, ids);
       const fresh = await api.get(project!.id);
       setProject(fresh);
       openTranscript(fresh, editDefaults(caps));
@@ -673,7 +1046,7 @@ export default function App() {
   /** Move a clip one place earlier (-1) or later (+1) in play order. */
   const moveClip = (clipId: string, delta: -1 | 1) =>
     run('reorderClip', async () => {
-      flushSave();
+      await flushSave();
       const ids = clips.map((c) => c.id);
       const from = ids.indexOf(clipId);
       const to = from + delta;
@@ -702,7 +1075,7 @@ export default function App() {
       return 'That time is at a clip edge — there is nothing to cut off there.';
     }
     const fresh = await run('splitClip', async () => {
-      flushSave();
+      await flushSave();
       await api.splitClip(project!.id, clip.id, at);
       const fresh = await api.get(project!.id);
       setProject(fresh);
@@ -905,7 +1278,7 @@ export default function App() {
     setDialog(null);
     setError(null);
     setNotice(null);
-    api.list().then(setLibrary).catch(() => {});
+    api.list().then(setLibrary).catch((e) => setError(`Could not load your projects: ${e.message}`));
   };
 
   /**
@@ -944,6 +1317,7 @@ export default function App() {
     await run('delete', async () => {
       await api.remove(id);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
     });
   };
 
@@ -1001,6 +1375,7 @@ export default function App() {
       setResult(null);
       setDialog(null);
       setLibrary(await api.list());
+      api.unfinishedUploads().then(setUnfinished).catch(() => {});
       // The verbatim warning is not a toast — it lives in the rail next to the
       // filler tool it is about, where you can act on it.
       return p;
@@ -1008,6 +1383,11 @@ export default function App() {
 
   const doCaptions = (format: string) =>
     run('captions', async () => {
+      // Same reason the render flushes: the server builds cues from ITS stored
+      // transcript, so an unsaved cut would be absent from the picture and
+      // present in the subtitles. This path had no flush at all — cut a
+      // sentence, export an .srt, and the sentence was still in the file.
+      await flushSave();
       // speed rides along: a sidecar file is read against the RENDERED clock, so
       // its cues have to be divided the way the render's are.
       const r = await api.captions(project!.id, { format, ...cut, speed });
@@ -1018,12 +1398,16 @@ export default function App() {
       return r;
     });
 
-  const doRender = () =>
+  const doRender = (preset = 'source') =>
     run('render', async () => {
-      // The server renders from ITS copy of the deleted set, so make sure the
-      // edit has landed before asking for pixels.
-      flushSave();
+      // The server renders from ITS copy of the deleted set, so the edit has to
+      // have LANDED before we ask for pixels — awaited, not fired off. Without
+      // the await, a render started inside the 800ms save debounce exported the
+      // previous document: the words you just cut were still in the file.
+      await flushSave();
       const { jobId } = await api.render(project!.id, {
+        // Where the file is going: fixes the output shape and the loudness target.
+        preset,
         ...cut!,
         burnCaptions: captions.enabled,
         captions,
@@ -1040,6 +1424,9 @@ export default function App() {
           loop: pendingMusic.current?.loop ?? (project?.music ? bedLoops(project.music) : false),
         },
         studioSound: doc?.studioSound ?? project?.studioSound ?? false,
+        // The trained cleaner. Live value wins over the stored flag, same as its
+        // neighbours — an Export fired mid-debounce must honour the toggle on screen.
+        denoise: doc?.denoise ?? project?.denoise ?? false,
         // Same reason as captions and speed above: an Export fired mid-debounce
         // must reframe to the crop on screen, not to the last one that saved.
         frame: doc?.frame ?? project?.frame,
@@ -1494,7 +1881,30 @@ export default function App() {
     video.paused ? video.play() : video.pause();
   }, []);
 
-  const onPlaybackEnded = useCallback(() => setPlaying(false), []);
+  /**
+   * Rewind when the piece finishes. To the top of the EDIT, not to raw zero —
+   * with the head of the source cut, second 0 is material that was deliberately
+   * removed, and parking the playhead there means the next Play starts on
+   * something the viewer already decided to throw away.
+   */
+  const onPlaybackEnded = useCallback(() => {
+    setPlaying(false);
+    requestClipSeek(edl.keep[0]?.start ?? 0, false);
+  }, [edl, requestClipSeek]);
+
+  /**
+   * The skip loop that calls the above only mounts while FOLLOWING the edit, so
+   * with Preview edit off nothing noticed the source running out: the transport
+   * stayed lit as though still playing and the playhead sat on the last frame.
+   * The element's own event covers that case. Both may fire for one stop, which
+   * is harmless — pausing and rewinding twice lands in the same place.
+   */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.addEventListener('ended', onPlaybackEnded);
+    return () => video.removeEventListener('ended', onPlaybackEnded);
+  }, [onPlaybackEnded]);
 
   // Declared after onPlaybackEnded on purpose: a const is in its temporal dead
   // zone until its initialiser runs, so calling this above would throw.
@@ -1600,36 +2010,56 @@ export default function App() {
 
   // --- editing -----------------------------------------------------------------
   /**
-   * Clicking a word always means "put the playhead here". What changes is the
-   * selection: the word you clicked, extended from the anchor on shift — or
-   * nothing at all, if that word was already the whole selection.
+   * Put the cursor on a word. THE rule for both surfaces that have one.
    *
-   * That last case is the toggle. Without it a selection could only be cleared
-   * with Escape or by hitting a paragraph gap, so one you made by accident just
-   * sat there. The seek stays either way, which keeps the rule above true: the
-   * highlight goes away, the playhead still lands where you pointed.
+   * Landing on a word means "put the playhead here and select it"; landing on it
+   * with shift held means "stretch the live selection's focus end onto it, and
+   * leave the playhead alone" — reviewing a range you are still choosing must
+   * not keep jumping the video to its far end.
+   *
+   * Both the click path below and the keyboard cursor in Script go through this,
+   * so the two cannot drift into disagreeing about what a selection is.
+   */
+  const moveCursor = (id: string, extend: boolean) => {
+    const word = words.find((w) => w.id === id);
+    if (!word) return;
+    if (extend && selection) {
+      setSelection({ anchorId: selection.anchorId, focusId: id });
+      return;
+    }
+    setSelection({ anchorId: id, focusId: id });
+    seek(word.start);
+  };
+
+  /**
+   * Clicking a word is moveCursor, plus one thing a keypress cannot do: clicking
+   * the word that IS the whole selection clears it.
+   *
+   * That is the toggle. Without it a selection could only be cleared with Escape
+   * or by hitting a paragraph gap, so one you made by accident just sat there.
+   * The seek stays either way, which keeps the rule above true: the highlight
+   * goes away, the playhead still lands where you pointed.
+   *
+   * `clicks === 1` keeps the second half of a double-click out of it. That
+   * gesture means "play from here", and it would otherwise select on click one
+   * and unselect on click two, flickering on its way to playing.
    */
   const clickWord = (index: number, shift: boolean, clicks: number) => {
     const word = words[index];
     if (!word) return;
 
-    if (shift && selection) {
-      setSelection({ anchorId: selection.anchorId, focusId: word.id });
-      return;
-    }
-
-    // Only when this word IS the selection, not merely inside it — clicking
-    // one word of a run collapses onto it, the way any text editor does, and a
+    // Only when this word IS the selection, not merely inside it — clicking one
+    // word of a run collapses onto it, the way any text editor does, and a
     // second click then clears.
-    //
-    // `clicks === 1` keeps the second half of a double-click out of this. That
-    // gesture means "play from here", and it would otherwise select on click
-    // one and unselect on click two, flickering on its way to playing.
     const isWholeSelection =
       selection?.anchorId === word.id && selection?.focusId === word.id;
 
-    setSelection(isWholeSelection && clicks === 1 ? null : { anchorId: word.id, focusId: word.id });
-    seek(word.start);
+    if (!shift && isWholeSelection && clicks === 1) {
+      setSelection(null);
+      seek(word.start);
+      return;
+    }
+    moveCursor(word.id, shift);
   };
 
   const doFillers = () => {
@@ -1669,6 +2099,16 @@ export default function App() {
       // entirely.
       if (document.activeElement?.closest('input,textarea,select,[contenteditable]')) return;
 
+      /**
+       * A modal owns the keyboard while it is open.
+       *
+       * `showModal()` makes the background INERT to pointers and to focus, but a
+       * listener bound on `window` still hears every key. So bare S was splitting
+       * the clip under the playhead behind an open Export dialog, and Space was
+       * scrubbing a video the user could not see.
+       */
+      if (document.querySelector('dialog[open]')) return;
+
       const mod = e.metaKey || e.ctrlKey;
 
       if (mod && e.key.toLowerCase() === 'z') {
@@ -1689,13 +2129,37 @@ export default function App() {
       else if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); setSelectionDeleted(false); }
       // Escape closes the drawer first if it's open, otherwise clears selection.
       else if (e.key === 'Escape') { if (libOpen) setLibOpen(false); else setSelection(null); }
-      else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      /**
+       * Space plays — UNLESS a button has focus, where Space is that button's
+       * own activation key.
+       *
+       * Chrome fires a focused button's click on keyUP, and only if the keydown
+       * was not cancelled. Calling preventDefault() here unconditionally meant a
+       * keyboard user tabbed onto "Render video" pressed Space and got playback
+       * toggling instead of a render — the button simply never fired.
+       */
+      else if (e.key === ' ') {
+        if (document.activeElement?.closest('button,[role="button"],a[href],summary')) return;
+        e.preventDefault();
+        togglePlay();
+      }
+      // Home and the arrows are advertised in the transport's own tooltips, so
+      // they have to exist. They did not.
+      //
+      // These are the TRANSPORT's copies. With a word focused in the script the
+      // same keys drive the word cursor instead, and Script stops them before
+      // they reach this window listener — so the tooltips stay true either way
+      // (both land the playhead on an adjacent word), and only one of the two
+      // ever fires.
+      else if (e.key === 'Home') { e.preventDefault(); seek(0); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); stepWord(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); stepWord(1); }
       // The razor: cut the clip under the playhead in two. Bare S, like an NLE.
       else if (!mod && e.key.toLowerCase() === 's') { e.preventDefault(); void splitRef.current(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay, libOpen]);
+  }, [togglePlay, libOpen, seek, stepWord]);
 
   /**
    * What becomes of a file the assistant summoned — fetched from the web, or made
@@ -1763,6 +2227,23 @@ export default function App() {
   useEffect(() => {
     const bridge: AgentBridge = {
       snapshot: () => ({
+        screen: {
+          view: project ? ('editor' as const) : openFolderId === null ? ('folders' as const) : ('folder' as const),
+          folderName: (() => {
+            const id = project ? project.folderId ?? '' : openFolderId ?? '';
+            if (!id) return openFolderId === '' || project ? 'Unfiled' : null;
+            return folders.find((f) => f.id === id)?.name ?? null;
+          })(),
+          folderBrief: (() => {
+            const id = project ? project.folderId ?? '' : openFolderId ?? '';
+            return id ? folders.find((f) => f.id === id)?.brief ?? null : null;
+          })(),
+          folderCount: folders.length,
+          projectsHere:
+            openFolderId === null
+              ? library.length
+              : library.filter((p) => (p.folderId ?? '') === openFolderId).length,
+        },
         project: project
           ? { id: project.id, name: project.name, durationSec: project.duration, hasVideo: project.hasVideo }
           : null,
@@ -1839,6 +2320,102 @@ export default function App() {
         await pickMusic(results[0]);
         return `Added "${results[0].title}" by ${results[0].artist} as background music.`;
       },
+      /**
+       * Search and hand back the OPTIONS rather than silently taking the first.
+       *
+       * addMusic picks the top hit, which is right when someone says "put some
+       * music on" and wrong when they say "give me more options" — and a bed is
+       * a taste decision, so a shortlist is the honest default.
+       */
+      readWebpage: async (url) => api.readPage(url),
+
+      listFolders: async () => {
+        const list = await api.folders.list();
+        setFolders(list);
+        return list.map((f) => ({
+          id: f.id,
+          name: f.name,
+          hasMemory: Boolean(f.brief.trim()),
+          memory: f.brief,
+          projects: library.filter((p) => p.folderId === f.id).length,
+        }));
+      },
+
+      setFolderMemory: async (folderId, memory) => {
+        // Default to the folder in front of the user: "write the memory for this
+        // folder" is the common phrasing, and making them name an id they cannot
+        // see would be a worse tool.
+        const id = folderId || (project ? project.folderId : openFolderId) || '';
+        if (!id) {
+          return 'No folder is in view. Open a folder first, or pass folder_id from list_folders.';
+        }
+        const updated = await api.folders.update(id, { brief: memory });
+        await loadFolders();
+        return `Memory saved on "${updated.name}" (${memory.length} characters). Every title and description for that folder is written against it from now on.`;
+      },
+
+      searchMusic: async (query, instrumental, limit) => {
+        const provider = caps?.musicProviders?.[0];
+        const run = (q: string) => api.music.search(q, { instrumental, provider });
+
+        /**
+         * Fall back to fewer words when a phrase finds nothing.
+         *
+         * Jumpy is told to search for the FEELING of a piece, which produces
+         * queries like "gentle playful ukulele" — and measured against
+         * Openverse, that returns zero results while "ukulele" returns three.
+         * The catalogue matches titles and tags, not descriptions, so every
+         * extra word narrows it towards nothing.
+         *
+         * Dropping the leading adjectives keeps the noun that actually names an
+         * instrument or a genre, which is the word the catalogue knows. Better
+         * than telling the model to write worse queries, and far better than
+         * reporting "no music found" for a library that has plenty.
+         */
+        let { results } = await run(query);
+        const words = query.trim().split(/\s+/);
+        for (let drop = 1; results.length === 0 && drop < words.length; drop++) {
+          const shorter = words.slice(drop).join(' ');
+          results = (await run(shorter)).results;
+        }
+
+        musicHits.current = results;
+        return results.slice(0, limit).map((r) => ({
+          id: r.id,
+          title: r.title,
+          artist: r.artist,
+          durationSec: r.durationSec,
+          license: r.license,
+          needsCredit: Boolean(r.attribution?.trim()),
+        }));
+      },
+
+      attachMusic: async (id, volume) => {
+        if (!project) return 'No project is open.';
+        const hit = musicHits.current.find((r) => r.id === id);
+        if (!hit) return 'That id is not from the last search. Run search_music again.';
+        await pickMusic(hit);
+        if (typeof volume === 'number') await setMusicVolume(Math.max(0, Math.min(1, volume)));
+        return `Attached "${hit.title}" by ${hit.artist}.`;
+      },
+
+      writePost: async (target) => {
+        if (!project) throw new Error('No project is open.');
+        const r = await api.social(project.id, { model: agentModel(), target });
+        return {
+          ...r.draft,
+          usedMemory: r.usedBrief,
+          folder: r.folder,
+          ranOn: r.ranOn,
+          fellBack: r.fellBack,
+        };
+      },
+
+      lookAtFrame: async (atSeconds) => {
+        if (!project) throw new Error('No project is open.');
+        return api.projectFrame(project.id, { atSeconds, captions });
+      },
+
       generateImage: async (prompt) => {
         if (!project) throw new Error('No project is open.');
         const fresh = await api.images.generate(project.id, prompt);
@@ -1903,7 +2480,7 @@ export default function App() {
       },
       reorderClips: async (ids) => {
         const fresh = await run('reorderClip', async () => {
-          flushSave();
+          await flushSave();
           await api.reorderClips(project!.id, ids);
           const fresh = await api.get(project!.id);
           setProject(fresh);
@@ -2012,7 +2589,42 @@ export default function App() {
   });
   useEffect(() => () => setAgentBridge(null), []);
 
-  if (!caps || !asr) return <div className="boot">Loading workspace…</div>;
+  /**
+   * Attach this window to the editor bridge, so an agent outside the browser can
+   * run the same tools the panel does.
+   *
+   * Mounted AFTER the setAgentBridge effect above, and that order matters: every
+   * executor calls requireBridge(), so a tool arriving before the bridge exists
+   * would come back "The editor is not ready yet." — which is true for a few
+   * milliseconds and confusing forever.
+   */
+  useEffect(() => connectEditorBridge(), []);
+
+  // Keep the server's idea of what this window is showing current, so a caller
+  // choosing between two open windows can tell them apart by project.
+  useEffect(() => {
+    reportProject(project?.id ?? null, project?.name ?? null);
+  }, [project?.id, project?.name]);
+
+  if (!caps || !asr) {
+    return (
+      <div className="boot">
+        {bootError ? (
+          <div className="boot-fail" role="alert">
+            <h2>The workspace could not load</h2>
+            <p className="boot-why">{bootError}</p>
+            <p className="boot-hint">
+              This usually means the API server is not running. Start it with{' '}
+              <code>npm run server</code> and try again.
+            </p>
+            <button className="primary" onClick={loadWorkspace}>Try again</button>
+          </div>
+        ) : (
+          'Loading workspace…'
+        )}
+      </div>
+    );
+  }
 
   // --- the start screen ---------------------------------------------------------
   /**
@@ -2028,7 +2640,26 @@ export default function App() {
     return (
       <>
         <Dashboard
-          projects={library}
+          /* Only what is in the open folder. '' is the Unfiled bucket — projects
+             that predate folders or were taken out of one. */
+          projects={
+            openFolderId === null
+              ? library
+              : library.filter((p) => (p.folderId ?? '') === openFolderId)
+          }
+          folders={folders}
+          openFolder={
+            openFolderId === null
+              ? null
+              : folders.find((f) => f.id === openFolderId) ??
+                { id: '', name: 'Unfiled', brief: '', createdAt: '', updatedAt: '' }
+          }
+          onOpenFolder={setOpenFolderId}
+          onCreateFolder={(name) => void createFolder(name)}
+          onRenameFolder={(id, name) => void patchFolder(id, { name })}
+          onDeleteFolder={(id) => void removeFolder(id)}
+          onSaveBrief={(id, brief) => void patchFolder(id, { brief })}
+          onMoveProject={(id, folderId) => void moveProject(id, folderId)}
           importing={busy === 'import'}
           progress={job?.progress ?? null}
           opening={busy === 'open'}
@@ -2036,11 +2667,41 @@ export default function App() {
           onDelete={(id) => void deleteProject(id)}
           onRename={(id, name) => void renameProject(id, name)}
           onImport={importFile}
+          onImportMany={importMany}
+          unfinished={unfinished}
+          onResumeUpload={(id, file) =>
+            run('import', async () => {
+              const p = await uploadResumable(
+                file,
+                (f) => setBusy(`resuming ${Math.round(f * 100)}%`),
+                undefined,
+                id,
+              );
+              setUnfinished(await api.unfinishedUploads().catch(() => []));
+              setProject(p);
+              openTranscript(p, editDefaults(caps));
+              setLibrary(await api.list());
+              return p;
+            })
+          }
+          onDiscardUpload={(id) =>
+            void api
+              .discardUpload(id)
+              .then(async () => setUnfinished(await api.unfinishedUploads().catch(() => [])))
+              .catch((e) => setError(e.message))
+          }
           error={error}
           onDismissError={() => setError(null)}
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
+        {/* Reachable from the projects page too — this is where you name things
+            and decide what to shoot, and there was no assistant here at all. */}
+        <FloatingAssistant
+          enabled={Boolean(caps.agent?.enabled)}
+          defaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
       </>
     );
   }
@@ -2048,7 +2709,8 @@ export default function App() {
   // --- workspace ---------------------------------------------------------------
   return (
     <div
-      className={`app m-view-${mobileTab}`}
+      className={`app m-view-${mobileTab} m-mode-${phoneMode}${showTimeline ? ' m-tl' : ''}`}
+      data-frame={frameOrientation}
       // Give the dock the extra height the music lane needs, rather than stealing
       // it from the waveform. Only when a bed is attached; no bed, no change.
       style={musicLane ? ({ '--h-dock': '298px' } as React.CSSProperties) : undefined}
@@ -2083,6 +2745,10 @@ export default function App() {
         onAddClip={addClip}
         onRemoveClip={removeClip}
         onMoveClip={moveClip}
+        speed={doc?.speed ?? 1}
+        clipSpeeds={doc?.clipSpeeds ?? {}}
+        onClipSpeed={updateClipSpeed}
+        onAllClipSpeeds={updateAllClipSpeeds}
         onSelectClip={(c) => seek(c.offset)}
         open={libOpen}
         onClose={() => setLibOpen(false)}
@@ -2138,6 +2804,10 @@ export default function App() {
             onWordClick={clickWord}
             onCorrectWord={correctText}
             onSelectRange={(anchorId, focusId) => setSelection({ anchorId, focusId })}
+            onMoveCursor={moveCursor}
+            onDeleteSelection={() => setSelectionDeleted(true)}
+            onRestoreSelection={() => setSelectionDeleted(false)}
+            onClearSelection={() => setSelection(null)}
             onRetranscribe={() => setDialog('transcribe')}
           />
         )}
@@ -2152,6 +2822,7 @@ export default function App() {
           activeClip={activeClip}
           result={result}
           onTimeUpdate={onTimeUpdate}
+          onMediaError={setError}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           frame={frame}
@@ -2170,6 +2841,9 @@ export default function App() {
               {/* Images first, captions second — DOM order is z-order, and it
                 * has to mirror the render, which composites the picture and
                 * THEN burns the caption on top of it. */}
+              {/* Above the images and the captions: a guide you cannot see
+                  because a caption is sitting on it is no guide at all. */}
+              <SafeAreaOverlay platform={safeArea} />
               <ImageOverlayLayer
                 overlays={overlays}
                 urls={imageUrls}
@@ -2215,19 +2889,70 @@ export default function App() {
           * The transcript and the rail cannot share a phone's width, so one is
           * on screen at a time and this row picks which. Grid placement comes
           * from the mobile media query; on desktop the bar is display:none. */}
-        <nav className="m-tabs" aria-label="Editor surface">
+        {/*
+          * The phone tool bar: one labelled icon per rail section, scrolling
+          * sideways.
+          *
+          * It replaces a two-way Script/Tools switch, which cost a tap into a wall
+          * of eleven collapsed rows, then a scroll, then a tap to open the one you
+          * came for — three actions and a hunt to reach Captions. A scrolling row
+          * of labelled icons is what mobile editors do, and the reason is that the
+          * labels ARE the table of contents: finding a tool costs a glance.
+          *
+          * Tapping one opens that section as a sheet over the script; tapping it
+          * again closes it. The script is never swapped away, so the line you are
+          * working on stays readable while you change the thing.
+          */}
+        <nav className="m-tools" aria-label="Tools">
+          {/*
+            * The two view controls sit at the head of the tool bar, pinned while
+            * the tools scroll past them. They belong here rather than in the
+            * title bar because they are things you flick between constantly and
+            * the bottom of the screen is where the thumb already is.
+            */}
           <button
-            className={mobileTab === 'script' ? 'm-tab on' : 'm-tab'}
-            onClick={() => setMobileTab('script')}
+            className="m-view-btn"
+            onClick={() => setPhoneMode(phoneMode === 'watch' ? 'script' : 'watch')}
+            aria-label={phoneMode === 'watch' ? 'Show the script' : 'Show the picture'}
+            title={phoneMode === 'watch' ? 'Show the script' : 'Show the picture'}
           >
-            Script
+            <Icon name={phoneMode === 'watch' ? 'captions' : 'video'} size={19} />
+            <span>{phoneMode === 'watch' ? 'Script' : 'Watch'}</span>
           </button>
           <button
-            className={mobileTab === 'tools' ? 'm-tab on' : 'm-tab'}
-            onClick={() => setMobileTab('tools')}
+            className={showTimeline ? 'm-view-btn on' : 'm-view-btn'}
+            onClick={() => setShowTimeline((v) => !v)}
+            aria-pressed={showTimeline}
+            aria-label="Timeline"
+            title="Show the timeline"
           >
-            Tools
+            <Icon name="grid" size={19} />
+            <span>Timeline</span>
           </button>
+          <span className="m-tools-sep" aria-hidden="true" />
+
+          {MOBILE_TOOLS.filter(
+            // The section renders null without a denoiser, so a tool button for
+            // it would open an empty panel. Hidden in both places or neither.
+            (t) => t.key !== sectionKey('Clean voice') || (caps.canCleanVoice ?? false),
+          ).map((t) => {
+            const on = openSection === t.key;
+            return (
+              <button
+                key={t.key}
+                className={on ? 'm-tool on' : 'm-tool'}
+                aria-pressed={on}
+                onClick={() => {
+                  const next = on ? null : t.key;
+                  setOpenSection(next);
+                  setMobileTab(next ? 'tools' : 'script');
+                }}
+              >
+                <Icon name={t.icon} size={19} />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
         </nav>
 
         {/* ---- phone-only: banners float over the workspace ----
@@ -2236,97 +2961,138 @@ export default function App() {
           * media query hides the in-script pair to keep the message single. */}
         {(error || notice) && (
           <div className="m-banners">
-            {error && <p className="error" onClick={() => setError(null)}>{error}</p>}
+            {error && (
+              <SwipeAway onDismiss={() => setError(null)}>
+                <p className="error">{error}</p>
+              </SwipeAway>
+            )}
             {notice && !error && (
-              <p className="notice" onClick={() => setNotice(null)}>{notice}</p>
+              <SwipeAway onDismiss={() => setNotice(null)}>
+                <p className="notice">{notice}</p>
+              </SwipeAway>
             )}
           </div>
         )}
 
         {/* ---- the inspector for whatever is selected: the full-height right column ---- */}
-        <Rail
-            project={project}
-            hasScript={!!doc}
-            selectedWords={selectedWords}
-            stats={stats}
-            verbatim={project?.verbatim ?? true}
-            asrProvider={project?.asrProvider ?? null}
-            cut={cut ?? editDefaults(caps)}
-            setCut={updateCut}
-            onCutDragStart={beginCutDrag}
-            onCutDragEnd={endCutDrag}
-            captions={captions}
-            setCaptions={updateCaptions}
-            onCaptionDragStart={beginCaptionDrag}
-            onCaptionDragEnd={endCaptionDrag}
-            studioSound={doc?.studioSound ?? false}
-            onToggleStudioSound={updateStudioSound}
-            frame={frame}
-            setFrame={updateFrame}
-            onFrameDragStart={beginFrameDrag}
-            onFrameDragEnd={endFrameDrag}
-            onPunchIn={punchInOnSelection}
-            punchBlocked={punchBlocked}
-            onMarkMove={markMove}
-            onRemoveMove={deletePunchIn}
-            onSetMove={setMove}
-            onFollowMove={followMove}
-            onClearFollow={(id) => setMovePath(id, [])}
-            markingMoveId={markingMoveId}
-            following={following}
-            onSeek={seek}
-            overlays={overlays}
-            imageUrls={imageUrls}
-            imageNames={imageNames}
-            onSetOverlay={setOverlay}
-            onRemoveOverlay={deleteImageOverlay}
-            onOverlayDragStart={beginOverlayDrag}
-            onOverlayDragEnd={endOverlayDrag}
-            editingOverlayId={editingOverlayId}
-            onEditOverlay={setEditingOverlayId}
-            onGenerateImage={generateImageForPrompt}
-            onImportImage={importImageFile}
-            onRetargetOverlayToWord={retargetOverlayToWord}
-            generatingImage={generating}
-            canGenerateImages={Boolean(caps?.images?.generate)}
-            onMoveImageHere={movableOverlay ? moveImageHere : undefined}
-            moveImageLabel={movableOverlay ? imageNames[movableOverlay.assetId] : undefined}
-            color={color}
-            setColor={updateColor}
-            onColorDragStart={beginColorDrag}
-            onColorDragEnd={endColorDrag}
-            customFonts={customFonts}
-            onImportFont={importFont}
-            onRemoveFont={removeFont}
-            fontBusy={fontBusy}
-            onImportMusic={importMusic}
-            onPickMusic={pickMusic}
-            musicProviders={caps.musicProviders ?? ['openverse']}
-            onUpdateMusic={updateMusic}
-            onRemoveMusic={removeMusic}
-            musicBusy={musicBusy}
-            fillerMode={fillerMode}
-            setFillerMode={setFillerMode}
-            customFillers={customFillers}
-            onAddCustomFiller={addCustomFiller}
-            onRemoveCustomFiller={removeCustomFiller}
-            retakeMin={retakeMin}
-            setRetakeMin={setRetakeMin}
-            fillerCount={doc ? countFillers(fillerMode === 'all', customFillers) : 0}
-            retakeCount={doc ? countRetakes(retakeMin) : 0}
-            onRemoveFillers={doFillers}
-            onRemoveRetakes={doRetakes}
-            onRestoreAll={doRestoreAll}
-            onRetranscribe={() => setDialog('transcribe')}
-            onTranscribe={() => setDialog('transcribe')}
-            onDeleteSelection={() => setSelectionDeleted(true)}
-            onRestoreSelection={() => setSelectionDeleted(false)}
-            onPlaySelection={playSelection}
-            busy={busy}
-            agentEnabled={caps.agent?.enabled ?? false}
-            agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
-            onOpenSettings={() => setSettingsOpen(true)}
-          />
+        {/* The provider turns the rail's sections into an accordion the phone
+            tool bar can drive. No provider on a desk, where each section keeps
+            its own state and any number may be open. */}
+        <SectionOpen.Provider value={{ key: openSection, set: setOpenSection }}>
+          <Rail
+            safeArea={safeArea}
+            onSafeArea={chooseSafeArea}
+            socialHasWords={words.length > 0}
+              project={project}
+              hasScript={!!doc}
+              selectedWords={selectedWords}
+              stats={stats}
+              verbatim={project?.verbatim ?? true}
+              asrProvider={project?.asrProvider ?? null}
+              cut={cut ?? editDefaults(caps)}
+              setCut={updateCut}
+              onCutDragStart={beginCutDrag}
+              onCutDragEnd={endCutDrag}
+              captions={captions}
+              setCaptions={updateCaptions}
+              onCaptionDragStart={beginCaptionDrag}
+              onCaptionDragEnd={endCaptionDrag}
+              studioSound={doc?.studioSound ?? false}
+              onToggleStudioSound={updateStudioSound}
+              denoise={doc?.denoise ?? false}
+              onToggleDenoise={(on) => {
+                updateDenoise(on);
+                // Do the work NOW, with a progress bar, rather than silently
+                // inside the next export. Turning the switch on and seeing
+                // nothing happen is what made this look broken. Off needs no
+                // job — the cleaned file simply stops being used.
+                if (!on || !project) return;
+                void (async () => {
+                  try {
+                    const { jobId } = await api.cleanVoice(project.id);
+                    if (!jobId) return;
+                    setJob({ id: jobId, progress: -1, stage: 'Cleaning voice', kind: 'denoise' });
+                    await waitForJob(jobId, (j) =>
+                      setJob({ id: jobId, progress: j.progress, stage: j.stage, kind: 'denoise' }),
+                    );
+                    setJob(null);
+                    setNotice('Voice cleaned — the export will use it.');
+                  } catch (e) {
+                    setJob(null);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                })();
+              }}
+              canCleanVoice={caps.canCleanVoice ?? false}
+              frame={frame}
+              setFrame={updateFrame}
+              onFrameDragStart={beginFrameDrag}
+              onFrameDragEnd={endFrameDrag}
+              onPunchIn={punchInOnSelection}
+              punchBlocked={punchBlocked}
+              onMarkMove={markMove}
+              onRemoveMove={deletePunchIn}
+              onSetMove={setMove}
+              onFollowMove={followMove}
+              onClearFollow={(id) => setMovePath(id, [])}
+              markingMoveId={markingMoveId}
+              following={following}
+              onSeek={seek}
+              overlays={overlays}
+              imageUrls={imageUrls}
+              imageNames={imageNames}
+              onSetOverlay={setOverlay}
+              onRemoveOverlay={deleteImageOverlay}
+              onOverlayDragStart={beginOverlayDrag}
+              onOverlayDragEnd={endOverlayDrag}
+              editingOverlayId={editingOverlayId}
+              onEditOverlay={setEditingOverlayId}
+              onGenerateImage={generateImageForPrompt}
+              onImportImage={importImageFile}
+              onRetargetOverlayToWord={retargetOverlayToWord}
+              generatingImage={generating}
+              canGenerateImages={Boolean(caps?.images?.generate)}
+              onMoveImageHere={movableOverlay ? moveImageHere : undefined}
+              moveImageLabel={movableOverlay ? imageNames[movableOverlay.assetId] : undefined}
+              color={color}
+              setColor={updateColor}
+              onColorDragStart={beginColorDrag}
+              onColorDragEnd={endColorDrag}
+              customFonts={customFonts}
+              onImportFont={importFont}
+              onRemoveFont={removeFont}
+              fontBusy={fontBusy}
+              onImportMusic={importMusic}
+              onPickMusic={pickMusic}
+              musicProviders={caps.musicProviders ?? ['openverse']}
+              onUpdateMusic={updateMusic}
+              onRemoveMusic={removeMusic}
+              musicBusy={musicBusy}
+              fillerMode={fillerMode}
+              setFillerMode={setFillerMode}
+              customFillers={customFillers}
+              onAddCustomFiller={addCustomFiller}
+              onRemoveCustomFiller={removeCustomFiller}
+              retakeMin={retakeMin}
+              setRetakeMin={setRetakeMin}
+              fillerCount={doc ? countFillers(fillerMode === 'all', customFillers) : 0}
+              retakeCount={doc ? countRetakes(retakeMin) : 0}
+              onRemoveFillers={doFillers}
+              onRemoveRetakes={doRetakes}
+              onRestoreAll={doRestoreAll}
+              onTranscribe={() => setDialog('transcribe')}
+              onDeleteSelection={() => setSelectionDeleted(true)}
+              onRestoreSelection={() => setSelectionDeleted(false)}
+              onPlaySelection={playSelection}
+              busy={busy}
+              agentEnabled={caps.agent?.enabled ?? false}
+              agentDefaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+              onOpenSettings={() => setSettingsOpen(true)}
+              /* Phone only: on a desk the rail is a permanent column and there
+                 is nothing to go back from. */
+              onLeave={() => setMobileTab('script')}
+            />
+        </SectionOpen.Provider>
 
       <footer className="tl">
         <Transport
@@ -2363,10 +3129,13 @@ export default function App() {
           music={musicLane}
           onMusicResize={resizeMusic}
           onMusicFill={fillMusic}
+          clipLane={clips.map((c, i) => ({ id: c.id, label: c.name ?? `Clip ${i + 1}` }))}
+          onReorderClips={(ids) => void reorderClips(ids)}
         />
       </footer>
 
       <TranscribeDialog
+        onOpenSettings={() => setSettingsOpen(true)}
         open={dialog === 'transcribe'}
         onClose={() => setDialog(null)}
         project={project}
@@ -2400,6 +3169,14 @@ export default function App() {
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} onSaved={refreshCaps} />
 
+      {/* In the editor too, so asking a question no longer costs you sight of
+          the Inspector you are asking about. One conversation, one model —
+          this and the rail's tab are the same assistant. */}
+      <FloatingAssistant
+        enabled={Boolean(caps.agent?.enabled)}
+        defaultModel={caps.agent?.defaultModel ?? 'grok-4'}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
     </div>
   );
 }

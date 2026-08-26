@@ -66,8 +66,23 @@ export function useMusicPreview({
     const el = musicRef.current;
     if (!el) return;
     el.volume = level;
-    el.defaultPlaybackRate = speed;
-    el.playbackRate = speed;
+    /**
+     * The bed plays at its OWN tempo, never the program's.
+     *
+     * The export never time-stretches the music: it mixes it under the finished
+     * program at 1x (see bgMusicMixLines — the graph runs atempo on the PROGRAM
+     * and hands the bed straight to amix). Matching the program's rate here made
+     * the preview lie about the one thing you use it for — deciding whether a
+     * piece of music works — because you were auditioning it 1.2x fast.
+     *
+     * The cost, stated plainly: output time advances faster than the bed does,
+     * so during a long sped preview the bed slips behind where the export will
+     * have it. It is re-anchored on every seek (see the scrub branch below).
+     * Hearing the wrong SECOND of a bed is a much smaller lie than hearing every
+     * second of it at the wrong tempo.
+     */
+    el.defaultPlaybackRate = 1;
+    el.playbackRate = 1;
     el.preservesPitch = true;
     el.loop = loop;
   }, [musicRef, level, speed, loop]);
@@ -85,6 +100,10 @@ export function useMusicPreview({
     // reseek is a decode and would click. Only a real divergence (a scrub, a cut
     // skip, the bed never having started) crosses it.
     const DRIFT = 0.3;
+    // The previous frame's output time, so a SCRUB can be told from the steady
+    // slip that a sped preview causes. Only the former is worth a reseek; the
+    // latter is expected and correcting it would click several times a second.
+    let lastOut: number | null = null;
 
     const frame = () => {
       raf = requestAnimationFrame(frame);
@@ -110,7 +129,12 @@ export function useMusicPreview({
       // currentTime just reset to ~0 while `target` is near sourceDuration.
       const drift = Math.abs(el.currentTime - target);
       const wrapped = loop && sourceDuration > 0 && drift > sourceDuration - DRIFT;
-      if (el.paused || (drift > DRIFT && !wrapped)) {
+      // A jump in OUTPUT time is a scrub, a cut skip, or a fresh start — the bed
+      // has to be re-anchored to the moment the picture is now at. Ordinary
+      // advance, however far the bed has slipped behind, is left alone.
+      const jumped = lastOut === null || Math.abs(out - lastOut) > DRIFT;
+      lastOut = out;
+      if (el.paused || (jumped && drift > DRIFT && !wrapped)) {
         el.currentTime = target;
         void el.play().catch(() => {});
       }

@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react';
+import { PLATFORM_GUIDES } from '../../../../packages/core/src/safe-area.ts';
 import {
   Field,
   Hint,
@@ -26,6 +27,43 @@ import {
   type Backdrop,
   type CaptionSettings,
 } from '../../../../packages/core/src/caption-style.ts';
+import {
+  applyCaptionStyle,
+  BUILT_IN_CAPTION_STYLES,
+  captionStyleSummary,
+  captureCaptionStyle,
+  matchesCaptionStyle,
+  MAX_STYLE_NAME,
+  type CaptionStyle,
+} from '../../../../packages/core/src/caption-preset.ts';
+import {
+  previewTighten,
+  reportTighten,
+  REEL_PAUSE_MS,
+  type TightenPlan,
+} from '../../../../packages/core/src/tighten.ts';
+/**
+ * Two reaches outside props, and both are deliberate.
+ *
+ * The panel is otherwise driven entirely by what Rail hands it, and that is
+ * still the rule for anything App owns. These two do not go through App at all:
+ *
+ * - The tighten actions read and commit the live document. They have to be a
+ *   SINGLE batch patch to be a single Cmd+Z, and only the store can build one —
+ *   `apply` is module-private. Threading a callback down would put App in the
+ *   middle of an edit it has no part in, exactly as MusicBrowser calls `api`
+ *   directly rather than routing a search through the app.
+ * - Saved caption styles are a browser-level preference, like the pane widths.
+ *   They belong to the person, not the project, so they never touch App's state
+ *   or the project record.
+ */
+import { planTightenNow, tightenForReels } from '../store/editor.ts';
+import {
+  forgetCaptionStyle,
+  loadCaptionStyles,
+  persistCaptionStyle,
+} from '../store/captionStyles.ts';
+import Dialog from '../ui/Dialog.tsx';
 import {
   FRAME_PRESETS,
   MAX_DIM,
@@ -72,12 +110,19 @@ interface Props {
 
   studioSound: boolean;
   onToggleStudioSound: (enabled: boolean) => void;
+  denoise: boolean;
+  onToggleDenoise: (enabled: boolean) => void;
+  /** False when the server has no denoiser installed — the control is then hidden. */
+  canCleanVoice: boolean;
 
   /** The output frame — resolution plus the crop that fills it. */
   frame: FrameSettings;
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+  /** Which platform's furniture to outline in the monitor. 'off' draws nothing. */
+  safeArea: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all';
+  onSafeArea: (v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => void;
 
   /**
    * Push-ins: mark a portion of the picture and zoom into it for a stretch of
@@ -170,7 +215,6 @@ interface Props {
   onRemoveFillers: () => void;
   onRemoveRetakes: () => void;
   onRestoreAll: () => void;
-  onRetranscribe: () => void;
   busy: string | null;
 }
 
@@ -281,6 +325,10 @@ export default function ProjectPanel(p: Props) {
         * dialog (it is the "before" a re-transcribe replaces), and the entry
         * point sits at the end of the script itself. */}
       <SectionGroup label="Edit">
+        {/* Above the three sections it drives, not inside any of them: it is the
+          * one gesture that spans all three, and burying it under a disclosure
+          * would put the common case one click further away than the parts. */}
+        <TightenField {...p} />
         <CleanUpField {...p} />
         <PausesField {...p} />
         <AdvancedField {...p} />
@@ -292,10 +340,126 @@ export default function ProjectPanel(p: Props) {
         <MovesField {...p} />
         <ImagesField {...p} />
         <ColorField {...p} />
+        <CleanVoiceField {...p} />
         <StudioSoundField {...p} />
         <MusicField {...p} />
         <CaptionsField {...p} />
       </SectionGroup>
+    </div>
+  );
+}
+
+/**
+ * "Tighten for reels": the three sweeps below it, in one press.
+ *
+ * Cutting fillers, cutting false starts and capping pauses are the whole of
+ * making a talking-head take watchable, and nobody has ever wanted two of the
+ * three. They lived behind three controls in two sections, so the common case
+ * cost a scroll, three clicks and a slider drag, EVERY video. This is the same
+ * work with the parts still available underneath for the times you want only one.
+ *
+ * It does not decide anything the sections do not. The filler mode is whatever
+ * Clean up is set to — including Off, which is a choice and is honoured rather
+ * than quietly overridden — and the retake threshold is Advanced's. The one
+ * number it brings of its own is the pause cap, REEL_PAUSE_MS, and it can only
+ * ever tighten: someone who has already dragged the cap below it keeps theirs.
+ *
+ * ── why there is a dialog in the way of a "one click" action ────────────────
+ * Because it deletes words. Every count it will act on is known before anything
+ * happens, so showing them is free, and "24 filler words, 3 false starts, 61
+ * pauses" is exactly the information that decides whether you want this take
+ * swept at all. The alternative — sweep first, read the notice after — is the
+ * same number arriving too late to be a decision.
+ */
+function TightenField(p: Props) {
+  const [open, setOpen] = useState(false);
+  const [plan, setPlan] = useState<TightenPlan | null>(null);
+  const [report, setReport] = useState<string | null>(null);
+
+  /* Read off the panel's own controls rather than invented here, so what this
+   * button does is always what the sections below it say it does. */
+  const settings = {
+    fillers:
+      p.fillerMode === 'off'
+        ? null
+        : { includeDiscourseMarkers: p.fillerMode === 'all', customWords: p.customFillers },
+    retakes: { minWords: p.retakeMin },
+    maxGapMs: REEL_PAUSE_MS,
+  };
+
+  const preview = () => {
+    setReport(null);
+    setPlan(planTightenNow(settings));
+    setOpen(true);
+  };
+
+  const run = () => {
+    // The store re-plans against the live document and returns what it actually
+    // did, so the report can never describe an edit that did not happen.
+    const done = tightenForReels(settings);
+    setOpen(false);
+    setReport(done ? reportTighten(done) : null);
+  };
+
+  const lines = plan ? previewTighten(plan) : [];
+
+  return (
+    <div className="tighten">
+      <button className="tighten-go" onClick={preview} disabled={!!p.busy}>
+        Tighten for reels…
+      </button>
+      <Hint>Cuts fillers and false starts and shortens long pauses, as one undoable step.</Hint>
+
+      {/* Dismissed by clicking it, the same as the app's own notice — this is
+        * the same kind of message and should not need a different gesture. */}
+      {report && (
+        <p className="tighten-report" onClick={() => setReport(null)}>
+          {report} Cmd+Z takes all of it back.
+        </p>
+      )}
+
+      <Dialog
+        open={open}
+        title="Tighten for reels"
+        onClose={() => setOpen(false)}
+        footer={
+          <>
+            <button onClick={() => setOpen(false)}>Cancel</button>
+            {lines.length > 0 && (
+              <button className="primary" onClick={run}>
+                Tighten
+              </button>
+            )}
+          </>
+        }
+      >
+        {lines.length === 0 ? (
+          <p className="dl-sub">
+            Nothing to tighten. No filler words, no false starts, and no pause long enough to be
+            worth a cut.
+          </p>
+        ) : (
+          <>
+            <p className="dl-sub">This will:</p>
+            <ul className="tighten-list">
+              {lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            {/* The one thing the counts above cannot say for themselves. */}
+            {p.fillerMode === 'off' && (
+              <Warn>
+                Clean up is set to Off, so no filler words are cut. Set it to Hesitations to
+                include them.
+              </Warn>
+            )}
+            <Hint>
+              Cut words stay in the script struck through, so nothing is lost — and all of this is
+              one entry in the undo history, so one Cmd+Z puts the whole take back.
+            </Hint>
+          </>
+        )}
+      </Dialog>
     </div>
   );
 }
@@ -399,8 +563,44 @@ function PausesField(p: Props) {
           p.onCutDragEnd(gap === 0 ? 'Keep every pause' : `Shorten pauses to ${gap}ms`)
         }
         onChange={(v) => p.setCut({ ...p.cut, maxGapMs: v > 0 ? v : Infinity })}
+        label="pause length cap"
         format={(v) => (v === 0 ? 'Keep every pause' : `Cap at ${v}ms`)}
       />
+    </Section>
+  );
+}
+
+/**
+ * The trained voice cleaner.
+ *
+ * Its own control rather than a strength setting on Studio Sound, because it is
+ * not more of the same thing: Studio Sound is a filter chain that subtracts a
+ * noise estimate it can hold still, which is why it barely touches traffic or a
+ * crowd. This is a model that separates speech from everything else. They
+ * compose — clean first, then shape — so both can be on.
+ *
+ * Hidden entirely when the server has no denoiser installed. A toggle that
+ * cannot do anything is worse than an absent one.
+ */
+function CleanVoiceField(p: Props) {
+  if (!p.canCleanVoice) return null;
+  return (
+    <Section
+      icon="sparkle"
+      label="Clean voice"
+      toggle={{
+        checked: p.denoise,
+        onChange: p.onToggleDenoise,
+        label: 'Clean voice',
+      }}
+    >
+      <Hint>
+        Separates the voice from traffic, crowds and wind using a model that runs on
+        this machine — nothing is uploaded. For footage shot outdoors this does what
+        Studio Sound cannot, because the noise never holds still long enough to be
+        subtracted. It runs on export, once per clip, and is remembered afterwards,
+        so only the first export of a clip waits for it.
+      </Hint>
     </Section>
   );
 }
@@ -600,6 +800,7 @@ function FrameField(p: Props) {
         max={MAX_ZOOM}
         step={0.01}
         onChange={(zoom) => p.setFrame({ ...frame, zoom })}
+        label="frame zoom"
         format={(v) =>
           Math.abs(v - 1) < 0.005
             ? 'Fill the frame'
@@ -608,6 +809,32 @@ function FrameField(p: Props) {
         onPointerDown={p.onFrameDragStart}
         onPointerUp={() => p.onFrameDragEnd('Zoom frame')}
       />
+
+      {/* Where the platform will cover the picture. A preview aid only — it is
+          never burned in and never reaches the render, so it lives beside the
+          frame controls rather than in the output settings. */}
+      <div className="safe-pick">
+        <span className="safe-pick-label">Safe area</span>
+        <Segmented
+          name="safe-area"
+          value={p.safeArea}
+          onChange={(v) => p.onSafeArea(v as typeof p.safeArea)}
+          options={[
+            ['off', 'Off'],
+            ['reels', 'Reels'],
+            ['tiktok', 'TikTok'],
+            ['shorts', 'Shorts'],
+            ['all', 'All'],
+          ]}
+        />
+      </div>
+      {p.safeArea !== 'off' && (
+        <Hint>
+          {PLATFORM_GUIDES.find((g) => g.id === p.safeArea)?.hint ??
+            'The shaded bands are where the app draws over your video.'}{' '}
+          Guides only — nothing here is rendered into the export.
+        </Hint>
+      )}
 
       <Hint>
         {cropped
@@ -700,6 +927,7 @@ function MovesField(p: Props) {
                   onChange={(zoom) => p.onSetMove(m.id, { zoom })}
                   onPointerDown={p.onFrameDragStart}
                   onPointerUp={() => p.onFrameDragEnd(`Set push-in to ${m.zoom.toFixed(2)}×`)}
+                  label="push-in zoom"
                   format={(v) => (v <= 1.001 ? 'No push-in' : `${v.toFixed(2)}× in`)}
                 />
 
@@ -711,6 +939,7 @@ function MovesField(p: Props) {
                   onChange={(ease) => p.onSetMove(m.id, { ease })}
                   onPointerDown={p.onFrameDragStart}
                   onPointerUp={() => p.onFrameDragEnd('Set push-in ease')}
+                  label="push-in ease"
                   format={(v) => (v < 0.03 ? 'Hard cut in and out' : `${v.toFixed(2)}s ease`)}
                 />
 
@@ -915,6 +1144,11 @@ function ImagesField(p: Props) {
                       className={o.transition === t ? 'on' : ''}
                       onClick={() => p.onSetOverlay(o.id, { transition: t })}
                       title={TRANSITION_HELP[t]}
+                      /* The label is a bare arrow glyph, and text content beats
+                         `title` in accessible-name computation — so these
+                         announced themselves as "←" / "→" / "↑" / "↓". The help
+                         string already says the real thing. */
+                      aria-label={TRANSITION_HELP[t]}
                     >
                       {TRANSITION_LABEL[t]}
                     </button>
@@ -1348,6 +1582,7 @@ function MusicField(p: Props) {
             max={100}
             step={5}
             onChange={(v) => p.onUpdateMusic({ volume: v / 100 })}
+            label="music volume"
             format={(v) => `${v}% volume`}
           />
 
@@ -1532,6 +1767,119 @@ function MusicBrowser({ providers, busy, onPick }: {
 }
 
 /**
+ * Saved caption looks: the three built in, plus whatever this browser has kept.
+ *
+ * A reel series needs ONE look, and the dozen controls under here are a dozen
+ * chances to not quite reproduce it. So: name the current settings once, click
+ * the name in the next project. See caption-preset.ts for what a style is and
+ * why the list is a browser preference rather than part of the document.
+ *
+ * A user style with the same name as a built-in SHADOWS it rather than sitting
+ * beside it. Two identical chips you cannot tell apart is worse than losing
+ * access to a preset you deliberately overwrote — and deleting yours brings the
+ * built-in straight back, since the built-ins are code and were never stored.
+ */
+function CaptionStyles({ captions, customFonts, onApply }: {
+  captions: CaptionSettings;
+  customFonts: CustomFont[];
+  onApply: (style: CaptionStyle) => void;
+}) {
+  const [saved, setSaved] = useState<CaptionStyle[]>(loadCaptionStyles);
+  const [draft, setDraft] = useState('');
+  const inputId = useId();
+
+  const available = new Set([
+    ...CAPTION_FONTS.map((f) => f.id),
+    ...customFonts.map((f) => f.family),
+  ]);
+  const all = [...BUILT_IN_CAPTION_STYLES.filter((b) => !saved.some((s) => s.id === b.id)), ...saved];
+  const missing = all.filter((s) => !available.has(s.settings.font));
+
+  const save = () => {
+    const style = captureCaptionStyle(draft, captions);
+    if (!style) return;
+    setSaved(persistCaptionStyle(saved, style));
+    setDraft('');
+  };
+
+  return (
+    <div className="cap-styles">
+      <ul className="style-chips">
+        {all.map((style) => {
+          const on = matchesCaptionStyle(captions, style);
+          const fontMissing = !available.has(style.settings.font);
+          return (
+            <li key={style.id} className={`style-chip${on ? ' on' : ''}`}>
+              <button
+                type="button"
+                className="style-pick"
+                /* aria-pressed rather than a visual state alone: "which look is
+                 * on" is the only thing this row says, and the gold border says
+                 * it to exactly one kind of reader. */
+                aria-pressed={on}
+                title={
+                  captionStyleSummary(style) +
+                  (fontMissing ? ` — ${style.settings.font} is not imported here` : '')
+                }
+                onClick={() => onApply(style)}
+              >
+                {style.name}
+              </button>
+              {/* Built-ins have no delete, rather than a disabled one: there is
+                * nothing stored to remove. */}
+              {!style.builtIn && (
+                <button
+                  type="button"
+                  className="style-x"
+                  aria-label={`Delete the style ${style.name}`}
+                  onClick={() => setSaved(forgetCaptionStyle(saved, style.id))}
+                >
+                  ×
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="chip-input">
+        <label className="sr-only" htmlFor={inputId}>Name this look</label>
+        <input
+          id={inputId}
+          type="text"
+          value={draft}
+          maxLength={MAX_STYLE_NAME}
+          placeholder="Save this look as — e.g. Series intro"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              save();
+            }
+          }}
+        />
+        <button type="button" onClick={save} disabled={!draft.trim()}>Save</button>
+      </div>
+
+      {missing.length > 0 && (
+        <Warn>
+          {missing.length === 1
+            ? `“${missing[0].name}” names ${missing[0].settings.font}, which is not imported here.`
+            : `${missing.length} of these styles name a font that is not imported here.`}{' '}
+          Applying one falls back to a default face — in the preview and in the export — so the
+          burn will not match what you saved.
+        </Warn>
+      )}
+
+      <Hint>
+        Saved in this browser and offered in every project. They do not follow you to another
+        machine. Applying one changes the look and the placement, never whether captions are on.
+      </Hint>
+    </div>
+  );
+}
+
+/**
  * Caption look and placement.
  *
  * The controls only appear once captions are on. Off is the default and the
@@ -1577,6 +1925,15 @@ function CaptionsField(p: Props) {
 
       {on && (
         <>
+          {/* First, above the dozen controls it stands in for. Re-dialling those
+            * by hand for every video in a series is the work this removes, so
+            * the shortcut has to be the thing you reach before the long way. */}
+          <CaptionStyles
+            captions={c}
+            customFonts={p.customFonts}
+            onApply={(style) => commit(`Apply caption style “${style.name}”`)(applyCaptionStyle(c, style))}
+          />
+
           <Hint>Drag the caption on the monitor to place it, or its handles to size the box.</Hint>
 
           <FontPicker
@@ -1598,6 +1955,7 @@ function CaptionsField(p: Props) {
             onChange={(v) => set({ fontSize: v })}
             // Authored at 1080p and scaled to the real frame, so the number is
             // stable across projects rather than meaning a different size in each.
+            label="caption text size"
             format={(v) => `${v}px at 1080p`}
           />
 
@@ -1641,6 +1999,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd(`Set caption outline to ${c.strokeWidth}px`)}
             onChange={(v) => set({ strokeWidth: v })}
+            label="caption outline or box padding"
             format={(v) =>
               isBox
                 ? v === 0
@@ -1685,6 +2044,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
             onChange={(v) => set({ boxWidth: v / 100 })}
+            label="caption box width"
             format={(v) => `${v}% wide`}
           />
           <Slider
@@ -1695,6 +2055,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd('Resize captions')}
             onChange={(v) => set({ boxHeight: v / 100 })}
+            label="caption box height"
             format={(v) => `${v}% tall`}
           />
           <Hint>
@@ -1710,6 +2071,7 @@ function CaptionsField(p: Props) {
             onPointerDown={p.onCaptionDragStart}
             onPointerUp={() => p.onCaptionDragEnd(`Split captions at ${c.maxChars} characters`)}
             onChange={(v) => set({ maxChars: v })}
+            label="characters per caption"
             format={(v) => `Split past ${v} characters`}
           />
           {/* Three lines of hint was ~50px of a field that is already the

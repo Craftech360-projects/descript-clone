@@ -202,7 +202,7 @@ is for a couple of known users:
   Anyway**. Or, from a terminal:
 
   ```
-  xattr -dr com.apple.quarantine "/Applications/Transcript Editor.app"
+  xattr -dr com.apple.quarantine "/Applications/Jumpstart.app"
   ```
 
   A full fix needs an Apple Developer account ($99/yr) plus notarization, which

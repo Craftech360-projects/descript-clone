@@ -45,6 +45,11 @@ import {
 } from '../../../../packages/core/src/overlay.ts';
 import { detectFillers } from '../../../../packages/core/src/fillers.ts';
 import { detectRetakes } from '../../../../packages/core/src/retakes.ts';
+import {
+  planTighten,
+  type TightenOptions,
+  type TightenPlan,
+} from '../../../../packages/core/src/tighten.ts';
 import type { Transcript, Word } from '../../../../packages/core/src/types.ts';
 
 /**
@@ -138,6 +143,8 @@ export function loadDoc(
   captions?: CaptionSettings,
   speed?: number,
   studioSound?: boolean,
+  denoise?: boolean,
+  clipSpeeds?: Record<string, number>,
   frame?: Partial<FrameSettings> | null,
   color?: Partial<ColorSettings> | null,
   overlays?: unknown,
@@ -150,6 +157,8 @@ export function loadDoc(
       captions,
       clampSpeed(speed),
       Boolean(studioSound),
+      Boolean(denoise),
+      clipSpeeds ?? {},
       normalizeFrame(frame),
       normalizeColor(color),
       // Coerced on the way in for the same reason frame and colour are: this is
@@ -284,6 +293,57 @@ function commitCut(cut: CutSettings): void {
   const { doc } = state;
   if (!doc) return;
   apply({ kind: 'cut', prev: doc.cut, next: cut }, { label: 'Change edit settings' });
+}
+
+/**
+ * Turn the trained voice cleaner on or off.
+ *
+ * Undoable like every other output setting, but note what it does NOT do: it
+ * never runs the model. The first render after this pays for the pass and caches
+ * it, so toggling is instant and costs nothing until you export.
+ */
+export function updateDenoise(denoise: boolean): void {
+  const { doc } = state;
+  if (!doc || doc.denoise === denoise) return;
+  apply({ kind: 'denoise', prev: doc.denoise, next: denoise }, { label: denoise ? 'Enable voice cleanup' : 'Disable voice cleanup' });
+}
+
+/**
+ * Set ONE clip's playback rate.
+ *
+ * Setting a clip to the project default removes its entry rather than storing
+ * the same number twice — so a later "make everything 1.5x" moves that clip too,
+ * instead of it silently keeping an override nobody remembers making.
+ */
+export function updateClipSpeed(clipId: string, speed: number): void {
+  const { doc } = state;
+  if (!doc) return;
+  const next = { ...doc.clipSpeeds };
+  if (Math.abs(speed - doc.speed) < 1e-9) delete next[clipId];
+  else next[clipId] = speed;
+  if (JSON.stringify(next) === JSON.stringify(doc.clipSpeeds)) return;
+  apply(
+    { kind: 'clipSpeeds', prev: doc.clipSpeeds, next },
+    { label: `Set clip to ${speed}x` },
+  );
+}
+
+/**
+ * Put every clip at one rate.
+ *
+ * Clears the per-clip overrides as well as moving the default — otherwise "make
+ * them all 1.2x" would leave the clips someone had tuned by hand untouched,
+ * which is the opposite of what it says.
+ */
+export function updateAllClipSpeeds(speed: number): void {
+  const { doc } = state;
+  if (!doc) return;
+  if (doc.speed === speed && Object.keys(doc.clipSpeeds).length === 0) return;
+  apply(
+    { kind: 'clipSpeeds', prev: doc.clipSpeeds, next: {} },
+    { label: `All clips ${speed}x` },
+  );
+  updateSpeed(speed);
 }
 
 export function updateStudioSound(studioSound: boolean): void {
@@ -769,6 +829,72 @@ export function restoreAll(): number {
   return ids.size;
 }
 
+// ── tighten for reels ─────────────────────────────────────────────────────────
+//
+// The three sweeps above, applied together as ONE decision. Everything that
+// decides anything is in packages/core/tighten.ts — planTighten is pure and
+// tested; this is only the two calls that read the live document and commit the
+// result.
+//
+// It has to live in the store rather than in the panel because of the undo
+// requirement, and that is the whole reason it is not just three calls in a row.
+// removeFillers, removeRetakes and endCutDrag each commit their own entry, so
+// composing them would put THREE steps on the stack for one press of one button
+// and make backing it out a guessing game about how many Cmd+Zs gets you back to
+// the raw transcript. `apply` is module-private, so a single batch patch can
+// only be built from in here. Same argument, same shape, as runImportChain
+// below.
+
+/** What Tighten would do to the live document, without touching it. */
+export function planTightenNow(settings: Omit<TightenOptions, 'cut'>): TightenPlan | null {
+  const { doc } = state;
+  if (!doc) return null;
+  return planTighten(doc.words, { ...settings, cut: doc.cut });
+}
+
+/**
+ * Cut the fillers, cut the false starts, cap the pauses — one history entry.
+ *
+ * The plan is recomputed here rather than taken from the caller's preview. The
+ * two agree in every ordinary case (nothing else can touch the document while a
+ * modal preview is open), but the assistant CAN edit while the panel is idle,
+ * and a stale plan would delete word ids that no longer mean what they meant.
+ * Recomputing costs a sub-millisecond pass and makes the returned plan a report
+ * of what actually happened rather than of what was once going to.
+ */
+export function tightenForReels(settings: Omit<TightenOptions, 'cut'>): TightenPlan | null {
+  const { doc } = state;
+  if (!doc) return null;
+
+  const plan = planTighten(doc.words, { ...settings, cut: doc.cut });
+  const patches: DocPatch[] = [];
+
+  // Two word patches rather than one, because fillers carry isFiller as well as
+  // deleted — the script paints them as the class of word they are instead of as
+  // an anonymous cut, exactly as removeFillers does. The two id sets are
+  // disjoint by construction (see TightenPlan.retakeIds), so nothing here
+  // depends on the order they are applied in.
+  if (plan.fillerIds.length > 0) {
+    patches.push(buildWordPatch(doc.words, plan.fillerIds, { deleted: true, isFiller: true }));
+  }
+  if (plan.retakeIds.length > 0) {
+    patches.push(buildWordPatch(doc.words, plan.retakeIds, { deleted: true }));
+  }
+  if (plan.maxGapMs !== null && plan.maxGapMs !== doc.cut.maxGapMs) {
+    patches.push({ kind: 'cut', prev: doc.cut, next: { ...doc.cut, maxGapMs: plan.maxGapMs } });
+  }
+
+  if (patches.length === 0) return plan;
+
+  apply({ kind: 'batch', patches }, {
+    // What Cmd+Z announces. One name for the whole batch, because one button
+    // press is what caused it.
+    label: 'Tighten for reels',
+    nextSelection: null,
+  });
+  return plan;
+}
+
 // ── the on-import chain ───────────────────────────────────────────────────────
 
 /**
@@ -984,9 +1110,33 @@ function scheduleSave(): void {
   saveTimer = setTimeout(() => void pump(), 800);
 }
 
+/**
+ * The write currently on the wire, so a flush can WAIT for it.
+ *
+ * `pump` used to return immediately when a debounced save was already in flight,
+ * which quietly broke every caller that flushes to make an edit durable before
+ * asking the server to act on it. `doRender` says "make sure the edit has landed
+ * before asking for pixels" and then got back a resolved promise while the
+ * server still held the previous document — so a word deleted a moment earlier
+ * could survive into the exported file. The render reads the SERVER's copy of
+ * the deleted set, so this was the whole guarantee.
+ *
+ * Holding the promise lets a flush chain onto the in-flight write and then run
+ * again for whatever changed while it was away.
+ */
+let inFlightWrite: Promise<void> | null = null;
+
 async function pump(): Promise<void> {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
-  if (!saveFn || inFlight) return; // a later change re-enters below
+  if (!saveFn) return;
+
+  // A write is already going. Wait for it, then re-enter: the document may have
+  // moved on since that write was built, and the caller is asking for CURRENT.
+  if (inFlight) {
+    await inFlightWrite;
+    if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') await pump();
+    return;
+  }
 
   const doc = state.doc;
   if (!doc || doc.rev === savedRev) { setStatus('saved'); return; }
@@ -994,25 +1144,37 @@ async function pump(): Promise<void> {
   const rev = doc.rev;
   inFlight = true;
   setStatus('saving');
-  try {
-    await saveFn(doc);
-    savedRev = rev;
-    // The doc may have moved while we were away — say saved only if it did not.
-    setStatus(state.doc && state.doc.rev !== rev ? 'unsaved' : 'saved');
-  } catch {
-    setStatus('error');
-  } finally {
-    inFlight = false;
-    if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') void pump();
-  }
+
+  const write = (async () => {
+    try {
+      await saveFn!(doc);
+      savedRev = rev;
+      // The doc may have moved while we were away — say saved only if it did not.
+      setStatus(state.doc && state.doc.rev !== rev ? 'unsaved' : 'saved');
+    } catch {
+      setStatus('error');
+    } finally {
+      inFlight = false;
+      inFlightWrite = null;
+    }
+  })();
+
+  inFlightWrite = write;
+  await write;
+
+  // Anything that changed mid-write still has to go. Awaited, not fired off, so
+  // a caller that flushed is told the truth about when the document is durable.
+  if (state.doc && state.doc.rev !== savedRev && state.saveStatus !== 'error') await pump();
 }
 
 /**
- * Save now — before a render, on Ctrl+S, on unload, on leaving the editor.
+ * Save now, and RESOLVE ONLY WHEN THE SERVER HAS THE CURRENT DOCUMENT — before a
+ * render, a caption export, a clip operation, Ctrl+S, unload, or leaving the
+ * editor.
  *
- * Returns the write so a caller about to DROP the document (clearDoc) can await
- * it; pump reports failure through saveStatus and never rejects, so neither does
- * this, and the fire-and-forget callers need no handler.
+ * Await it whenever the next thing you do asks the server to act on the
+ * document. pump reports failure through saveStatus and never rejects, so this
+ * never rejects either.
  */
 export function flushSave(): Promise<void> {
   return pump();

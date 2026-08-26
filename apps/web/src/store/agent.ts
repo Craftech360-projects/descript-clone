@@ -33,13 +33,15 @@ interface AgentState {
   status: 'idle' | 'busy';
   model: string;
   models: string[];
+  /** id -> where it runs and why you'd pick it. Empty until the list loads. */
+  catalogue: { id: string; label: string; hint: string; where: string }[];
   /** True once capabilities say the server has an xAI key. */
   enabled: boolean;
 }
 
 const MAX_STEPS = 12;
 
-let state: AgentState = { entries: [], status: 'idle', model: '', models: [], enabled: false };
+let state: AgentState = { entries: [], status: 'idle', model: '', models: [], catalogue: [], enabled: false };
 /** The literal history sent to the model. Not React state — the panel never reads it. */
 let wire: AgentWireMessage[] = [];
 
@@ -83,8 +85,23 @@ function push(entry: ChatEntry): void {
   set({ entries: [...state.entries, entry] });
 }
 
+/** The model currently chosen, for callers outside React (the tool bridge). */
+export function agentModel(): string {
+  return state.model;
+}
+
 export function setModel(model: string): void {
   set({ model });
+  /**
+   * Remember it. This used to be in-memory only, so a reload put you back on
+   * whatever the server called default — you would choose a model, refresh, and
+   * be quietly somewhere else. Saved on the SERVER rather than in localStorage
+   * because it is a property of the installation, not of the window.
+   *
+   * Fire and forget: failing to persist a preference must never block changing
+   * it, and the next change tries again.
+   */
+  void api.preferences.patch({ model }).catch(() => {});
 }
 
 /**
@@ -96,11 +113,20 @@ export async function initAgent(defaultModel: string, enabled: boolean): Promise
   set({ enabled });
   if (state.model === '') set({ model: defaultModel });
   try {
-    const { models, default: def } = await api.agent.models();
+    const { models, catalogue, default: def } = await api.agent.models();
+    // A remembered choice outranks the server's default — that is what choosing
+    // it meant. Only fall back when it names a model that is no longer offered.
+    const saved = await api.preferences.get().then((p) => p.model).catch(() => '');
     set({
       models,
+      catalogue: catalogue ?? [],
       // Keep any model the user already chose; otherwise prefer the server default.
-      model: state.model && models.includes(state.model) ? state.model : def || models[0] || state.model,
+      model:
+        state.model && models.includes(state.model)
+          ? state.model
+          : saved && models.includes(saved)
+            ? saved
+            : def || models[0] || state.model,
     });
   } catch {
     // Leave whatever default we have; the picker just shows the one entry.

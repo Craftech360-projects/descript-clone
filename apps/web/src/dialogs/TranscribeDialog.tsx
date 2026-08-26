@@ -23,6 +23,8 @@ interface Props {
   onCancelJob: () => void;
   /** A request error belongs in this modal; otherwise the workspace banner sits behind it. */
   error: string | null;
+  /** So the "no transcription available" warning can offer the fix, not just name it. */
+  onOpenSettings: () => void;
 }
 
 /**
@@ -52,6 +54,7 @@ export default function TranscribeDialog({
   job,
   onCancelJob,
   error,
+  onOpenSettings,
 }: Props) {
   const model = caps.asrModels.find((m) => m.id === asr.model);
   const running = busy === 'transcribe';
@@ -104,12 +107,39 @@ export default function TranscribeDialog({
         </>
       )}
 
+      {/*
+        No real provider — say so where the decision is made, and offer the fix.
+        This used to be a Hint tucked under the Speakers checkboxes saying "No
+        ELEVENLABS_API_KEY, so the mock provider runs". Everything about that was
+        too quiet: the mock invents words, which looks like a working transcript
+        until you read it, and the message named one key out of three while
+        offering no way to add any of them.
+      */}
+      {!caps.hasAsr && (
+        <Warn alert>
+          <strong>No transcription is set up on this machine.</strong> Pressing Transcribe will
+          produce <em>invented words</em> on real timings — enough to exercise the editor, and not
+          a transcript of what you said.
+          {' '}
+          {caps.asrModels.some((m) => m.provider === 'apple') && (
+            <>On-device speech needs macOS 26; on an older Mac it cannot be turned on.{' '}</>
+          )}
+          Add a key for ElevenLabs, Deepgram or Sarvam to transcribe for real.
+          <div className="warn-act">
+            <button className="primary" onClick={onOpenSettings}>Add a key</button>
+          </div>
+        </Warn>
+      )}
+
       <Field label="Model">
         <select value={asr.model} onChange={(e) => setAsr({ ...asr, model: e.target.value })}>
           {caps.asrModels.map((m) => (
             <option key={m.id} value={m.id} disabled={!m.available}>
               {m.label}
-              {!m.available && ` - needs ${m.provider === 'sarvam' ? 'SARVAM_API_KEY' : 'ELEVENLABS_API_KEY'}`}
+              {/* From the model, not inferred from its provider. The old ternary
+                  told anyone on a Mac without on-device speech that it "needs
+                  ELEVENLABS_API_KEY" — a key that would not help. */}
+              {!m.available && m.requires ? ` — needs ${m.requires}` : ''}
             </option>
           ))}
         </select>
@@ -144,12 +174,7 @@ export default function TranscribeDialog({
           onChange={(v) => setAsr({ ...asr, verbatim: v })}
           label='Keep filler words ("um", "uh")'
         />
-        {!caps.hasAsr && (
-          <Hint>
-            No ELEVENLABS_API_KEY, so the mock provider runs: real timings, invented words. The
-            whole pipeline still works.
-          </Hint>
-        )}
+
       </Field>
     </Dialog>
   );

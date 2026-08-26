@@ -124,17 +124,25 @@ test('clampPan holds the crop inside the overflow it indexes', () => {
 });
 
 test('the source preset takes its size from the media, not the record', () => {
-  assert.deepEqual(frameSize(settings(), { width: 1280, height: 720 }), { width: 1280, height: 720 });
+  assert.deepEqual(
+    frameSize(settings({ preset: 'source' }), { width: 1280, height: 720 }),
+    { width: 1280, height: 720 },
+  );
+});
+
+test('the default frame is a reel, so a new project composes for vertical', () => {
+  assert.equal(DEFAULT_FRAME.preset, 'reel');
+  assert.deepEqual(frameSize(settings(), HD), { width: 1080, height: 1920 });
 });
 
 // ── resolveFrame: the null that keeps an untouched project untouched ──────────
 
 test('an untouched frame resolves to null, so no scale/crop is emitted at all', () => {
-  assert.equal(resolveFrame(settings(), HD), null);
+  assert.equal(resolveFrame(settings({ preset: 'source' }), HD), null);
 });
 
 test('the source preset at 1x is still null even on odd source dimensions', () => {
-  assert.equal(resolveFrame(settings(), { width: 1919, height: 1079 }), null);
+  assert.equal(resolveFrame(settings({ preset: 'source' }), { width: 1919, height: 1079 }), null);
 });
 
 test('a preset matching the source exactly is null — same pixels, no re-encode', () => {
@@ -142,7 +150,7 @@ test('a preset matching the source exactly is null — same pixels, no re-encode
 });
 
 test('zoom alone is enough to need a crop, even at the source resolution', () => {
-  const r = resolveFrame(settings({ zoom: 1.5 }), HD);
+  const r = resolveFrame(settings({ preset: 'source', zoom: 1.5 }), HD);
   assert.ok(r, 'zoom must resolve');
   assert.deepEqual({ width: r.width, height: r.height }, HD);
 });

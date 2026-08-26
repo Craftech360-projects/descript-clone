@@ -45,6 +45,15 @@ const dbToGain = (db: number): number => 10 ** (db / 20);
 interface Graph {
   ctx: AudioContext;
   source: MediaElementAudioSourceNode;
+  /**
+   * The element this graph captured.
+   *
+   * `createMediaElementSource` binds to ONE element for good, and the monitor's
+   * <video> is destroyed and recreated every time you leave a project and open
+   * another. A graph built for the old element cannot carry the new one, so this
+   * is what tells us the graph is stale and has to be rebuilt.
+   */
+  element: HTMLMediaElement;
   /** The enhancer chain's head and tail, so enabling is a two-node reconnect. */
   head: AudioNode;
   tail: AudioNode;
@@ -59,6 +68,20 @@ export function useStudioSoundPreview({ videoRef, enabled }: Options): void {
     // Nothing to do until the user first asks for it — and until then we have
     // deliberately not captured the element. See the note above.
     if (!enabled && !graphRef.current) return;
+
+    /**
+     * A graph built for a PREVIOUS <video> is worse than no graph.
+     *
+     * Going Home unmounts the monitor and destroys its element; opening another
+     * project builds a new one. The old code kept the first graph forever, so
+     * from the second project on the enhancer silently processed a dead element
+     * and the toggle did nothing audible. Close it and build again.
+     */
+    if (graphRef.current && graphRef.current.element !== video) {
+      const stale = graphRef.current;
+      graphRef.current = null;
+      void stale.ctx.close().catch(() => {});
+    }
 
     if (!graphRef.current) {
       const AudioCtx: typeof AudioContext | undefined =
@@ -113,7 +136,7 @@ export function useStudioSoundPreview({ videoRef, enabled }: Options): void {
 
       highpass.connect(mud).connect(presence).connect(comp).connect(makeup).connect(limiter);
 
-      graphRef.current = { ctx, source, head: highpass, tail: limiter };
+      graphRef.current = { ctx, source, element: video, head: highpass, tail: limiter };
     }
 
     const { ctx, source, head, tail } = graphRef.current;
@@ -127,23 +150,38 @@ export function useStudioSoundPreview({ videoRef, enabled }: Options): void {
       source.connect(ctx.destination);
     }
 
-    // A context created outside a gesture starts suspended, and now that the
-    // element is captured a suspended context means SILENCE. The toggle itself is
-    // a gesture, so this usually resumes immediately; the listeners are the
-    // fallback for every other path in, and they clean themselves up.
-    if (ctx.state === 'suspended') {
-      const resume = () => {
-        void ctx.resume();
-      };
-      void ctx.resume();
-      document.addEventListener('pointerdown', resume);
-      document.addEventListener('keydown', resume);
-      return () => {
-        document.removeEventListener('pointerdown', resume);
-        document.removeEventListener('keydown', resume);
-      };
-    }
-  }, [videoRef, enabled]);
+    /**
+     * Keep the context awake — ALWAYS, not only when it happened to be suspended
+     * the moment this effect ran.
+     *
+     * Once `createMediaElementSource` has taken the element, a suspended context
+     * is not a degraded enhancer: it is SILENCE. The video plays, the picture
+     * moves, and no sound comes out — while the music bed, which is a separate
+     * element this graph never touched, keeps playing. "The music works but the
+     * voice is gone" is the shape that bug reaches the user in.
+     *
+     * The old guard only armed the listeners if the context was already
+     * suspended, so a context that started running and was suspended LATER — a
+     * backgrounded tab, an OS audio-route change, Chrome reclaiming an idle
+     * context — had nothing left to wake it. `statechange` covers that, and
+     * resuming on `play` covers the case where the user hits space first.
+     */
+    const resume = () => {
+      if (ctx.state === 'suspended') void ctx.resume();
+    };
+    void ctx.resume();
+
+    ctx.addEventListener('statechange', resume);
+    video.addEventListener('play', resume);
+    document.addEventListener('pointerdown', resume);
+    document.addEventListener('keydown', resume);
+    return () => {
+      ctx.removeEventListener('statechange', resume);
+      video.removeEventListener('play', resume);
+      document.removeEventListener('pointerdown', resume);
+      document.removeEventListener('keydown', resume);
+    };
+  }, [videoRef, enabled, videoRef.current]);
 
   // Close the context on unmount. The graph is not rebuilt after this — the
   // element goes with it, since App owns both.

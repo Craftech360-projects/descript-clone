@@ -69,6 +69,15 @@ COPY --from=web /app/apps/web/dist ./apps/web/dist
 ENV NODE_ENV=production \
     PORT=8787 \
     MEDIA_DIR=/data \
+    # Projects, jobs, folder memories: NOT web-served, so not under MEDIA_DIR.
+    # Inside the /data volume so one mount still holds everything — without
+    # this they land in an image layer and are lost on every rebuild.
+    DATA_DIR=/data/state \
+    # The server now binds loopback by default. A container that did that
+    # would be unreachable through -p while its own HEALTHCHECK, which curls
+    # 127.0.0.1 from INSIDE, stayed green. Publishing a port is an explicit
+    # decision, so state it explicitly.
+    HOST=0.0.0.0 \
     WEB_DIST=./apps/web/dist
 
 # Uploads, renders and project JSON are state: they belong on a volume, not in

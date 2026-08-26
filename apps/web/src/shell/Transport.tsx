@@ -144,13 +144,17 @@ export default function Transport({
         <button className="icon" onClick={onHome} disabled={disabled} title="Go to start (Home)" aria-label="Go to start">
           <Icon name="skip-start" />
         </button>
-        <button className="icon" onClick={() => onStep(-1)} disabled={disabled} title="Previous word (←)" aria-label="Previous word">
+        {/* Stepping is BY WORD, so with no transcript there is nothing to step
+            to and the handler returns immediately. The speed select beside these
+            already models exactly this with `!edl`; these two did not, so they
+            invited a click that could not do anything. */}
+        <button className="icon" onClick={() => onStep(-1)} disabled={disabled || !edl} title="Previous word (←)" aria-label="Previous word">
           <Icon name="step-back" />
         </button>
         <button className="play" onClick={onPlayPause} disabled={disabled} title="Play/pause (Space)" aria-label={playing ? 'Pause' : 'Play'}>
           <Icon name={playing ? 'pause' : 'play'} size={17} />
         </button>
-        <button className="icon" onClick={() => onStep(1)} disabled={disabled} title="Next word (→)" aria-label="Next word">
+        <button className="icon" onClick={() => onStep(1)} disabled={disabled || !edl} title="Next word (→)" aria-label="Next word">
           <Icon name="step-forward" />
         </button>
       </div>

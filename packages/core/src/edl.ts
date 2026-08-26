@@ -82,10 +82,83 @@ function compileClipRanges(words: Word[], duration: number, opts: Required<Compi
     if (!word.deleted) kept.push({ word, index });
   });
 
-  if (kept.length === 0) return [];
+  if (kept.length === 0) {
+    /**
+     * Nothing survives — but there are two very different reasons for that, and
+     * conflating them threw away footage.
+     *
+     * A clip that NEVER HAD WORDS is a time-lapse, a slow-mo, a silent B-roll
+     * shot: material deliberately imported, which nobody happened to speak over.
+     * Silence is not an edit, and dropping it because the transcript is empty
+     * made those clips vanish from the timeline AND from the export. Keep the
+     * whole thing; it is the user's footage until they say otherwise.
+     *
+     * A clip whose words were all DELETED is the opposite: that IS an edit, made
+     * deliberately, and it must stay gone. The two are told apart by whether any
+     * words exist at all, which is the only signal that distinguishes them.
+     */
+    return words.length === 0 ? [{ start: 0, end: duration }] : [];
+  }
+
+  /**
+   * "Keep every pause" means keep the WHOLE clip, not just its talking.
+   *
+   * Building ranges from the kept WORDS meant a clip survived only between its
+   * first and last recognised word. That is fine when the recogniser heard
+   * everything; it is data loss when it did not. On a real clip: 99.5 seconds
+   * long, words only between 39.4s and 64.3s because the people either side
+   * were speaking Chinese and an English recogniser returned nothing — so 75
+   * seconds of footage were dropped, and it looked like the editor was randomly
+   * skipping. The recogniser's vocabulary is not a licence to delete video.
+   *
+   * So with no pause cap the clip is kept whole and only DELETED words are
+   * removed from it. That is the honest reading of the setting, and it makes
+   * cutting something you do rather than something done to you: the timeline
+   * holds everything you imported until you take a word out of it.
+   *
+   * With a cap set, the tightening logic below still runs — that is a request
+   * to shorten, and shortening is what it does.
+   */
+  if (!Number.isFinite(maxGap)) {
+    const cuts = mergeAdjacent(
+      words
+        .filter((w) => w.deleted)
+        .map((w) => ({ start: clamp(w.start, 0, duration), end: clamp(w.end, 0, duration) })),
+      mergeWithin,
+    );
+    const out: Range[] = [];
+    let cursor = 0;
+    for (const cut of cuts) {
+      if (cut.start > cursor) out.push({ start: cursor, end: cut.start });
+      cursor = Math.max(cursor, cut.end);
+    }
+    if (cursor < duration) out.push({ start: cursor, end: duration });
+    // Padded and merged exactly as the tightening path is: pad gives the seam
+    // either side of a deletion room to breathe rather than clipping the words
+    // that survived, and merging stops a pad that closes a hole from emitting a
+    // zero-length cut. Clamped to the clip, so padding never invents footage.
+    const padded = out.map((r) => ({
+      start: clamp(r.start - pad, 0, duration),
+      end: clamp(r.end + pad, 0, duration),
+    }));
+    return mergeAdjacent(padded, mergeWithin).filter((r) => r.end - r.start > minTrim);
+  }
 
   const raw: Range[] = [];
-  let openStart = kept[0].word.start;
+  /**
+   * The clip's own start, not its first word.
+   *
+   * A pause cap is a request to shorten dead air BETWEEN words. It was also
+   * silently dropping everything before the first word and after the last —
+   * which on a clip where the recogniser missed the speech (someone talking in
+   * a language it does not have) meant most of the shot. It also made the
+   * saving Tighten promises wrong, because countPauses only ever measured the
+   * gaps between words and knew nothing of the head and tail it was removing.
+   *
+   * Head and tail are now always kept, at any cap. What the cap governs is the
+   * silence in the middle, which is what it says it does.
+   */
+  let openStart = 0;
 
   for (let i = 1; i < kept.length; i++) {
     const prev = kept[i - 1];
@@ -111,7 +184,7 @@ function compileClipRanges(words: Word[], duration: number, opts: Required<Compi
     // it is within the cap, or shortening it would not buy enough to pay for
     // the cut. See minTrimMs.
   }
-  raw.push({ start: openStart, end: kept[kept.length - 1].word.end });
+  raw.push({ start: openStart, end: duration });
 
   const padded = raw.map((r) => ({
     start: clamp(r.start - pad, 0, duration),
@@ -169,6 +242,77 @@ function clamp(v: number, lo: number, hi: number): number {
  */
 export function outputDuration(edl: Edl, speed = 1): number {
   return edl.keep.reduce((sum, r) => sum + (r.end - r.start), 0) / speed;
+}
+
+/**
+ * Per-clip playback rates, by clip id. Absent ids run at `fallback`.
+ *
+ * A project used to have ONE speed applied to the finished program. Clips are
+ * shot differently — a walk-up wants 2x, a piece to camera wants 1x — so the
+ * rate belongs to the clip. The project-wide value survives as the default for
+ * clips that have not been given one of their own, which is what makes "set
+ * them all to 1.2x" a single number rather than an edit to every clip.
+ */
+export interface SpeedMap {
+  byClip: Record<string, number>;
+  fallback: number;
+}
+
+export const flatSpeed = (speed = 1): SpeedMap => ({ byClip: {}, fallback: speed });
+
+/** The rate a given clip plays at. */
+export function speedOf(speeds: SpeedMap, clipId: string | undefined): number {
+  const own = clipId === undefined ? undefined : speeds.byClip[clipId];
+  const rate = own ?? speeds.fallback;
+  return Number.isFinite(rate) && rate > 0 ? rate : 1;
+}
+
+/**
+ * How long the render runs when each clip carries its own rate.
+ *
+ * Not `total / speed` any more: every clip's kept seconds shrink by ITS rate, so
+ * the finished length is the sum of those, not the sum divided by one number.
+ * Everything that sizes itself against the program — the music bed's length
+ * above all — has to ask this rather than do the division itself.
+ */
+export function outputDurationWith(edl: Edl, speeds: SpeedMap): number {
+  let total = 0;
+  for (const r of keepByClip(edl)) total += (r.end - r.start) / speedOf(speeds, r.clipId);
+  return total;
+}
+
+/**
+ * Where a CUT-clock moment lands once each clip has been re-timed.
+ *
+ * sourceToOutput gives the position on the cut timeline, which is the clock the
+ * captions, push-ins and image overlays are all authored on. With one speed for
+ * everything, that clock and the final one differ by a constant and nothing had
+ * to think about it. With a rate per clip they differ piecewise, so anything
+ * that must line up with the finished video maps through here.
+ */
+export function cutToFinal(edl: Edl, speeds: SpeedMap, cutTime: number): number {
+  let cut = 0;
+  let fin = 0;
+  for (const r of keepByClip(edl)) {
+    const len = r.end - r.start;
+    const rate = speedOf(speeds, r.clipId);
+    if (cutTime < cut + len) return fin + (cutTime - cut) / rate;
+    cut += len;
+    fin += len / rate;
+  }
+  return fin;
+}
+
+/** The keep ranges, each tagged with the clip it belongs to. */
+function keepByClip(edl: Edl): Array<{ start: number; end: number; clipId?: string }> {
+  const clips = edl.clips;
+  if (!clips || clips.length === 0) return edl.keep.map((r) => ({ ...r }));
+  return edl.keep.map((r) => {
+    // The clip whose span contains this range's start. Ranges never straddle a
+    // seam — compileSequenceEdl emits them per clip — so the start decides it.
+    const owner = clips.find((c) => r.start >= c.offset && r.start < c.offset + c.sourceDuration);
+    return { ...r, clipId: (owner ?? clips[clips.length - 1]).clipId };
+  });
 }
 
 /**

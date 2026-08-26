@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
@@ -17,7 +17,7 @@ import { CONFIG } from './config.ts';
  * process. In-memory jobs would vanish and the client would poll a 404 forever.
  */
 
-export type JobKind = 'transcribe' | 'render' | 'thumbs';
+export type JobKind = 'transcribe' | 'render' | 'thumbs' | 'proxy' | 'denoise';
 export type JobState = 'queued' | 'running' | 'done' | 'error' | 'canceled';
 
 export interface Job {
@@ -41,7 +41,21 @@ export interface Job {
   endedAt?: string;
 }
 
-const jobsDir = join(CONFIG.mediaDir, 'jobs');
+/**
+ * Job records live in the DATA directory, not the media one.
+ *
+ * Same bug as projects had: media/* is served statically, so job records — which
+ * carry the project id, the source path, and any error text — were downloadable
+ * by anyone who could reach the port. A function rather than a const so a late
+ * DATA_DIR is honoured; see the note in store.ts.
+ *
+ * Unlike projects, the existing records are NOT migrated. They are swept after
+ * 24 hours, and `reconcile()` marks every running or queued job as errored on
+ * the next boot anyway — so a migration would carefully preserve a set of
+ * records that are about to be discarded, and add a failure mode to do it. The
+ * old directory is best-effort removed instead.
+ */
+const jobsDir = () => join(CONFIG.dataDir, 'jobs');
 const jobs = new Map<string, Job>();
 
 /** Child processes and abort flags, by job id. Never persisted. */
@@ -49,7 +63,9 @@ const children = new Map<string, ChildProcess>();
 const canceled = new Set<string>();
 
 export async function init(): Promise<void> {
-  await mkdir(jobsDir, { recursive: true });
+  await mkdir(jobsDir(), { recursive: true });
+  // Best effort: the legacy web-served directory is not migrated (see jobsDir).
+  await rm(join(CONFIG.mediaDir, 'jobs'), { recursive: true, force: true }).catch(() => {});
   await reconcile();
   void sweep();
   setInterval(() => void sweep(), 60 * 60 * 1000).unref();
@@ -64,10 +80,10 @@ export async function init(): Promise<void> {
  * only honest option.
  */
 async function reconcile(): Promise<void> {
-  const files = await readdir(jobsDir).catch(() => [] as string[]);
+  const files = await readdir(jobsDir()).catch(() => [] as string[]);
   for (const file of files.filter((f) => f.endsWith('.json'))) {
     try {
-      const job = JSON.parse(await readFile(join(jobsDir, file), 'utf8')) as Job;
+      const job = JSON.parse(await readFile(join(jobsDir(), file), 'utf8')) as Job;
       if (job.state === 'running' || job.state === 'queued') {
         job.state = 'error';
         job.error = 'The server restarted while this job was running.';
@@ -87,13 +103,13 @@ async function sweep(): Promise<void> {
   for (const [id, job] of jobs) {
     if (!job.endedAt || Date.parse(job.endedAt) > cutoff) continue;
     jobs.delete(id);
-    await unlink(join(jobsDir, `${id}.json`)).catch(() => {});
+    await unlink(join(jobsDir(), `${id}.json`)).catch(() => {});
   }
 }
 
 async function persist(job: Job): Promise<void> {
   jobs.set(job.id, job);
-  await writeFile(join(jobsDir, `${job.id}.json`), JSON.stringify(job, null, 2)).catch(() => {});
+  await writeFile(join(jobsDir(), `${job.id}.json`), JSON.stringify(job, null, 2), { mode: 0o600 }).catch(() => {});
 }
 
 export function get(id: string): Job | null {

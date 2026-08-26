@@ -112,10 +112,14 @@ metered egress that is a real line item.
 
 The container fixes packaging. It does not fix these. Ranked:
 
-1. **No authentication, at all.** Every route is open — list projects, read
-   transcripts, download source media, spend your ASR credit. `CORS_ORIGIN` narrows
-   *browsers*, not `curl`. **Do not expose this to the internet without an auth
-   layer in front.**
+1. **One shared token, and no accounts.** `/api/*` and `/media/*` now require a
+   credential (`apps/server/src/auth.ts`), and the server binds `127.0.0.1`
+   unless `HOST` says otherwise — so the old note here, "no authentication, at
+   all", is out of date. What replaced it is deliberately modest: a single
+   token with no scopes, no users, and no expiry. Anyone holding it can do
+   everything, including rewriting your API keys. That is right for one person
+   on one machine and is **not** a multi-user auth layer. **Still put a real one
+   in front before exposing this to the internet.**
 2. **Render blocks the HTTP request.** `POST /render` runs ffmpeg inline and
    returns when it finishes. A long render exceeds ALB/nginx/Cloudflare idle
    timeouts (typically 30–60 s) and the client sees a 504 while the server keeps
@@ -261,7 +265,11 @@ docker run -p 8787:8787 -v media:/data -e ELEVENLABS_API_KEY=... jumpcut
 | `MEDIA_DIR` | `/data` in image | **Must be a volume.** Default in dev sits in the source tree. |
 | `WEB_DIST` | `./apps/web/dist` in image | Serves the UI from the API server, so one container is the product. Unset in dev — Vite serves and proxies. |
 | `ELEVENLABS_API_KEY` | — | The only key this product needs. Unset → mock ASR. |
-| `CORS_ORIGIN` | unset = `*` | Pin it. `*` + no auth = anyone's page drives your API. |
+| `CORS_ORIGIN` | unset = `*` | Pin it when serving a browser from another origin. |
+| `HOST` | `127.0.0.1` | **Containers must set `0.0.0.0`** or the published port reaches nothing — while the in-container healthcheck stays green. |
+| `DATA_DIR` | `/data/state` in image | Projects, jobs, folder memories, token. Never web-served, unlike `MEDIA_DIR`. Put it on the same volume. |
+| `JUMPSTART_TOKEN` | minted on first boot | Pin the API token instead of letting the server generate one into `DATA_DIR/token`. |
+| `AUTH` | `on` | `off` disables the token check entirely — only if you front this with your own auth. |
 | `MAX_UPLOAD_MB` | 512 | Bounded by RAM, not policy. |
 
 Why the image carries what it does:

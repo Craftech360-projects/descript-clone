@@ -1,9 +1,12 @@
 import { useState } from 'react';
 
 import ProjectPanel, { type FillerMode } from '../rail/ProjectPanel.tsx';
+import SocialPanel from './SocialPanel.tsx';
+import { useAgent } from '../store/agent.ts';
 import SelectionPanel from '../rail/SelectionPanel.tsx';
 import AgentPanel from '../agent/AgentPanel.tsx';
 import { Empty } from '../ui/Field.tsx';
+import Icon from '../ui/Icon.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { CutSettings } from '../../../../packages/core/src/doc.ts';
 import type { CaptionSettings } from '../../../../packages/core/src/caption-style.ts';
@@ -38,6 +41,9 @@ interface Props {
   setFrame: (f: FrameSettings) => void;
   onFrameDragStart: () => void;
   onFrameDragEnd: (label: string) => void;
+  safeArea: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all';
+  onSafeArea: (v: 'off' | 'reels' | 'tiktok' | 'shorts' | 'all') => void;
+  socialHasWords: boolean;
 
   /** Push-ins. See ProjectPanel's MovesField and SelectionPanel's "Push in here". */
   onPunchIn: () => void;
@@ -101,7 +107,6 @@ interface Props {
   onRemoveFillers: () => void;
   onRemoveRetakes: () => void;
   onRestoreAll: () => void;
-  onRetranscribe: () => void;
   onTranscribe: () => void;
   onDeleteSelection: () => void;
   onRestoreSelection: () => void;
@@ -116,6 +121,20 @@ interface Props {
    * and from the Images section when generation is.
    */
   onOpenSettings: () => void;
+  /** The trained voice denoiser — see the server's proxy of the same name. */
+  denoise: boolean;
+  onToggleDenoise: (enabled: boolean) => void;
+  /** False when the server has no denoiser installed; the control is then hidden. */
+  canCleanVoice: boolean;
+  /**
+   * Leave the inspector and go back to the picture. PHONE ONLY.
+   *
+   * The tool bar carrying the view switcher sits BELOW this panel, and on a tall
+   * phone it is pushed off the bottom — so once you are in here nothing on
+   * screen gets you out. Absent on a desk, where the rail is a permanent column
+   * beside the work and there is nothing to go back FROM.
+   */
+  onLeave?: () => void;
 }
 
 /**
@@ -132,7 +151,13 @@ export default function Rail(p: Props) {
   // from chat). The inspector is first and the default — the hands-on surface you
   // land on — with the assistant one click away. Kept above the early return below
   // so the hook order never changes.
-  const [tab, setTab] = useState<'chat' | 'inspector'>('inspector');
+  const [tab, setTab] = useState<'chat' | 'inspector' | 'social'>('inspector');
+  /**
+   * The Social tab writes with whatever model the Assistant tab is set to.
+   * One picker for the whole app: a second model chooser would be a second
+   * thing to keep in sync and a second place to be surprised by the answer.
+   */
+  const agent = useAgent();
 
   if (!p.project) {
     return (
@@ -188,6 +213,11 @@ export default function Rail(p: Props) {
     <>
       <div className="rail-head">Project</div>
       <ProjectPanel
+        denoise={p.denoise}
+        onToggleDenoise={p.onToggleDenoise}
+        canCleanVoice={p.canCleanVoice}
+        safeArea={p.safeArea}
+        onSafeArea={p.onSafeArea}
         project={p.project}
         verbatim={p.verbatim}
         asrProvider={p.asrProvider}
@@ -255,7 +285,6 @@ export default function Rail(p: Props) {
         onRemoveFillers={p.onRemoveFillers}
         onRemoveRetakes={p.onRemoveRetakes}
         onRestoreAll={p.onRestoreAll}
-        onRetranscribe={p.onRetranscribe}
         busy={p.busy}
       />
     </>
@@ -271,17 +300,40 @@ export default function Rail(p: Props) {
           Inspector
         </button>
         <button
+          className={`rail-tab ${tab === 'social' ? 'on' : ''}`}
+          onClick={() => setTab('social')}
+        >
+          Social
+        </button>
+        <button
           className={`rail-tab ${tab === 'chat' ? 'on' : ''}`}
           onClick={() => setTab('chat')}
         >
-          Assistant
+          Jumpy
         </button>
+        {/* On the right of the tabs, in the space they leave — where the user
+          * asked for it, and the side a thumb reaches without crossing the
+          * screen. Phone only: App passes onLeave nowhere else. */}
+        {p.onLeave && (
+          <button className="rail-back" onClick={p.onLeave} aria-label="Back to the video">
+            <Icon name="video" size={16} />
+            <span>Back</span>
+          </button>
+        )}
       </div>
       {tab === 'chat' ? (
         <AgentPanel
           enabled={p.agentEnabled}
           defaultModel={p.agentDefaultModel}
           onOpenSettings={p.onOpenSettings}
+        />
+      ) : tab === 'social' ? (
+        <SocialPanel
+          project={p.project}
+          model={agent.model}
+          defaultModel={p.agentDefaultModel}
+          agentEnabled={p.agentEnabled}
+          hasWords={p.socialHasWords}
         />
       ) : (
         inspector

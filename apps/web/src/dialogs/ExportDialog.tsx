@@ -1,7 +1,8 @@
 import { useState } from 'react';
+import { EXPORT_PRESETS, overBy, presetFor } from '../../../../packages/core/src/export-preset.ts';
 import Dialog from '../ui/Dialog.tsx';
 import Progress from '../ui/Progress.tsx';
-import { Field, Check, Hint, Warn } from '../ui/Field.tsx';
+import { Field, Check, Hint, Segmented, Warn } from '../ui/Field.tsx';
 import { timecode } from '../../../../packages/core/src/timeline.ts';
 import type { Project } from '../api.ts';
 
@@ -20,7 +21,7 @@ interface Props {
   };
   burnCaptions: boolean;
   setBurnCaptions: (v: boolean) => void;
-  onRender: () => void;
+  onRender: (preset: string) => void;
   onCaptions: (format: string) => void;
   busy: string | null;
   job: { progress: number; stage: string } | null;
@@ -37,12 +38,21 @@ interface Props {
  */
 export default function ExportDialog(p: Props) {
   const [format, setFormat] = useState('srt');
+  /**
+   * Where this file is going. Local to the dialog rather than the document: it
+   * describes an ACT of exporting, not a property of the project, and the same
+   * cut is often sent to more than one place.
+   */
+  const [preset, setPreset] = useState<string>('source');
   const hasVideo = Boolean(p.project?.hasVideo);
   const rendering = p.busy === 'render';
   // Not clamped at 0 any more: below 1x the render comes out LONGER than the
   // source, and "−0:00 removed" would be a lie in both halves.
   const removed = p.stats.sourceSec - p.stats.outputSec;
   const nothingLeft = p.stats.kept === 0;
+
+  const over = overBy(preset, p.stats.outputSec);
+  const chosen = presetFor(preset);
 
   return (
     <Dialog
@@ -52,7 +62,11 @@ export default function ExportDialog(p: Props) {
       footer={
         <>
           <button onClick={p.onClose} disabled={rendering}>Cancel</button>
-          <button className="primary" onClick={p.onRender} disabled={rendering || nothingLeft}>
+          {/* Any in-flight work blocks a render, not just another render. The
+              sibling caption button below already reads `p.busy`; this one only
+              knew about renders, so Render stayed clickable while a caption
+              export was running and two jobs could be started at once. */}
+          <button className="primary" onClick={() => p.onRender(preset)} disabled={!!p.busy || nothingLeft}>
             {rendering ? 'Rendering…' : 'Render video'}
           </button>
         </>
@@ -81,6 +95,25 @@ export default function ExportDialog(p: Props) {
       {/* Real, determinate progress: ffmpeg reports encoded time and the EDL
         * already told us the target length. */}
       {p.job && <Progress progress={p.job.progress} stage={p.job.stage} onCancel={p.onCancelJob} />}
+
+      {/* Where the file is going. A preset fixes the shape and the loudness —
+        * platforms normalise playback, so a reel that arrives quieter than the
+        * target is simply played quieter than everything around it. */}
+      <Field label="Destination">
+        <Segmented
+          name="export-preset"
+          value={preset}
+          onChange={setPreset}
+          options={EXPORT_PRESETS.map((x) => [x.id, x.label] as [string, string])}
+        />
+        <Hint>{chosen.hint}</Hint>
+        {over !== null && (
+          <Warn>
+            This cut is {timecode(over)} over {chosen.label}&rsquo;s {timecode(chosen.maxSeconds!)}{' '}
+            limit. It will still render — trim it, or post it somewhere without the limit.
+          </Warn>
+        )}
+      </Field>
 
       <Field label="Video">
         <Check

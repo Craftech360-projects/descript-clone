@@ -1,7 +1,8 @@
 import type { Hono } from 'hono';
+import * as local from './agent-local.ts';
 
 import { CONFIG } from './config.ts';
-import { CLAUDE_MODELS } from './agent-claude.ts';
+import { CLAUDE_MODELS, CLAUDE_MODEL_HINTS } from './agent-claude.ts';
 import { AGENT_TOOLS, AGENT_SYSTEM_PROMPT } from '../../../packages/core/src/agent-tools.ts';
 
 /**
@@ -41,6 +42,37 @@ interface WireMessage {
   name?: string;
 }
 
+/**
+ * Give every model id a readable label and a reason to pick it.
+ *
+ * The picker was a list of bare ids, which asks the user to already know three
+ * different vendors' naming schemes. What actually decides the choice here is
+ * where it runs (this machine or a network) and whether it can hold a tool loop
+ * together — so that is what the label says.
+ */
+function describe(ids: string[]): Array<{ id: string; label: string; hint: string; where: string }> {
+  return ids.map((id) => {
+    if (id.startsWith('local:')) {
+      const name = id.slice('local:'.length);
+      return {
+        id,
+        label: name,
+        where: 'On this machine',
+        hint: 'Runs offline, no key, nothing leaves the machine. Tool calling varies by model.',
+      };
+    }
+    if (id.startsWith('claude-')) {
+      return {
+        id,
+        label: id,
+        where: 'Anthropic',
+        hint: CLAUDE_MODEL_HINTS[id] ?? 'Claude model.',
+      };
+    }
+    return { id, label: id, where: 'xAI', hint: 'Grok model.' };
+  });
+}
+
 export function registerAgent(app: Hono): void {
   /**
    * The models the picker offers. Fetched live from xAI so it tracks their
@@ -52,14 +84,28 @@ export function registerAgent(app: Hono): void {
     // offers both backends. A `claude-*` id tells the client to use the WebSocket
     // branch (agent-claude.ts) instead of this HTTP proxy.
     const claude = CONFIG.hasClaude() ? [...CLAUDE_MODELS] : [];
-    const enabled = CONFIG.hasAnyAgent();
+    /**
+     * Local models are offered alongside the hosted ones, prefixed so the id
+     * itself says where a turn should go. A machine running Ollama gets an
+     * assistant with no key and no network.
+     */
+    const localIds = local.hasLocalAgent()
+      ? (local.localAgent()?.models ?? []).map((m) => `${local.LOCAL_PREFIX}${m}`)
+      : [];
+    const enabled = CONFIG.hasAnyAgent() || localIds.length > 0;
     // Prefer the Claude default (Haiku) when a Claude backend is present; fall
     // back to Grok's model only when Claude is not configured.
     const def = CONFIG.hasClaude() ? CONFIG.claudeModel : CONFIG.xaiModel;
 
     if (!CONFIG.hasAgent()) {
       // Grok off: the picker is Claude-only (or empty if nothing is configured).
-      return c.json({ models: claude, default: def, enabled });
+      const ids = [...claude, ...localIds];
+      return c.json({
+        models: ids,
+        catalogue: describe(ids),
+        default: localIds.length && !claude.length ? localIds[0] : def,
+        enabled,
+      });
     }
     try {
       const r = await fetch(`${CONFIG.xaiBaseUrl}/models`, {
@@ -68,8 +114,10 @@ export function registerAgent(app: Hono): void {
       if (!r.ok) throw new Error(String(r.status));
       const data = (await r.json()) as { data?: Array<{ id?: string }> };
       const grok = (data.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+      const ids = [...(grok.length ? grok.sort() : FALLBACK_MODELS), ...claude, ...localIds];
       return c.json({
-        models: [...(grok.length ? grok.sort() : FALLBACK_MODELS), ...claude],
+        models: ids,
+        catalogue: describe(ids),
         default: def,
         enabled,
       });
@@ -84,17 +132,28 @@ export function registerAgent(app: Hono): void {
    * never sees it) and `context` is a fresh snapshot of app state to inject.
    */
   app.post('/api/agent', async (c) => {
-    if (!CONFIG.hasAgent()) {
+    // Read the body ONCE — the request stream cannot be replayed — then decide
+    // where the turn goes.
+    const body = await c.req.json<{ model?: string; context?: string; messages?: WireMessage[] }>().catch(
+      () => ({}) as { model?: string; context?: string; messages?: WireMessage[] },
+    );
+
+    const requested = typeof body.model === 'string' && body.model ? body.model : '';
+    const wantsLocal = requested !== '' && local.isLocalModel(requested);
+
+    /**
+     * A local model needs no key, so the credential check must not run for it.
+     * Refusing an offline assistant because XAI_API_KEY is unset would be
+     * exactly backwards.
+     */
+    if (!wantsLocal && !CONFIG.hasAgent()) {
       return c.json(
         { error: 'The AI assistant is not configured. Set XAI_API_KEY on the server to enable it.' },
         400,
       );
     }
 
-    const body = await c.req.json<{ model?: string; context?: string; messages?: WireMessage[] }>().catch(
-      () => ({}) as { model?: string; context?: string; messages?: WireMessage[] },
-    );
-    const model = typeof body.model === 'string' && body.model ? body.model : CONFIG.xaiModel;
+    const model = requested || CONFIG.xaiModel;
     const context = typeof body.context === 'string' ? body.context : '';
     const history = Array.isArray(body.messages) ? body.messages : [];
 
@@ -106,6 +165,12 @@ export function registerAgent(app: Hono): void {
       : AGENT_SYSTEM_PROMPT;
 
     const messages: WireMessage[] = [{ role: 'system', content: system }, ...history];
+
+    if (wantsLocal) {
+      const result = await local.chat(local.stripPrefix(model), messages, AGENT_TOOLS);
+      if (result.error) return c.json({ error: result.error }, (result.status ?? 502) as 400 | 502);
+      return c.json({ message: result.message });
+    }
 
     try {
       const r = await fetch(`${CONFIG.xaiBaseUrl}/chat/completions`, {

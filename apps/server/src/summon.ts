@@ -10,6 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 
 import { CONFIG } from './config.ts';
+import { displaySize } from './ffmpeg.ts';
 import * as store from './store.ts';
 import { clipsOf } from './store.ts';
 
@@ -91,7 +92,7 @@ const MAX_REDIRECTS = 3;
  * actually needs. Every redirect hop is re-checked: a public host that 302s to
  * 169.254.169.254 is the standard way past a check done only on the first URL.
  */
-async function assertPublicUrl(raw: string): Promise<URL> {
+export async function assertPublicUrl(raw: string): Promise<URL> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -556,16 +557,30 @@ export async function probeAny(
   ]);
   const data = JSON.parse(out) as {
     format?: { duration?: string };
-    streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+    streams?: Array<{
+      codec_type?: string;
+      width?: number;
+      height?: number;
+      side_data_list?: Array<{ rotation?: number }>;
+      tags?: { rotate?: string };
+    }>;
   };
   const video = data.streams?.find((s) => s.codec_type === 'video');
   const audio = data.streams?.find((s) => s.codec_type === 'audio');
+
+  // This probe exists separately from ffmpeg.ts's only because that one THROWS
+  // on media with no audio track, which a summoned file may legitimately be.
+  // The rotation rule is the same either way: a vertical clip pulled off a URL
+  // or out of a granted folder is stored landscape with a Display Matrix, and
+  // reporting the stored numbers describes it as landscape to the assistant.
+  const { width, height } = displaySize(video);
+
   return {
     duration: Number(data.format?.duration ?? 0) || 0,
     hasVideo: Boolean(video),
     hasAudio: Boolean(audio),
-    width: video?.width,
-    height: video?.height,
+    width,
+    height,
   };
 }
 
@@ -947,6 +962,30 @@ export function registerSummon(app: Hono): void {
    * with no path. See grantFolder.
    */
   app.post('/api/local/grant', async (c) => {
+    /**
+     * ⚠️ Known weakness, gated rather than solved.
+     *
+     * The guarantee this route is built on is that `path` and `said` come from
+     * two INDEPENDENT sources — the model claims a folder, the browser reports
+     * what the user actually typed, and a grant issues only where they agree.
+     * Over HTTP that separation does not exist: both arrive in the same JSON
+     * body, so one caller supplies both halves and the check reduces to "does
+     * this string contain that string", which the caller also controls.
+     *
+     * Before the API required a credential this was an unauthenticated
+     * read-any-local-directory from the network: grant a folder, list it via
+     * GET /api/local/media, then copy any file into uploads/ where it is served.
+     * Auth and the loopback bind close the network route. This gate closes the
+     * rest for anyone who does not want the capability at all, and matters more
+     * now that an external agent may hold the token — see the note in
+     * agent-tools about use_folder.
+     *
+     * The real fix is to take `said` from server-held conversation state instead
+     * of the request body. That is a larger change than this one.
+     */
+    if (!CONFIG.summonEnabled) {
+      return c.json({ error: 'Sharing local folders is switched off on this server (SUMMON=off).' }, 403);
+    }
     const body = await c.req.json<{ path?: string; said?: unknown }>().catch(() => ({}));
     if (!body.path) return c.json({ error: 'Provide path.' }, 400);
     const said = Array.isArray(body.said) ? body.said.filter((s): s is string => typeof s === 'string') : [];

@@ -50,6 +50,22 @@ export interface Doc {
    */
   studioSound: boolean;
   /**
+   * Clean the voice with the trained denoiser rather than the filter chain.
+   *
+   * A different KIND of thing from studioSound despite sitting beside it: that is
+   * ffmpeg filters applied while encoding, this is a separate model that has to
+   * run over the source first. It is here anyway because from the document's
+   * point of view both are the same decision — how the finished audio should
+   * sound — and both must undo and survive a reload.
+   */
+  denoise: boolean;
+  /**
+   * Playback rate per clip id. A clip absent from here runs at `speed`, which is
+   * therefore the project-wide default rather than a competing setting — that is
+   * what lets "make every clip 1.2x" be one number instead of an edit to each.
+   */
+  clipSpeeds: Record<string, number>;
+  /**
    * The output frame: what shape the finished video is, and which part of the
    * source survives the crop.
    *
@@ -166,6 +182,8 @@ export type DocPatch =
   | { kind: 'captions'; prev: CaptionSettings; next: CaptionSettings }
   | { kind: 'speed'; prev: number; next: number }
   | { kind: 'studioSound'; prev: boolean; next: boolean }
+  | { kind: 'denoise'; prev: boolean; next: boolean }
+  | { kind: 'clipSpeeds'; prev: Record<string, number>; next: Record<string, number> }
   | { kind: 'frame'; prev: FrameSettings; next: FrameSettings }
   | { kind: 'color'; prev: ColorSettings; next: ColorSettings }
   | { kind: 'overlays'; prev: ImageOverlay[]; next: ImageOverlay[] }
@@ -191,11 +209,13 @@ export function docFromTranscript(
   captions: CaptionSettings = DEFAULT_CAPTIONS,
   speed: number = DEFAULT_SPEED,
   studioSound: boolean = false,
+  denoise: boolean = false,
+  clipSpeeds: Record<string, number> = {},
   frame: FrameSettings = DEFAULT_FRAME,
   color: ColorSettings = DEFAULT_COLOR,
   overlays: ImageOverlay[] = [],
 ): Doc {
-  return { words: transcript.words, cut, captions, speed, studioSound, frame, color, overlays, rev: 0 };
+  return { words: transcript.words, cut, captions, speed, studioSound, denoise, clipSpeeds, frame, color, overlays, rev: 0 };
 }
 
 /** The word ids a patch touches. Free — the patch already lists them. */
@@ -228,6 +248,8 @@ export function affectedIds(patch: DocPatch): string[] {
     // Falling off the end of this switch returns undefined, and undo() hands the
     // result straight to the caller as `affected`, where .length throws.
     case 'studioSound':
+    case 'denoise':
+    case 'clipSpeeds':
     case 'frame':
     case 'color':
     case 'overlays':
@@ -253,6 +275,10 @@ export function invertPatch(patch: DocPatch): DocPatch {
       return { kind: 'speed', prev: patch.next, next: patch.prev };
     case 'studioSound':
       return { kind: 'studioSound', prev: patch.next, next: patch.prev };
+    case 'denoise':
+      return { kind: 'denoise', prev: patch.next, next: patch.prev };
+    case 'clipSpeeds':
+      return { kind: 'clipSpeeds', prev: patch.next, next: patch.prev };
     case 'frame':
       return { kind: 'frame', prev: patch.next, next: patch.prev };
     case 'color':
@@ -296,6 +322,10 @@ export function applyPatch(doc: Doc, patch: DocPatch): Doc {
       return { ...doc, speed: patch.next, rev: doc.rev + 1 };
     case 'studioSound':
       return { ...doc, studioSound: patch.next, rev: doc.rev + 1 };
+    case 'denoise':
+      return { ...doc, denoise: patch.next, rev: doc.rev + 1 };
+    case 'clipSpeeds':
+      return { ...doc, clipSpeeds: { ...patch.next }, rev: doc.rev + 1 };
     case 'frame':
       return { ...doc, frame: { ...patch.next }, rev: doc.rev + 1 };
     case 'color':

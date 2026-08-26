@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import {
   clampScroll,
@@ -12,7 +12,7 @@ import {
 import type { Edl } from '../../../packages/core/src/types.ts';
 import type { Thumbs } from './api.ts';
 import Icon from './ui/Icon.tsx';
-import { drawOverlay, drawStatic, fitCanvas, readPalette, type Geometry, type Palette } from './timeline/draw.ts';
+import { drawClipLane, drawOverlay, drawStatic, fitCanvas, readPalette, type Geometry, type Palette } from './timeline/draw.ts';
 import { useFilmstrip } from './timeline/useFilmstrip.ts';
 
 interface Props {
@@ -49,10 +49,21 @@ interface Props {
   onMusicResize?: (endSourceSec: number) => void;
   /** "Duplicate to fill": loop the bed across the whole video. */
   onMusicFill?: () => void;
+  /**
+   * The clips in play order, for the lane you drag them by. One clip (or none)
+   * means nothing to reorder and the lane is not drawn at all.
+   */
+  clipLane?: { id: string; label: string }[];
+  /** Commit a new play order. Called once, on drop, with every id in its new place. */
+  onReorderClips?: (ids: string[]) => void;
 }
 
 const RULER_H = 22;
 const FILM_H = 54;
+/** Ceiling on the filmstrip lane, so a vertical source cannot swallow the dock. */
+const FILM_MAX_H = 96;
+/** The clip lane. Tall enough to grab and read a name in, short enough to stay a strip. */
+const CLIP_H = 20;
 
 /**
  * The waveform, with cut material shown as removed.
@@ -85,6 +96,8 @@ export default function Timeline({
   music,
   onMusicResize,
   onMusicFill,
+  clipLane,
+  onReorderClips,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const staticRef = useRef<HTMLCanvasElement>(null);
@@ -119,9 +132,43 @@ export default function Timeline({
   const film = useFilmstrip(thumbs);
   // No lane at all when there is no picture — an empty 54px band would just be
   // the void the left rail used to be, moved down here.
-  const filmH = film ? FILM_H : 0;
+  /**
+   * The filmstrip lane's height follows the TILE's shape.
+   *
+   * A fixed 54px band is right for landscape and wrong for the shape this
+   * editor now defaults to: a 9:16 tile fitted into 54px is about 30px wide,
+   * which reads as a ruler rather than a picture. The server already sizes a
+   * portrait tile taller than a landscape one (see planThumbs), so the lane just
+   * has to stop capping it — bounded so a very tall source cannot eat the dock.
+   */
+  const filmH = film
+    ? Math.round(Math.min(FILM_MAX_H, Math.max(FILM_H, (FILM_H * film.tileH) / Math.max(1, film.tileW))))
+    : 0;
 
-  const geo: Geometry = { width: size.width, height: size.height, rulerH: RULER_H, filmH };
+  /**
+   * The lane exists only when there is something to reorder. A single-clip
+   * project has one block filling the width, which would be a control that
+   * cannot do anything — so it gets no lane and no height.
+   */
+  const laneClips = useMemo(() => {
+    if (!clipLane || clipLane.length < 2 || !edl?.clips) return [];
+    const byId = new Map(clipLane.map((c) => [c.id, c.label]));
+    return edl.clips.map((c) => ({
+      id: c.clipId,
+      offset: c.offset,
+      duration: c.sourceDuration,
+      label: byId.get(c.clipId) ?? 'Clip',
+    }));
+  }, [clipLane, edl]);
+
+  const clipH = laneClips.length >= 2 ? CLIP_H : 0;
+
+  /** Which clip is in hand, and where it would land. Drawn by drawClipLane. */
+  const [clipDrag, setClipDrag] = useState<{ id: string; dropIndex: number } | null>(null);
+  const [clipHover, setClipHover] = useState<string | null>(null);
+
+
+  const geo: Geometry = { width: size.width, height: size.height, rulerH: RULER_H, filmH, clipH };
   const dpr = window.devicePixelRatio || 1;
 
   const map = sourceMap(view.pxPerSec, view.scrollSec, duration);
@@ -156,9 +203,16 @@ export default function Timeline({
     paletteRef.current = readPalette(canvas);
     const ctx = fitCanvas(canvas, size.width, size.height, dpr);
     drawStatic(ctx, geo, map, peaks, edl, paletteRef.current, dpr, film);
+    // The clip lane rides on the static layer: it changes when the clips or the
+    // drag do, not every frame like the playhead.
+    drawClipLane(ctx, geo, map, laneClips, paletteRef.current, dpr, {
+      dragId: clipDrag?.id ?? null,
+      dropIndex: clipDrag?.dropIndex ?? null,
+      hoverId: clipHover,
+    });
     // `film` changes identity as each sheet decodes, which is what repaints the
     // strip progressively.
-  }, [peaks, edl, film, size.width, size.height, view.pxPerSec, view.scrollSec, duration, dpr]);
+  }, [peaks, edl, film, size.width, size.height, view.pxPerSec, view.scrollSec, duration, dpr, laneClips, clipDrag, clipHover, clipH]);
 
   // --- overlay: every frame, outside React ------------------------------------
   useEffect(() => {
@@ -224,9 +278,20 @@ export default function Timeline({
       // the native listener below.
       return;
     }
+    /**
+     * Both axes pan, and the DOMINANT one wins.
+     *
+     * Only deltaY was read before, which quietly broke the one gesture a Mac
+     * user reaches for first: a two-finger horizontal swipe sends deltaX and
+     * nothing else, so sliding sideways along the timeline did nothing at all.
+     * Taking whichever axis is larger means a horizontal swipe pans, a vertical
+     * one still pans (a timeline has no vertical axis to spend it on), and a
+     * sloppy diagonal does not count twice and lurch.
+     */
+    const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
     setView((prev) => ({
       ...prev,
-      scrollSec: clampScroll(prev.scrollSec + e.deltaY / prev.pxPerSec, prev.pxPerSec, size.width, duration),
+      scrollSec: clampScroll(prev.scrollSec + delta / prev.pxPerSec, prev.pxPerSec, size.width, duration),
     }));
     manualUntil.current = Date.now() + 2000;
   };
@@ -259,13 +324,90 @@ export default function Timeline({
     return () => host.removeEventListener('wheel', onNativeWheel);
   }, [size.width, duration]);
 
-  const drag = useRef<{ mode: 'scrub' | 'select'; startTime: number; moved: boolean } | null>(null);
+  /**
+   * The zoom keys the buttons have always advertised: −, + and \ to fit.
+   *
+   * Their tooltips named these three from the start and nothing was ever bound
+   * to them, so pressing the key the app told you about did nothing — the
+   * cheapest possible way to make software feel broken.
+   *
+   * Bound here rather than in App because the view state lives here. The guards
+   * match App's global handler: never while typing, never through a modal.
+   */
+  useEffect(() => {
+    if (size.width === 0 || duration === 0) return;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (document.activeElement?.closest('input,textarea,select,[contenteditable]')) return;
+      if (document.querySelector('dialog[open]')) return;
+
+      if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        setView((p) => zoomStep(p, size.width, duration, 1 / 1.5));
+      } else if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        setView((p) => zoomStep(p, size.width, duration, 1.5));
+      } else if (e.key === '\\') {
+        e.preventDefault();
+        zoomToFit();
+      } else {
+        return;
+      }
+      manualUntil.current = Date.now() + 2000;
+    };
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [size.width, duration, zoomToFit]);
+
+  const drag = useRef<
+    | { mode: 'scrub' | 'select'; startTime: number; moved: boolean }
+    | { mode: 'pan'; startX: number; startScroll: number; moved: boolean }
+    | { mode: 'clip'; startX: number; moved: boolean }
+    | null
+  >(null);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (duration === 0) return;
     const rect = hostRef.current!.getBoundingClientRect();
     const onRuler = e.clientY - rect.top < RULER_H;
     const time = clamp(timeAt(e.clientX), 0, duration);
+
+    /**
+     * Drag to PAN — the hand tool, on the middle button or with Alt held.
+     *
+     * Scrubbing and selecting already own the two zones, so panning needed a
+     * gesture of its own rather than a third zone. Middle-drag is what every
+     * NLE and every map does; Alt-drag is the same thing for a trackpad, which
+     * has no middle button. Neither collides with an existing binding.
+     */
+    /**
+     * The clip lane owns its own band, between the ruler and the filmstrip.
+     * Zones rather than modifiers, matching how the ruler scrubs and the
+     * waveform selects — a clip is a thing you point at, so pointing at it is
+     * how you pick it up.
+     */
+    const laneTop = RULER_H;
+    const inLane = clipH > 0 && e.clientY - rect.top >= laneTop && e.clientY - rect.top < laneTop + clipH;
+    if (inLane && !e.altKey && e.button === 0) {
+      const held = laneClips.find((c) => time >= c.offset && time < c.offset + c.duration);
+      if (held) {
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setClipDrag({ id: held.id, dropIndex: laneClips.findIndex((c) => c.id === held.id) });
+        drag.current = { mode: 'clip', startX: e.clientX, moved: false };
+        return;
+      }
+    }
+
+    if (e.button === 1 || e.altKey) {
+      e.preventDefault();
+      drag.current = { mode: 'pan', startX: e.clientX, startScroll: viewRef.current.scrollSec, moved: false };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      manualUntil.current = Date.now() + 2000;
+      return;
+    }
 
     // Zone-based: the ruler scrubs, the waveform selects. That is Premiere and
     // Audition's split, and it removes the click/drag ambiguity entirely.
@@ -279,8 +421,52 @@ export default function Timeline({
     const time = clamp(timeAt(e.clientX), 0, duration);
     setHoverTime(time);
 
+    // Which clip the pointer is over, so the lane can light it up and the cursor
+    // can say "this is draggable" before you commit to pressing.
+    if (clipH > 0 && !drag.current) {
+      const rect = hostRef.current!.getBoundingClientRect();
+      const dy = e.clientY - rect.top;
+      const over =
+        dy >= RULER_H && dy < RULER_H + clipH
+          ? laneClips.find((c) => time >= c.offset && time < c.offset + c.duration)?.id ?? null
+          : null;
+      if (over !== clipHover) setClipHover(over);
+    }
+
     const d = drag.current;
     if (!d) return;
+
+    if (d.mode === 'clip') {
+      if (Math.abs(e.clientX - d.startX) > 3) d.moved = true;
+      /**
+       * The slot the clip would take, found by the pointer's position against
+       * each block's MIDPOINT — past halfway means it belongs on the far side.
+       * That is the standard reorder feel and it makes the last slot reachable,
+       * which a "which block am I over" test never does.
+       */
+      let index = laneClips.length;
+      for (let i = 0; i < laneClips.length; i++) {
+        const mid = laneClips[i].offset + laneClips[i].duration / 2;
+        if (time < mid) { index = i; break; }
+      }
+      setClipDrag((prev) => (prev && prev.dropIndex !== index ? { ...prev, dropIndex: index } : prev));
+      return;
+    }
+
+    if (d.mode === 'pan') {
+      // Pixels dragged become seconds scrolled, against the drag: the timeline
+      // follows the hand, so content moves WITH the pointer the way it does when
+      // you push paper across a desk.
+      const dx = e.clientX - d.startX;
+      if (Math.abs(dx) > 3) d.moved = true;
+      setView((prev) => ({
+        ...prev,
+        scrollSec: clampScroll(d.startScroll - dx / prev.pxPerSec, prev.pxPerSec, size.width, duration),
+      }));
+      manualUntil.current = Date.now() + 2000;
+      return;
+    }
+
     if (Math.abs(map.toX(time) - map.toX(d.startTime)) > 3) d.moved = true;
 
     if (d.mode === 'scrub') {
@@ -297,6 +483,25 @@ export default function Timeline({
     drag.current = null;
     if (!d) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
+
+    if (d.mode === 'clip') {
+      const held = clipDrag;
+      setClipDrag(null);
+      if (!held || !d.moved || !onReorderClips) return;
+
+      const from = laneClips.findIndex((c) => c.id === held.id);
+      // Removing the clip first shifts every later slot down by one, so a drop
+      // index past the origin has to come back by one to mean the same gap.
+      const to = held.dropIndex > from ? held.dropIndex - 1 : held.dropIndex;
+      if (from < 0 || to === from) return;
+
+      const ids = laneClips.map((c) => c.id);
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      onReorderClips(ids);
+      return;
+    }
+
     // A click in the waveform seeks; only a drag selects.
     if (d.mode === 'select' && !d.moved) {
       onSeek(d.startTime);
@@ -368,7 +573,11 @@ export default function Timeline({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={() => setHoverTime(null)}
+        onPointerLeave={() => { setHoverTime(null); setClipHover(null); }}
+        /* The cursor is the affordance: a clip you can pick up says so before
+           you press, and says "held" while you drag it. Without this the lane
+           looks like more chrome. */
+        style={clipDrag ? { cursor: 'grabbing' } : clipHover ? { cursor: 'grab' } : undefined}
       >
         <canvas ref={staticRef} className="tl-layer" />
         <canvas ref={overlayRef} className="tl-layer tl-overlay" />

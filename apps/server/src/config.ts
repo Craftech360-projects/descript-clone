@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 /** The ElevenLabs speech-to-text endpoint. One call: the body is the audio. */
 export const ASR_ENDPOINT = 'https://api.elevenlabs.io/v1/speech-to-text';
 export const SARVAM_ASR_ENDPOINT = 'https://api.sarvam.ai';
+export const DEEPGRAM_ASR_ENDPOINT = 'https://api.deepgram.com/v1/listen';
 
 /**
  * Transcription models the user can pick between in the Transcribe panel.
@@ -26,10 +27,40 @@ export const SARVAM_ASR_ENDPOINT = 'https://api.sarvam.ai';
  * report verbatim:false, i.e. that normalize away the fillers this product
  * exists to remove. Losing them costs the product nothing it was using.
  */
+/**
+ * Whether on-device speech is usable, as a plain synchronous boolean.
+ *
+ * Deciding this properly means touching the filesystem (is the helper built?)
+ * and possibly the toolchain (is swiftc here?), which is async — but `hasAsr()`
+ * is read inside request handlers that cannot await. So the async probe runs
+ * once at startup and parks its answer here.
+ *
+ * It starts FALSE rather than unknown: before the probe has run, claiming a
+ * provider exists would offer the user a model that might not.
+ */
+let appleSpeechAvailable = false;
+
+export function appleSpeechReady(): boolean {
+  return appleSpeechAvailable;
+}
+
+export function setAppleSpeechReady(value: boolean): void {
+  appleSpeechAvailable = value;
+}
+
 export const ASR_MODELS = [
   {
     id: 'scribe_v1',
     provider: 'elevenlabs',
+    /**
+     * What this model needs before it can run, in words a person can act on.
+     *
+     * The Transcribe panel used to derive this with a ternary over the provider
+     * id, which meant every model that was not Sarvam claimed to need
+     * ELEVENLABS_API_KEY — including the on-device one, which needs no key at all
+     * and cannot be fixed by adding one. Requirements belong beside the model.
+     */
+    requires: 'an ElevenLabs API key',
     label: 'ElevenLabs Scribe',
     hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings + diarization. Filler removal needs this.',
     verbatim: true,
@@ -38,14 +69,34 @@ export const ASR_MODELS = [
   {
     id: 'saaras_v3',
     provider: 'sarvam',
+    requires: 'a Sarvam API key',
     label: 'Sarvam Saaras v3',
     hint: 'Indic-language ASR with verbatim mode. Phrase timings are distributed across words for editing.',
     verbatim: true,
     verified: true,
   },
   {
+    id: 'apple_speech',
+    provider: 'apple',
+    requires: 'macOS 26 or newer on this Mac — no key, and no way to add one',
+    label: 'Apple On-Device (Mac)',
+    hint: 'Verbatim: keeps "um"/"uh" as spoken. Word timings, no key, no upload. No speaker labels.',
+    verbatim: true,
+    verified: true,
+  },
+  {
+    id: 'nova_3',
+    provider: 'deepgram',
+    requires: 'a Deepgram API key',
+    label: 'Deepgram Nova-3',
+    hint: 'Verbatim with filler_words on: keeps "um"/"uh". Word timings + diarization. Fast, and works on any Mac.',
+    verbatim: true,
+    verified: false,
+  },
+  {
     id: 'mock',
     provider: 'mock',
+    requires: 'nothing',
     label: 'Mock (no API cost)',
     hint: 'Fake words, real timings. Exercises the whole pipeline for free.',
     verbatim: true,
@@ -71,6 +122,44 @@ export type AsrProviderId = (typeof ASR_MODELS)[number]['provider'];
 export const CONFIG = {
   port: Number(process.env.PORT ?? 8787),
 
+  /**
+   * Which interface to listen on. Loopback by default.
+   *
+   * This used to be unset, and @hono/node-server's default is to bind `::` —
+   * EVERY interface. So an editor started on a laptop was reachable from any
+   * machine on the same cafe wifi, and the startup line said "http://localhost"
+   * while it did so, which is not a small imprecision but the opposite of the
+   * truth. There is no authentication on most of this API (see auth.ts for what
+   * there is now), transcripts sit behind a plain GET, and POST /api/settings/keys
+   * rewrites every credential the app holds. None of that is safe to offer a
+   * network, and nobody running `npm run app` was choosing to.
+   *
+   * Docker and any other deliberate multi-host deployment must set HOST=0.0.0.0,
+   * which the Dockerfile and compose file now do. That is the right shape: a
+   * container publishing a port has already made the decision explicitly, and a
+   * developer on a laptop has not.
+   */
+  host: process.env.HOST ?? '127.0.0.1',
+
+  /**
+   * Which video encoder the caption-burn pass uses.
+   *
+   * 'x264' is software: slower and CPU-hungry, and the quality-per-byte other
+   * encoders are measured against. 'videotoolbox' hands the work to the
+   * dedicated encoder block on Apple Silicon — several times faster and leaves
+   * the CPU free, at some cost in quality for the same file size.
+   *
+   * Software stays the default because it is the safe answer everywhere: the
+   * hardware path exists only on macOS, and on a machine without it ffmpeg
+   * fails with an unhelpful error rather than falling back. renderEncoderArgs()
+   * checks availability and degrades instead.
+   *
+   * Worth switching on a Mac mini acting as a render server, where a render that
+   * pins six cores for two minutes is the difference between "I can keep editing"
+   * and "I'll wait".
+   */
+  videoEncoder: (process.env.VIDEO_ENCODER || 'x264').toLowerCase(),
+
   // The credential fields below are GETTERS, not captured values, so a key set at
   // runtime from the dashboard (which writes process.env — see settings.ts) takes
   // effect on the very next request without a restart. The Claude SDK reads
@@ -88,6 +177,18 @@ export const CONFIG = {
   /** Sarvam API key for Saaras v3 speech-to-text. Runtime-editable like the ElevenLabs key. */
   get sarvamApiKey() {
     return process.env.SARVAM_API_KEY || process.env.__BAKED_SARVAM_KEY__ || '';
+  },
+
+  /**
+   * Deepgram API key for Nova-3 speech-to-text. Runtime-editable like the rest.
+   *
+   * Worth having specifically for Macs that cannot run the on-device model:
+   * SpeechTranscriber needs macOS 26, which rules out every Intel Mac mini, and
+   * without a cloud provider those machines fall back to the mock and silently
+   * produce fake words.
+   */
+  get deepgramApiKey() {
+    return process.env.DEEPGRAM_API_KEY || '';
   },
 
   /**
@@ -162,11 +263,41 @@ export const CONFIG = {
    * (not `??`) so an empty env var falls back rather than spawning "".
    */
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+
+  /**
+   * DeepFilterNet's CLI, for cleaning speech recorded outdoors.
+   *
+   * Not an ffmpeg filter and deliberately not bundled: it is a Python tool whose
+   * working combination is narrow — DeepFilterNet 0.5.6 wants torchaudio < 2.1,
+   * because `torchaudio.backend` was removed after that, and its native wheel
+   * only reaches CPython 3.11. Pinning all of that inside the app would tie the
+   * whole product to one fragile dependency set for one optional feature. So it
+   * lives in its own venv, is found by path, and is simply absent when it is not
+   * installed — the same graceful degradation image generation has without a key.
+   */
+  deepFilterBin: process.env.DEEPFILTER_BIN || '',
   ffprobePath: process.env.FFPROBE_PATH || 'ffprobe',
 
   /** Whether real transcription is available. Without it, the mock provider runs. */
   hasAsr(): boolean {
-    return (Boolean(this.elevenLabsKey) || Boolean(this.sarvamApiKey)) && process.env.ASR_PROVIDER !== 'mock';
+    if (process.env.ASR_PROVIDER === 'mock') return false;
+    return (
+      Boolean(this.elevenLabsKey) ||
+      Boolean(this.sarvamApiKey) ||
+      Boolean(this.deepgramApiKey) ||
+      appleSpeechReady()
+    );
+  },
+
+  /**
+   * On-device speech is the one provider with no credential to check, so its
+   * availability is a fact about the MACHINE rather than about configuration.
+   * The real probe is async (it may have to compile a helper); this synchronous
+   * getter reads a flag that `refreshAppleSpeech` sets at boot, because
+   * `hasAsr()` is called from request handlers that cannot await.
+   */
+  hasAppleSpeech(): boolean {
+    return appleSpeechReady() && process.env.ASR_PROVIDER !== 'mock';
   },
 
   hasElevenLabsAsr(): boolean {
@@ -175,6 +306,10 @@ export const CONFIG = {
 
   hasSarvamAsr(): boolean {
     return Boolean(this.sarvamApiKey) && process.env.ASR_PROVIDER !== 'mock';
+  },
+
+  hasDeepgramAsr(): boolean {
+    return Boolean(this.deepgramApiKey) && process.env.ASR_PROVIDER !== 'mock';
   },
 
   /** Whether the Grok assistant is configured — it needs an xAI key and nothing else. */
@@ -209,6 +344,22 @@ export const CONFIG = {
    * NOT live when the filesystem is ephemeral.
    */
   mediaDir: process.env.MEDIA_DIR ?? fileURLToPath(new URL('../../../media/', import.meta.url)),
+
+  /**
+   * Where the app's own state lives — everything that is NOT media.
+   *
+   * Separate from mediaDir for one reason, and it is not tidiness: mediaDir is
+   * served statically at /media so the browser can fetch uploads, posters and
+   * renders. Anything written there is downloadable by anyone who can reach the
+   * server. Folder memories were briefly kept in media/folders.json and were
+   * readable at /media/folders.json — a user's private notes about their family,
+   * served over HTTP. `settings.ts` documents this same trap for API keys.
+   *
+   * So: media is what the browser must fetch; data is what only the server
+   * reads. DATA_DIR points it at a mounted volume in a container, for the same
+   * reason MEDIA_DIR exists.
+   */
+  dataDir: process.env.DATA_DIR ?? fileURLToPath(new URL('../../../data/', import.meta.url)),
 
   /**
    * Serve the built web app from this server when set, so one container is the

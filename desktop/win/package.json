@@ -1,6 +1,6 @@
 {
-  "name": "transcript-editor",
-  "productName": "Transcript Editor",
+  "name": "jumpstart",
+  "productName": "Jumpstart",
   "version": "0.1.0",
   "description": "Edit video and audio by editing the transcript.",
   "author": "You <you@example.com>",
@@ -21,11 +21,21 @@
     "esbuild": "^0.24.2"
   },
   "build": {
-    "appId": "com.example.transcript-editor",
-    "productName": "Transcript Editor",
-    "directories": { "output": "dist" },
-    "files": ["main.cjs", "package.json"],
-    "extraResources": [{ "from": "resources", "to": "." }],
+    "appId": "com.jumpstart.editor",
+    "productName": "Jumpstart",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "."
+      }
+    ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/@ffprobe-installer/**"

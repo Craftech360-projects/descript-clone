@@ -183,7 +183,18 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* The wordmark itself, at title-bar height. It is gold on transparent, so it
  * lands on the warm-black chrome without a plate. No text brand beside it — the
  * mark says "JumpCut" already. */
-.tb-logo { height: 21px; width: auto; display: block; flex-shrink: 0; user-select: none; }
+/*
+ * The wordmark, as TEXT rather than the old jumpcut.png.
+ *
+ * A bitmap wordmark has to be redrawn to rename the app, does not sharpen on a
+ * retina display unless you ship two of them, and cannot follow the theme. This
+ * is one string and one rule, and it inherits --accent like everything else.
+ */
+.tb-logo {
+  flex-shrink: 0; user-select: none; white-space: nowrap;
+  font-size: 15px; font-weight: 700; letter-spacing: -.015em;
+  color: var(--accent);
+}
 .tb-brand {
   font-size: var(--t-base); font-weight: 650; letter-spacing: -.02em;
   color: var(--text); flex-shrink: 0;
@@ -451,6 +462,22 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--text);
   border-color: var(--line-strong, var(--line));
 }
+/* The keyboard legend under it. --faint is the quietest text the palette has
+ * that still clears AA (6.9:1) — this is reference material you read once, not
+ * a control, and it must not compete with the button above it. */
+.script-keys {
+  margin-top: var(--s-3);
+  font-size: var(--t-micro);
+  color: var(--faint);
+  line-height: 1.9;
+}
+.script-keys kbd {
+  font: inherit;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
 
 .canvas-empty { max-width: 460px; margin: 12vh auto 0; text-align: center; }
 .canvas-empty h2 { font-size: var(--t-title); font-weight: 500; margin-bottom: var(--s-1); letter-spacing: -.02em; }
@@ -518,9 +545,31 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   text-decoration-color: color-mix(in srgb, var(--cut) 75%, transparent);
   text-decoration-thickness: 1.5px;
 }
+/* The keyboard cursor.
+ *
+ * :focus-visible, not :focus — a word takes DOM focus on mousedown too (that is
+ * what a roving tabindex costs), and a ring left behind by every click would be
+ * noise on top of the amber the click already draws.
+ *
+ * It has to be a SECOND signal, not a louder version of the selection: while
+ * Shift+Arrow extends a run, every word in it is amber and only this ring says
+ * which end is about to move. Hence a ring rather than another fill. */
+.w:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
 /* Black on amber: a highlighter on a page. --accent-fg is not optional here —
  * white on #ffb224 measures 1.8:1. This pair measures 10.8:1. */
 .w.sel { background: var(--accent); color: var(--accent-fg); }
+/* --focus is light gold, and on the gold a selection fills with it measures
+ * 1.56:1 — i.e. the ring would vanish on exactly the word that has it, since the
+ * cursor word is nearly always the selected one. Warm-black is the pair that
+ * reads there: 8.46:1 on --accent, 6.51:1 on the terracotta a selected CUT word
+ * takes. :not(.playing) because the karaoke fill is --accent-dim, a DARK amber
+ * that wins the cascade over .sel — light gold reads on it at 7.6:1 and
+ * warm-black would drop to 1.74:1. */
+.w.sel:not(.playing):focus-visible { outline-color: var(--accent-fg); }
 /* Selected AND cut: solid rose, keeping the strike. It cannot be a dark tint —
  * .w.sel has already committed the text to black, so the fill has to stay light
  * enough to carry it. Measured 6.2:1. */
@@ -955,6 +1004,50 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
  * within one Field do not. */
 .sect-body > .field + .field { margin-top: var(--s-3); }
 
+/* ---- tighten for reels ----
+ *
+ * The one action that spans three of the sections below it, so it sits ABOVE
+ * them and outside the ruled list — a row in that list is a thing you open, and
+ * this is a thing you press.
+ *
+ * Not painted .primary, though it is the most-used control in this panel. The
+ * gold is Export's, and a panel with two primaries has none: the button that
+ * spends minutes of render and produces the file has to be the loudest thing on
+ * screen. This one earns its place by being first and full-width instead.
+ */
+.tighten {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding-bottom: var(--s-3);
+}
+.tighten-go { width: 100%; }
+
+/* Same paint as the app's own notice, because it is the same kind of message:
+ * what just happened, dismissed by clicking it. */
+.tighten-report {
+  padding: var(--s-2) 10px; border-radius: var(--r-2);
+  background: var(--info-bg); border: 1px solid var(--info-line); color: var(--info-fg);
+  font-size: var(--t-small); line-height: 1.6;
+  cursor: pointer;
+}
+
+/* The preview, in the dialog. One box per step so the counts are countable at a
+ * glance rather than parsed out of a sentence — deciding whether to sweep a take
+ * is deciding about those three numbers and nothing else. */
+.tighten-list {
+  list-style: none; padding: 0;
+  display: flex; flex-direction: column; gap: var(--s-1);
+  /* Pulled back against .dl-body's 24px gap: "This will:" is this list's LABEL,
+   * and a label a full paragraph-break away from its list stops reading as one.
+   * Everything below it keeps the dialog's own rhythm. */
+  margin: calc(var(--s-5) * -1 + var(--s-2)) 0 0;
+}
+.tighten-list li {
+  padding: var(--s-2) var(--s-3);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  font-size: var(--t-ui); color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 /* The one big number: what you are actually making. */
 .hero {
   display: flex; flex-direction: column; gap: var(--s-0);
@@ -1247,11 +1340,15 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 /* The filter goes on this wrapper, never on the button: it would take the border
  * and the focus ring with it, so the "chosen" gold would be graded too — and on
  * the Mono chip it would come out grey, which is the one thing it must not do. */
+/* 4:5 and CONTAIN, for the reason .dc-poster gives: this chip is a swatch you
+ * pick a colour grade off, and under 16:9 + cover a vertical frame was cropped
+ * to a horizontal band across its middle. You were choosing a look from a strip
+ * of whatever happened to be at the centre of the picture. */
 .grade-chip-img {
   display: block; overflow: hidden; border-radius: 3px;
-  aspect-ratio: 16 / 9; background: var(--void);
+  aspect-ratio: 4 / 5; background: var(--void);
 }
-.grade-chip-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.grade-chip-img img { width: 100%; height: 100%; object-fit: contain; display: block; }
 /* Stand-in for a project whose poster the server has not built yet. A ramp
  * rather than a flat colour, so a contrast or a lift is still visible on it. */
 .grade-chip-ramp {
@@ -1278,6 +1375,49 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--faint); font-size: 14px; line-height: 1;
 }
 .chip button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+
+/* ---- saved caption styles ----
+ *
+ * A wrapping row of names, above the dozen controls they stand in for. Names
+ * rather than rendered swatches: a caption look is type on top of MOVING
+ * footage, so a 60px thumbnail of it would show two illegible words over one
+ * frame of one video — it would be decoration pretending to be information. The
+ * name is what you called it, and the monitor behind the panel is already
+ * showing the real thing the moment you click.
+ *
+ * The chip is two buttons in one shell — pick, and delete — so the delete is a
+ * real target rather than a modifier-click, and so neither is nested inside the
+ * other (a button inside a button is not a thing HTML has).
+ */
+.cap-styles { display: flex; flex-direction: column; gap: var(--s-2); }
+.style-chips {
+  display: flex; flex-wrap: wrap; gap: var(--s-1);
+  list-style: none; padding: 0; margin: 0;
+}
+.style-chip {
+  display: inline-flex; align-items: stretch;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-full);
+  overflow: hidden;
+}
+.style-chip:hover { border-color: var(--line-strong); }
+/* Gold border and tinted fill for the look currently ON, which is the same
+ * "this one is chosen" the grade chips and the open section use. */
+.style-chip.on { border-color: var(--accent); background: var(--accent-tint); }
+.style-pick {
+  padding: 3px var(--s-2); max-width: 15ch;
+  background: none; border: none; border-radius: 0;
+  font-size: var(--t-small); color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.style-pick:hover:not(:disabled) { background: var(--hover); border-color: transparent; color: var(--text); }
+.style-chip.on .style-pick { color: var(--text); }
+.style-x {
+  display: grid; place-items: center;
+  width: 20px; padding: 0;
+  background: none; border: none; border-radius: 0;
+  color: var(--faint); font-size: 14px; line-height: 1;
+}
+.style-x:hover:not(:disabled) { background: var(--hover); border-color: transparent; color: var(--cut); }
 
 /* The caption font control: the dropdown, then a row of text-button actions —
  * import always, remove only while an imported font is selected. The actions read
@@ -1685,7 +1825,11 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   display: flex; align-items: center; gap: var(--s-3);
   padding-top: var(--s-5); padding-bottom: var(--s-5);
 }
-.dash-logo { height: 22px; width: auto; display: block; user-select: none; }
+.dash-logo {
+  user-select: none; white-space: nowrap;
+  font-size: 22px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--accent);
+}
 .dash-tag {
   color: var(--faint); font-size: var(--t-ui);
   padding-left: var(--s-3); border-left: 1px solid var(--line);
@@ -1743,18 +1887,29 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .dcard.renaming:hover .dc-poster img { transform: none; }
 
 /* True black behind the frame — a poster is a piece of picture, and the theme
- * does not tint picture. 16:9 regardless of the source so the grid stays a grid
- * when a vertical video lands in it; the frame letterboxes inside. */
+ * does not tint picture.
+ *
+ * ONE tile shape regardless of the source, so the grid stays a grid when a
+ * vertical video lands next to a horizontal one. But the shape is 4:5, not 16:9,
+ * because this editor's subject is vertical video: a 9:16 poster letterboxed
+ * into a 16:9 tile is a thumbnail about a third of the tile's width, which is
+ * not enough of a picture to recognise your own footage by.
+ *
+ * And it CONTAINS rather than covers. The old rule said "the frame letterboxes
+ * inside" and then spelt it `object-fit: cover`, which is the opposite — cover
+ * crops. A vertical poster in a 16:9 tile was centre-cropped to a horizontal
+ * sliver, so every reel on the dashboard was a band of whatever happened to be
+ * across the middle of the frame. Contain is what the comment always meant. */
 .dc-poster {
   position: relative;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 4 / 5;
   background: var(--void);
   border-bottom: 1px solid var(--line);
   overflow: hidden;
 }
 .dc-poster img {
   width: 100%; height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
   /* Nudged, not zoomed: a hair of scale on hover reads as the card lifting
    * without the frame ever losing its edges. */
@@ -1776,7 +1931,10 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 .dc-meta {
   display: flex; align-items: center; gap: 7px;
   font-size: var(--t-small); color: var(--faint);
-  white-space: nowrap; overflow: hidden;
+  /* Ellipsis, not a hard cut. Without it this clipped mid-character —
+     "2160x3840 · Toda" — which reads as a rendering fault rather than as
+     "there is more". .dc-name above already does this. */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .dc-dur { color: var(--dim); font-variant-numeric: tabular-nums; }
 .dc-dot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; flex-shrink: 0; opacity: .7; }
@@ -2147,6 +2305,56 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   color: var(--warn-fg); font-size: var(--t-small); line-height: 1.5;
 }
 
+/* A warning that offers the fix needs somewhere to put the button. */
+.warn-act { margin-top: var(--s-2); }
+
+/* The header carries a close button now, so it is a three-part row. */
+.fab-close {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 32px; height: 32px; margin: -4px -4px -4px 0;
+  background: none; border: 0; border-radius: var(--r-1);
+  color: var(--dim); cursor: pointer;
+}
+.fab-close:hover { color: var(--text); background: var(--sunk); }
+
+/* ---- new project: name, then files ---- */
+.np-label { display: block; font-size: var(--t-ui); font-weight: 600; margin-bottom: var(--s-2); }
+.np-input {
+  width: 100%; font: inherit; font-size: var(--t-lg);
+  padding: var(--s-2) var(--s-3);
+  background: var(--sunk); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--r-1);
+}
+.np-input:focus { outline: none; border-color: var(--accent); }
+.np-hint { margin: var(--s-3) 0 0; color: var(--faint); font-size: var(--t-small); line-height: 1.5; }
+
+/* ---- Connect Hermes ---- */
+.set-rule { margin: var(--s-5) 0 var(--s-4); border: 0; border-top: 1px solid var(--line); }
+.set-section { margin: 0 0 var(--s-3); font-size: var(--t-ui); font-weight: 600; color: var(--text); }
+.set-bridge { display: flex; flex-direction: column; gap: var(--s-3); }
+/*
+ * The attached-window line. It is a status readout, not a control, so it gets a
+ * quiet ground and a colour that says which of the two states it is in — the
+ * reader is scanning for exactly one bit here.
+ */
+.set-attached {
+  margin: 0; padding: var(--s-2) var(--s-3); border-radius: var(--r-1);
+  border: 1px solid var(--line); background: var(--sunk);
+  font-size: var(--t-small); color: var(--dim);
+}
+.set-attached.live { color: var(--ok-fg); border-color: var(--ok-line); background: var(--ok-bg); }
+.set-attached.idle { color: var(--faint); }
+.set-config {
+  margin: 0; padding: var(--s-3); overflow-x: auto;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-1);
+  font-family: var(--font-mono); font-size: var(--t-small); color: var(--dim);
+  line-height: 1.5;
+}
+.set-bridge code {
+  font-family: var(--font-mono); font-size: .95em;
+  background: var(--sunk); border-radius: 3px; padding: 0 3px;
+}
+
 /* ===================== mobile ===================== */
 /**
  * The Android shell loads this same app into a WebView, and a phone browser
@@ -2168,16 +2376,31 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
 
 /* The phone-only elements. They are always in the DOM (App.tsx renders them
  * unconditionally so no JS media-query mirror is needed); CSS decides. */
-.m-tabs, .m-banners { display: none; }
+.m-tools, .m-banners, .m-cutbar { display: none; }
 
 /* Narrow (a phone, either orientation's portrait) OR short (a landscape
  * phone — 844×390 is WIDER than the desktop breakpoint but has no height for
  * three columns; the desktop grid at that size squeezed the monitor to a
  * sliver). Any viewport failing either axis takes the stack. */
-@media (max-width: 820px), (max-height: 520px) {
+/*
+ * Anything that is not a desk: phones, foldables open or shut, small tablets.
+ *
+ * The ceiling used to be 820px, which put an unfolded foldable — around 820-900
+ * CSS px wide — in the phone branch. It got the stacked layout, so a 9:16 clip
+ * was shown letterboxed across the full width with the picture occupying a third
+ * of it and black filling the rest, while the script it exists to serve was
+ * squeezed into a quarter of the screen. The width was there and was spent on
+ * nothing. The layout override further down uses it.
+ */
+@media (max-width: 1000px), (max-height: 520px) {
   /* Phone browsers shrink the viewport under their own chrome; dvh tracks it.
    * In the Android WebView dvh === vh, so this changes nothing there. */
   body { height: 100dvh; }
+
+  /* The tool bar's height, named once. The bottom sheet offsets itself by this
+   * to sit ABOVE the bar; if the two ever disagree the sheet covers the bar and
+   * the only way out of the inspector disappears. */
+  .app { --h-mtabs: 58px; }
 
   .app {
     grid-template-columns: 1fr;
@@ -2200,33 +2423,105 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   /* Script and rail share the one content slot; the m-view-* class App.tsx
    * puts on .app decides which of the two is the one. */
   .script { grid-area: content; padding: var(--s-3) var(--s-3) var(--s-6); }
+  /* The keyboard legend is for a keyboard. This breakpoint is the phone, where
+   * it wrapped to two lines of instructions for keys the device does not have. */
+  .script-keys { display: none; }
   .rail { grid-area: content; border-left: none; border-top: none; }
   .app.m-view-script .rail { display: none; }
   .app.m-view-tools .script { display: none; }
 
-  /* ---- the switcher ---- */
-  .m-tabs {
+  /* ---- the tool bar ----
+   * A scrolling row of labelled icons, one per rail section. Grid area is the
+   * one the two-way switcher used to occupy.
+   *
+   * scroll-snap so a flick lands on a whole button rather than halfway through a
+   * label, and -webkit-overflow-scrolling for momentum on iOS. The scrollbar is
+   * hidden because a 3px bar under a row of touch targets is noise; the row is
+   * visibly cut off at the edge, which is the affordance that matters. */
+  .m-tools {
     grid-area: mtabs;
-    display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-1);
+    display: flex; gap: var(--s-1);
+    overflow-x: auto; overflow-y: hidden;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
     padding: var(--s-1) var(--s-2);
     background: var(--chrome);
     border-top: 1px solid var(--line-soft);
     border-bottom: 1px solid var(--line-soft);
   }
-  .m-tab {
-    padding: 9px;
-    font-size: var(--t-ui); font-weight: 600; color: var(--dim);
+  .m-tools::-webkit-scrollbar { display: none; }
+
+  /* The two view controls, pinned while the tools scroll past. Outlined rather
+     than filled so they read as a different KIND of thing from the tools —
+     these change what you are looking at, the others change the video. */
+  .m-view-btn {
+    flex: 0 0 auto;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; min-width: 58px; min-height: 52px; padding: 6px 8px;
+    font-size: 10.5px; font-weight: 550; white-space: nowrap;
+    color: var(--text);
     background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
   }
-  /* Solid gold for "this one", same as every selected thing in the app.
-   * The :hover variant is load-bearing, not polish: a tap leaves the button in
-   * :hover, and base.css's `button:hover:not(:disabled)` (0,2,1) would beat a
-   * bare `.m-tab.on` (0,2,0) — the selected tab then wore the grey hover fill
-   * under its gold-expecting dark text and was unreadable. */
-  .m-tabs .m-tab.on,
-  .m-tabs .m-tab.on:hover {
-    background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+  .m-view-btn.on,
+  .m-view-btn.on:hover {
+    color: var(--accent); border-color: var(--accent);
+    background: var(--selected);
   }
+  .m-tools-sep {
+    flex: 0 0 auto; width: 1px; align-self: stretch; margin: 8px 5px;
+    background: var(--line);
+  }
+
+  .m-tool {
+    flex: 0 0 auto; scroll-snap-align: start;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 3px; min-width: 62px; padding: 6px 8px;
+    font-size: 10.5px; font-weight: 550; letter-spacing: -.01em;
+    color: var(--dim);
+    background: none; border: 1px solid transparent; border-radius: var(--r-2);
+    white-space: nowrap;
+  }
+  /* The label under the icon is what makes this scannable, so it must not be
+     dropped when a name is long — it is ellipsised at the button's width. */
+  .m-tool span {
+    max-width: 72px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .m-tool.on,
+  .m-tool.on:hover {
+    color: var(--accent-fg); background: var(--accent); border-color: var(--accent);
+  }
+  /* The :hover variant above is load-bearing, not polish: a tap leaves the
+   * button in :hover, and base.css's `button:hover:not(:disabled)` (0,2,1) beats
+   * a bare `.m-tool.on` (0,2,0) — the selected tool then wore the grey hover fill
+   * under its gold-expecting dark text and was unreadable. */
+
+
+  /* ---- getting back out of a section ----
+   * On a phone an open section fills the sheet: its own header scrolls away
+   * with the content and the tool bar below is pushed off screen, leaving
+   * nothing that returns you to the list. Pinning the header keeps the exit
+   * on screen however far you have scrolled, and Done says plainly what the
+   * caret only implies. */
+  .sect.open > .sect-head {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .sect-done {
+    flex: 0 0 auto; margin-left: auto;
+    min-height: 30px; padding: 0 var(--s-2);
+    border-radius: var(--r-full);
+    background: var(--accent); color: var(--accent-fg); border: 0;
+    font-size: var(--t-small); font-weight: 600;
+  }
+
+  /* The tool bar is drawn OVER the end of the rail, so the last control in a
+   * panel sat underneath it and could not be tapped. The padding belongs on
+   * .panel, not .rail: .panel is the element that actually SCROLLS (the rail
+   * only contains it), and padding on a non-scrolling parent reserves nothing
+   * at the end of the scrolled content. */
+  .panel { padding-bottom: calc(58px + var(--s-3)); }
 
   /* ---- banners ----
    * The in-script pair may be on the hidden surface, so the fixed copies from
@@ -2238,6 +2533,62 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
     z-index: var(--z-toast);
   }
   .m-banners .error, .m-banners .notice { margin-bottom: 0; box-shadow: var(--shadow-3); }
+  /* Each banner is its own swipe surface, so two stacked ones leave
+   * independently and the gap between them travels with the top one. */
+  .swipeaway + .swipeaway { margin-top: var(--s-2); }
+
+  /* ---- the cut bar ----
+   * Sits on the same rail as the Jumpy button and clears the dock by the same
+   * variable, so the two can never end up on top of each other. Centred and
+   * narrow: it is a statement about the selection, not a toolbar. */
+  .m-cutbar {
+    display: flex; align-items: center; gap: var(--s-2);
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: var(--fab-bottom, var(--s-5));
+    z-index: var(--z-toast);
+    max-width: calc(100vw - var(--s-4) * 2);
+    padding: 6px 6px 6px var(--s-2);
+    border-radius: var(--r-full);
+    background: var(--raised); border: 1px solid var(--line);
+    box-shadow: var(--shadow-3);
+  }
+  .m-cutbar-what {
+    font-size: var(--t-ui); color: var(--dim);
+    max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .m-cutbar-clear {
+    flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: transparent; border: 0; color: var(--faint); font-size: 13px;
+  }
+  /* ---- a hold has become a range selection ----
+   * The page stops scrolling for the length of the gesture (see the touchmove
+   * suppressor in Script), so it has to SAY it is in a different mode — a page
+   * that silently ignores a scroll reads as frozen. The text cursor and the
+   * suppressed callout also stop the OS's own selection UI fighting ours. */
+  .page.ranging {
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    cursor: text;
+  }
+  .page.ranging .w.sel { box-shadow: 0 0 0 2px var(--accent); }
+
+  /* Secondary to Cut: fixing a spelling is the rarer errand, and giving it the
+   * same weight would make the bar two equal choices instead of one obvious one. */
+  .m-cutbar-edit {
+    flex: 0 0 auto; min-height: 34px; padding: 0 var(--s-2);
+    border-radius: var(--r-full);
+    background: var(--sunk); border: 1px solid var(--line); color: var(--text);
+    font-size: var(--t-ui);
+  }
+
+  /* The one thing this bar exists for, so it carries the accent and the mass. */
+  .m-cutbar-do {
+    flex: 0 0 auto; min-height: 34px; padding: 0 var(--s-3);
+    border-radius: var(--r-full); border: 0;
+    background: var(--accent); color: var(--accent-fg);
+    font-size: var(--t-ui); font-weight: 600;
+  }
 
   /* ---- title bar: keep the actions, drop the readouts ----
    * The output-length stat and the document name are things a phone user can
@@ -2302,13 +2653,328 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
       'center content'
       'dock   dock';
   }
-  .m-tab { padding: 5px; }
+  .m-tool { min-width: 54px; padding: 4px 6px; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The tool sheet.
+ *
+ * Tapping a tool used to swap the whole content area for the rail — which on a
+ * phone is about 267px, of which the scrolling panel got 178. That is one
+ * control's worth of room, so "open Captions" showed you a sliver of Captions
+ * and left you scrolling anyway.
+ *
+ * A tool needs space, so it takes it: the panel becomes a bottom sheet over the
+ * dock, and the script and the picture stay where they were behind it. That is
+ * the shape every mobile editor uses for this, and it is right for the same
+ * reason a dialog is right — you are doing one thing, and the thing you were
+ * doing before is still there when you finish.
+ *
+ * Over the dock rather than over the picture: while you are setting captions or
+ * a crop, the frame is the one thing you need to keep seeing.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 599px) and (min-height: 521px) {
+  .app.m-view-tools .rail {
+    position: fixed; left: 0; right: 0;
+    /* ABOVE the tool bar, not over it. At bottom:0 this sheet covered the bar
+     * completely — measured, the overlap was exactly its 58px and
+     * elementFromPoint at the bar's buttons returned the sheet's panel. The bar
+     * carries the Watch/Script switcher, so covering it is what made the
+     * inspector a room with no door. */
+    bottom: var(--h-mtabs);
+    height: 56vh; z-index: var(--z-hud);
+    background: var(--chrome);
+    border-top: 1px solid var(--line);
+    border-radius: var(--r-3) var(--r-3) 0 0;
+    box-shadow: 0 -12px 32px rgb(0 0 0 / .45);
+  }
+  /* The panel inside now has the sheet's height to scroll in, not 178px. */
+  .app.m-view-tools .rail .panel { max-height: none; }
+
+  /* The script stays put behind the sheet instead of being unmounted, so
+     closing the sheet does not re-render and re-scroll the transcript. */
+  .app.m-view-tools .script { display: block; }
+
+  /* The assistant button would sit on top of the sheet. */
+  .app.m-view-tools > .fab { display: none; }
+
+  /* The group captions inside the sheet are a table of contents for a list you
+     are no longer reading — you picked a tool, and the bar above already says
+     which. That is ~50px of a 473px sheet spent naming the thing you are
+     looking at. The rail's own tabs stay: Social has no other way in. */
+  .app.m-view-tools .rail .pgroup-head { display: none; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Unfolded foldable / small tablet: wide enough to stop stacking.
+ *
+ * A Galaxy Fold open is roughly square — plenty of width, ordinary height. The
+ * stacked phone layout wastes that: a 9:16 clip letterboxed across 820px is a
+ * narrow strip of picture between two wide bars, and it costs a third of the
+ * height the script needs.
+ *
+ * So the picture moves BESIDE the work, which is the same move the landscape
+ * rule below already makes and for the same reason. The monitor column is capped
+ * as a fraction rather than fixed, because a portrait clip only ever needs about
+ * a third of a square screen to be judged by, and the script wants the rest.
+ *
+ * The Script/Tools switcher stays — the rail is still too wide to sit beside
+ * both — but it now swaps only the LEFT column, so the picture never disappears
+ * while you are working. On the phone stack it did.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (min-width: 600px) and (max-width: 1000px) and (min-height: 560px) {
+  /*
+   * Both selectors, deliberately. `.app[data-frame='portrait']` (0,2,0) outranks
+   * a bare `.app` (0,1,0), so the portrait stack further down wins on specificity
+   * no matter how far up the file this sits — and the layout silently reverts to
+   * five stacked rows. Measured while building this: the switcher rendered 403px
+   * tall because the auto row was absorbing the monitor it sat beside.
+   * Once the picture is a column, its aspect stops deciding the row heights.
+   */
+  .app,
+  .app[data-frame='portrait'] {
+    grid-template-columns: minmax(0, 1fr) clamp(220px, 32%, 340px);
+    /*
+     * The tabs row is FIXED, not auto. The monitor spans rows 2 and 3, so an
+     * auto row 2 grows to fit the picture's min-content height — which made a
+     * two-way switcher 380px tall and pushed the script off the screen.
+     */
+    grid-template-rows: 48px 42px minmax(0, 1fr) var(--h-dock-m, 208px);
+    grid-template-areas:
+      'title   title'
+      'mtabs   center'
+      'content center'
+      'dock    dock';
+  }
+
+  /* The picture is a column now, so it fills its height rather than being
+     capped at a slice of the viewport. */
+  .monitor {
+    border-left: 1px solid var(--line);
+    min-height: 0;
+  }
+
+  /* Two columns of tabs across the full width was a 400px-wide pair of buttons
+     for a two-way choice. Half the width is still generous. */
+  .m-tools { padding: var(--s-1) var(--s-2) 0; }
+
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Phone, portrait. The one surface that has to give something up.
+ *
+ * Measured on a 390x844 viewport with a 9:16 source: the monitor took 32vh
+ * (270px) to show a picture 152px wide, so most of that third of the screen was
+ * black. The dock took another 232px. The script — the thing you actually edit
+ * with — got about a quarter of the display.
+ *
+ * The picture is worth keeping (captions and framing need judging), but not at
+ * that price, so it shrinks to what a phone can usefully show and the script
+ * takes the difference.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 599px) and (min-height: 521px) {
+  /* ═══════════════════════════════════════════════════════════════════════
+   * The phone editor: picture first.
+   *
+   * Chosen from three drawn options. The picture takes what is left after the
+   * bars — about 61% — the timeline sits under it, the script is a peek, and the
+   * tools are a row along the bottom where a thumb already is.
+   *
+   * The order is the one every mobile editor uses, and the reason is reach: the
+   * things you touch constantly (play, tools) are at the bottom, the thing you
+   * look at is up top, and nothing you touch is under your own hand while you
+   * watch. It reads top to bottom as watch → trim → read → change.
+   *
+   * The cost, stated plainly because it is real: the transcript — the surface
+   * this product is named for — gets about 110px, two or three lines. Cutting a
+   * long take on a phone means scrolling a keyhole. That was the trade on offer
+   * and it was taken deliberately; the script is still the whole screen on a
+   * desk, and on a foldable it is a full column.
+   * ═══════════════════════════════════════════════════════════════════════ */
+  /* ── watch: the picture gets the screen ──────────────────────────────── */
+  .app.m-mode-watch,
+  .app.m-mode-watch[data-frame='portrait'] {
+    grid-template-rows: 44px minmax(0, 1fr) auto 0 var(--h-mtabs);
+    grid-template-areas: 'title' 'center' 'dock' 'content' 'mtabs';
+  }
+  .app.m-mode-watch .script { display: none; }
+
+  /* ── script: the transcript gets it, the picture keeps a strip ────────── */
+  .app.m-mode-script,
+  .app.m-mode-script[data-frame='portrait'] {
+    grid-template-rows: 44px 120px minmax(0, 1fr) auto var(--h-mtabs);
+    grid-template-areas: 'title' 'center' 'content' 'dock' 'mtabs';
+  }
+
+  /* ── the timeline, only when asked for ─────────────────────────────────
+   * An explicit height, not flex. The dock row is `auto`, so a canvas that only
+   * says `flex: 1` inside it resolves to zero — it was "visible" and 0px tall,
+   * which looks exactly like the button not working.
+   * 88px is the ruler, one clip lane and a readable strip of filmstrip. */
+  .tl-canvas { display: none; }
+  .app.m-tl .tl-canvas { display: block; flex: 0 0 auto; height: 88px; }
+
+  /* ---- the dock, made to fit ----
+   *
+   * At 116px the old dock overflowed into the script: the transport wrapped to
+   * two rows (~110px on its own), then the range/split/zoom bar, then the canvas,
+   * then the music lane — all drawn on top of the transcript below it.
+   *
+   * So it is cut to the two things a phone can use: one row of transport, and
+   * the timeline canvas. The lanes inside that canvas are drawn by
+   * timeline/draw.ts rather than laid out as elements, so its height is the only
+   * control there is over them.
+   */
+  .tl { overflow: hidden; display: flex; flex-direction: column; }
+
+  /*
+   * Two rows, and this is the honest answer rather than the tidy one.
+   *
+   * Five control groups want this bar — transport buttons, clock, speed, and two
+   * view switches. Measured at 390px they came to 408, and the reference app
+   * this layout is modelled on has three groups, not five, which is why its
+   * single row works. Every way of forcing one row here meant losing a control:
+   * speed exists nowhere else in the app, and "Preview edit" decides whether you
+   * are watching the cut or the raw take, which is the whole point of watching.
+   *
+   * So the dock is 156px and the transport wraps: controls on the first line,
+   * switches on the second. Nothing is clipped, nothing is removed, and the
+   * picture still takes 56% of the screen.
+   */
+  .transport {
+    flex: 0 0 auto; flex-wrap: wrap; height: auto; min-height: 0;
+    gap: var(--s-1) var(--s-2); padding: var(--s-1); overflow: hidden;
+  }
+  .tp-toggles { width: 100%; }
+
+  /* The view toggles become their switches. "Preview edit" and "Show cuts" are
+     worth keeping — they change what you are looking at — but their labels cost
+     240px of a 390px row, and the switch already reads on/off. */
+  .tp-toggles { gap: var(--s-2); margin-left: auto; flex: 0 0 auto; }
+  /*
+   * font-size: 0, because the label is a bare TEXT NODE next to the switch —
+   * `<span class="sw"/>Preview edit` — and there is no selector for a text node.
+   * The switch itself is sized in px so it is unaffected, and the button keeps
+   * its title and aria-pressed, so the name a screen reader announces is
+   * unchanged. Only the sighted label goes.
+   */
+  /* On their own line the labels fit, so they stay. The earlier font-size:0
+     trick — needed because the label is a bare text node beside the switch — is
+     gone with the row it was working around. */
+  .tp-toggles .toggle { flex: 1 1 0; justify-content: center; }
+
+  /*
+   * Two things leave the row so the rest fits in 390px. Adding up what wanted to
+   * be there: four icon buttons at 44, a clock, an edit/source badge, the speed
+   * menu and two switches came to about 454px, and the row does not wrap any
+   * more — so the toggles on the right were simply clipped off the edge.
+   *
+   * Go-to-start goes because the timeline is right there and dragging to zero is
+   * one gesture. The edit/source badge goes because it labels a distinction the
+   * "Preview edit" switch beside it already makes. Speed stays: it exists
+   * nowhere else in the app, and hiding it would remove the feature rather than
+   * relocate it.
+   */
+  .tp-buttons > .icon:first-child { display: none; }
+  .tc-space { display: none; }
+
+  /* The "saved" readout fits again on the second line, beside the switches. */
+
+
+  /* Range, split, zoom and fit are precision controls for a pointer. Split is
+     reachable from the tool bar's Clean up; the rest are desk work. */
+  .tl-bar { display: none; }
+
+  /* The bed is named in the Music tool, where there is room for the artist and
+     the licence. A second copy here costs a whole lane of a 116px dock. */
+  .tl-music { display: none; }
+
+  .tl-canvas { flex: 1 1 auto; min-height: 0; }
+
+  /* ---- the script peek ----
+   * A fixed 112px that scrolls, with a top border so it reads as its own surface
+   * rather than as the bottom of the timeline. It is deliberately small: this
+   * layout spends the screen on the picture, and the peek is here so you can see
+   * WHICH line you are on, not so you can read the whole take. */
+  .script {
+    border-top: 1px solid var(--line);
+    padding: var(--s-2) var(--s-3);
+    overflow-y: auto;
+  }
+
+  .titlebar { padding: 0 var(--s-1); }
+  .monitor { padding: var(--s-1) var(--s-2) 0; }
+
+  /* The source dimensions and frame rate are a desk readout. On a phone they
+     cost a line of the picture's height to tell you what the file already is. */
+  .stage-meta { display: none; }
+
+  /* The transport wraps to two rows; the second one is toggles, which do not
+     need to be as tall as the play button. */
+  .transport { gap: 2px var(--s-2); padding: var(--s-1) var(--s-1); }
+
+
+
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Touch targets.
+ *
+ * Audited at 394x853: 23 controls were under the 44px both Apple and Material
+ * ask for, including the ones you touch most — play at 36, Export at 34, the
+ * script/tools switcher at 40, the icon buttons at 38.
+ *
+ * Not all 23 are raised. The timeline's own controls — split, zoom, fit, the
+ * per-clip add buttons — are dense by nature, and taking each to 44 would add
+ * roughly 40px to the dock, which comes straight out of the script. They go to
+ * 32: a real improvement on 24, and honest about the trade. The controls you
+ * reach for constantly get the full 44.
+ * ───────────────────────────────────────────────────────────────────────── */
+@media (pointer: coarse) {
+  /* The title bar, the transport, the rail: anything with an icon in it. */
+  .icon { width: 44px; height: 44px; }
+
+  /* Play is the single most-tapped control in the app. */
+  .transport .play { width: 44px; height: 44px; }
+
+  /* Export commits minutes of work — a mis-tap is expensive in both directions. */
+  .titlebar .primary { min-height: 44px; }
+
+  /* Every tool in the bar is a landable target. */
+  .m-tool { min-height: 52px; }
+
+  /* Toggles and the speed picker sit in the transport's second row. */
+  .transport .toggle,
+  .transport select { min-height: 40px; }
+
+  /* The assistant's model picker — the control that decides what Jumpy can do,
+     and the only one left under 32px after the sweep. */
+  .fab-model { min-height: 40px; }
+
+  /* Dialogs: the footer buttons commit or discard, and the fields are typed
+     into. Both were around 37px, which is a cursor size. */
+  .dialog button, .dialog input, .dialog select, .dialog textarea { min-height: 44px; }
+  .np-input { min-height: 48px; }
+
+  /* Dense timeline controls: better, not perfect, and deliberately so. */
+  .tl-split, .tl-bar button, .tl-add, .tl-music-fill { min-height: 32px; }
+  .tl-add { width: 32px; height: 32px; }
 }
 
 /* Touch has no hover: anything that reveals itself on hover must simply be
  * there. The card actions were literally unreachable on a phone. */
 @media (pointer: coarse) {
   .dc-acts { opacity: 1; }
+
+  /*
+   * 24px is a cursor target. Three of them in a row on a card, the last of which
+   * DELETES the project, is a mis-tap waiting to happen — and the mis-tap that
+   * costs you is the one on the right. They go to 40, and the destructive one
+   * gets a gap so the thumb has to travel to reach it.
+   */
+  .dc-act { width: 40px; height: 40px; }
+  .dc-acts { gap: var(--s-2); }
+  .dc-act.dc-x { margin-left: var(--s-3); }
   .tl-add { opacity: .9; }
 }
 
@@ -2411,4 +3077,507 @@ button.go { width: 100%; padding: 9px; margin-top: var(--s-1); }
   min-width: 0;
   font-size: 11px;
   padding: 2px 6px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * REELS · laying out for a vertical programme
+ *
+ * Everything above this block was written when the output was assumed to be
+ * landscape. That assumption is visible the moment the frame is 9:16: the centre
+ * column is the grid's `1fr`, so it takes every pixel the two splitters leave,
+ * and `containBox` then fits a tall narrow picture inside a wide short box. The
+ * picture ends up sized by the column's HEIGHT while the column keeps its width,
+ * and the difference — often half the window — is filled with mat.
+ *
+ * `App` now publishes `data-frame="portrait|landscape|square"` on `.app`, from
+ * the same `frameSize` the renderer uses. These rules read it.
+ *
+ * The fix is not to shrink the picture; it is to stop the centre column claiming
+ * width it cannot use, and hand that width to the transcript — which is the
+ * surface you actually work in, and the one whose measure was capped at 640px
+ * while the mat got the rest.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The width guard is not optional, and the arithmetic is the reason.
+ *
+ * The default grid survives any window because its centre column is `1fr`, which
+ * can be squeezed to nothing. The portrait grid replaces that with tracks that
+ * have FLOORS — 440 script + 1 + 280 monitor + 1 + 372 rail = 1094px of minimum.
+ * Applied unguarded at a 951px window it overflowed by 143px and pushed the rail
+ * clean off the right edge (measured, in the browser, exactly that).
+ *
+ * So the reels layout is an enhancement that switches on only where it fits, and
+ * below 1120px the original landscape grid — which cannot overflow — is left to
+ * do its job. */
+@media (min-width: 1120px) {
+  .app[data-frame='portrait'] {
+    /* The centre column stops being `1fr` and becomes "as much as a 9:16 picture
+     * can use, and no more". The script pane takes the slack as `1fr`, so
+     * widening the window widens the thing being read. `--w-script` survives as
+     * the MINIMUM so the splitter still has an effect — dragging it sets the
+     * floor the script will not go below. */
+    grid-template-columns:
+      minmax(var(--w-script, 440px), 1fr)
+      1px
+      minmax(280px, var(--monitor-max-portrait))
+      1px
+      var(--w-rail, 372px);
+  }
+}
+
+/* The measure cap exists so a line of transcript never runs too long to track
+ * back to. In portrait there is more width to spend, so spend some of it — but
+ * on the line, not on the mat. 760px keeps the line inside the 45–90 character
+ * band that typographic practice puts comfortable reading in. */
+.app[data-frame='portrait'] .page {
+  max-width: 760px;
+}
+
+/* A vertical picture is tall, and the stage's vertical padding is what decides
+ * how much of it survives. Give the height back. */
+.app[data-frame='portrait'] .monitor {
+  padding: var(--s-3) var(--s-3) var(--s-2);
+}
+
+/* With the column capped, the mat is now a thin surround rather than a field —
+ * so it can afford to be quieter and let the picture carry the eye. */
+.app[data-frame='portrait'] .stage {
+  background: var(--n-2);
+}
+
+/* ── the phone stack, told about portrait ──────────────────────────────────
+ * The mobile layout gives the monitor `minmax(150px, 32vh)`, a number chosen
+ * for a landscape picture. A 9:16 frame fitted into 32vh is a sliver about
+ * 0.56 x that height wide, stranded in mat. A vertical programme on a vertical
+ * screen should use the height it has. */
+/*
+ * The portrait override that used to live here is gone.
+ *
+ * It gave a 9:16 frame more of the phone's height than a landscape one, which
+ * made sense when the layout stacked five rows and the picture had to argue for
+ * space. The picture now takes whatever the bars leave, whatever its shape, so
+ * the rule had nothing left to decide — and it did real harm: its five-value row
+ * list landed on the new five-area list and put 184px under the tool bar.
+ */
+
+/* Square sits between the two: it cannot use a wide column either, but it needs
+ * less height than a reel. */
+@media (min-width: 1180px) {
+  .app[data-frame='square'] {
+    grid-template-columns:
+      minmax(var(--w-script, 440px), 1fr)
+      1px
+      minmax(320px, 620px)
+      1px
+      var(--w-rail, 372px);
+  }
+}
+
+/* The boot gate's failure state.
+ *
+ * "Loading workspace…" used to be the only thing this screen could ever say, so
+ * an unreachable API server showed an ellipsis forever. A dead end needs three
+ * things: what went wrong, what is usually behind it, and a way out. */
+.boot-fail {
+  max-width: 40ch;
+  text-align: center;
+  display: grid;
+  gap: var(--s-3);
+  justify-items: center;
+  color: var(--text);
+}
+.boot-fail h2 {
+  font-size: var(--t-lg);
+  font-weight: var(--fw-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+.boot-why {
+  color: var(--cut-fg);
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+}
+.boot-hint {
+  color: var(--faint);
+  font-size: var(--t-ui);
+  line-height: var(--lh-normal);
+}
+.boot-hint code {
+  font-family: var(--font-mono);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  padding: 1px var(--s-1);
+  color: var(--dim);
+}
+
+/* ── safe-area guides ──────────────────────────────────────────────────────
+ * Where the platform paints its own interface over the reel. A preview aid:
+ * pointer-events none, never rendered into the output.
+ *
+ * The bands are a scrim rather than an outline because the instruction is "do
+ * not compose here", not "here is a rectangle" — and a scrim reads at a glance
+ * over any footage, where a thin outline disappears against a busy frame. */
+.safe-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.safe-band {
+  position: absolute;
+  background: rgb(0 0 0 / 0.5);
+}
+.safe-box {
+  position: absolute;
+  border: 1px dashed rgb(255 255 255 / 0.45);
+}
+.safe-tag {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-ui);
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: #fff;
+  background: rgb(0 0 0 / 0.6);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-full);
+  white-space: nowrap;
+}
+
+/* The safe-area picker in the Frame panel. */
+.safe-pick { display: grid; gap: var(--s-2); margin-top: var(--s-3); }
+.safe-pick-label {
+  font-size: var(--t-micro);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* ── Social panel ────────────────────────────────────────────────────────── */
+.social { display: grid; gap: var(--s-4); }
+.social-folder,
+.social-new input,
+.social-brief {
+  width: 100%;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  padding: var(--s-2);
+}
+.social-brief {
+  /* Prose, so it gets the body face and room to breathe — a single-line input
+     would tell people to write a keyword when the point is a paragraph. */
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+  resize: vertical;
+  min-height: 7em;
+}
+.social-folder:focus-visible,
+.social-new input:focus-visible,
+.social-brief:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.social-new { display: flex; gap: var(--s-2); margin-top: var(--s-2); }
+.social-new input { flex: 1; min-width: 0; }
+.social-go { width: 100%; }
+.social-draft { display: grid; gap: var(--s-4); margin-top: var(--s-2); }
+.social-out {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--text);
+  font-size: var(--t-base);
+  line-height: var(--lh-normal);
+  white-space: pre-wrap;
+}
+.social-tags {
+  margin: 0 0 var(--s-2);
+  padding: var(--s-3);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--t-ui);
+  line-height: var(--lh-normal);
+  word-break: break-word;
+}
+
+/* ── folders on the dashboard ────────────────────────────────────────────── */
+.dash-newfolder { display: flex; gap: var(--s-2); margin-bottom: var(--s-5); max-width: 46rem; }
+.dash-newfolder input {
+  flex: 1; min-width: 0;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-base);
+  padding: var(--s-2) var(--s-3);
+}
+.dash-newfolder input:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+
+.dash-folders {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: var(--s-3);
+}
+.fcard {
+  display: grid; gap: var(--s-1); justify-items: start; text-align: left;
+  padding: var(--s-4);
+  background: var(--chrome);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.fcard:hover { background: var(--hover); border-color: var(--line-strong); }
+.fcard:focus-visible { outline: none; box-shadow: var(--ring); }
+.fcard-name { font-size: var(--t-lg); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-tight); }
+.fcard-meta { font-size: var(--t-small); color: var(--faint); }
+/* Unfiled is a holding pen, not a folder — dashed, so it never reads as one. */
+.fcard-loose { border-style: dashed; background: transparent; }
+
+.dash-back {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  background: none; border: none; padding: 0;
+  color: var(--faint); font-size: var(--t-ui); cursor: pointer;
+  margin-right: var(--s-3);
+}
+.dash-back:hover { color: var(--text); }
+.dash-folder-acts { display: inline-flex; gap: var(--s-2); margin-left: auto; }
+.dash-folder-acts button {
+  background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--dim); font-size: var(--t-small); padding: var(--s-1) var(--s-2); cursor: pointer;
+}
+.dash-folder-acts button:hover { color: var(--text); border-color: var(--line-strong); }
+
+/* The folder's memory. Given real room, because the whole feature turns on
+   someone actually writing a paragraph here. */
+.dash-memory { max-width: 46rem; margin-bottom: var(--s-5); }
+.dash-memory h2 {
+  font-size: var(--t-micro); font-weight: var(--fw-medium);
+  letter-spacing: var(--tracking-caps); text-transform: uppercase;
+  color: var(--faint); margin: 0 0 var(--s-2);
+}
+.dash-memory textarea {
+  width: 100%;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui);
+  font-size: var(--t-base); line-height: var(--lh-normal);
+  padding: var(--s-3); resize: vertical; min-height: 8em;
+}
+.dash-memory textarea:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.dash-memory-hint { margin: var(--s-2) 0 0; font-size: var(--t-small); color: var(--faint); line-height: var(--lh-normal); }
+
+/* Move-to-folder, on the card itself — the same posture as the delete confirm:
+   the decision is made over the poster you are deciding about. */
+.dc-move {
+  position: absolute; inset: 0; z-index: 2;
+  display: grid; align-content: center; gap: var(--s-2);
+  padding: var(--s-4);
+  background: rgb(0 0 0 / 0.86);
+  border-radius: var(--r-3);
+}
+.dc-move p { margin: 0; font-size: var(--t-small); color: var(--dim); }
+.dc-move select {
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-ui); padding: var(--s-2);
+}
+.dc-move button {
+  background: none; border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--dim); font-size: var(--t-small); padding: var(--s-1) var(--s-2); cursor: pointer;
+}
+
+/* ── the floating assistant ──────────────────────────────────────────────────
+ * Above every screen, so the projects page has an assistant at all and the
+ * editor no longer trades the Inspector for one. */
+.fab {
+  position: fixed;
+  right: var(--s-5);
+  bottom: var(--fab-bottom, var(--s-5));
+  z-index: var(--z-hud);
+  width: 46px; height: 46px;
+  display: grid; place-items: center;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  box-shadow: var(--e-2);
+  cursor: pointer;
+  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease);
+}
+.fab:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.fab:focus-visible { outline: none; box-shadow: var(--ring), var(--e-2); }
+.fab-on { background: var(--raised); color: var(--text); }
+
+/*
+ * The panel is anchored to the BUTTON, via one variable both read.
+ *
+ * They used to carry the offset separately, and when the button moved up to
+ * clear the editor dock the panel stayed where it was — directly on top of it.
+ * The button is what closes the panel, so the panel was covering its own way
+ * out: on a phone, with no Escape key, that is a trap you can only leave by
+ * reloading. Deriving one from the other makes that particular mistake
+ * unexpressible.
+ */
+.fab-panel {
+  position: fixed;
+  right: var(--s-5);
+  bottom: calc(var(--fab-bottom, var(--s-5)) + 46px + var(--s-2));
+  z-index: var(--z-hud);
+  width: min(24rem, calc(100vw - var(--s-5) * 2));
+  max-height: min(32rem, calc(100vh - 8rem));
+  display: flex; flex-direction: column;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  box-shadow: var(--e-3);
+  overflow: hidden;
+}
+.fab-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--t-base); color: var(--text);
+}
+.fab-model {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--dim);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  padding: 2px var(--s-1);
+  max-width: 12rem;
+}
+.fab-model:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.fab-scroll { flex: 1; overflow-y: auto; padding: var(--s-3) var(--s-4); display: grid; gap: var(--s-3); }
+.fab-empty, .fab-busy { margin: 0; font-size: var(--t-ui); color: var(--faint); line-height: var(--lh-normal); }
+.fab-msg { font-size: var(--t-base); line-height: var(--lh-normal); }
+.fab-msg p { margin: 0; }
+.fab-user {
+  justify-self: end;
+  max-width: 85%;
+  background: var(--selected);
+  color: var(--text);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-3);
+}
+.fab-assistant { color: var(--dim); }
+.fab-compose { display: flex; gap: var(--s-2); padding: var(--s-3); border-top: 1px solid var(--line-soft); }
+.fab-compose textarea {
+  flex: 1; min-width: 0; resize: none;
+  background: var(--sunk); border: 1px solid var(--line); border-radius: var(--r-2);
+  color: var(--text); font-family: var(--font-ui); font-size: var(--t-ui);
+  padding: var(--s-2); line-height: var(--lh-snug);
+}
+.fab-compose textarea:focus-visible { outline: none; border-color: var(--line-strong); box-shadow: var(--ring); }
+.linkish { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+/* On a phone the panel is the screen, not a corner of it. */
+@media (max-width: 520px) {
+  .fab-panel { right: var(--s-2); left: var(--s-2); width: auto; }
+  :root { --fab-bottom: var(--s-4); }
+  .fab { right: var(--s-4); }
+}
+
+/*
+ * In the EDITOR, lift the button clear of the dock.
+ *
+ * On a desk the dock is 260px of a tall window and a corner button misses it. On
+ * a phone or a folded screen the dock reaches most of the way up, and the button
+ * landed on the music lane — covering a control rather than chrome.
+ *
+ * Scoped to `.app` on purpose: the projects page has no dock, and lifting it
+ * there would leave it floating in the middle of nothing. One rule, at the
+ * bottom, so it beats the corner placement above rather than adding a third
+ * place that sets the same property.
+ */
+@media (max-width: 1000px), (max-height: 520px) {
+  /* Clear of BOTH bottom bars — the tool bar and the transport above it. At
+     just the tool bar's height it sat on the "Show cuts" switch. 58 + 95 is the
+     two of them; the button floats over the picture or the script instead, which
+     is what a floating button is for. */
+  .app { --fab-bottom: calc(58px + 95px + var(--s-3)); }
+  .app > .fab { right: var(--s-3); }
+}
+@media (min-width: 600px) and (max-width: 1000px) and (min-height: 560px) {
+  .app { --fab-bottom: calc(var(--h-dock-m, 208px) + var(--s-3)); }
+}
+
+/* ---- an upload that stopped, offering to carry on ----
+ * Sits above the grid rather than inside it: this is not one of your projects,
+ * it is work that has not become one yet, and burying it among the cards is how
+ * it went unnoticed in the first place. Warn-coloured, not error — nothing is
+ * broken and nothing has been lost; it is waiting. */
+.resume-bar {
+  display: flex; flex-direction: column; gap: var(--s-2);
+  margin-bottom: var(--s-4);
+}
+.resume-row {
+  display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  padding: var(--s-3);
+  border: 1px solid var(--warn-line); border-radius: var(--r-3);
+  background: var(--warn-bg); color: var(--warn-fg);
+}
+.resume-what { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 260px; }
+.resume-what strong { font-size: var(--t-base); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-what span { font-size: var(--t-small); opacity: .85; font-variant-numeric: tabular-nums; }
+.resume-acts { display: flex; gap: var(--s-2); flex: 0 0 auto; }
+
+/* On a phone the row stacks, and the primary action goes full width — it is the
+ * one thing on this bar worth a thumb. */
+@media (max-width: 1000px) {
+  .resume-acts { width: 100%; }
+  .resume-acts .primary { flex: 1; }
+}
+
+/* ---- the way out of the inspector, on a phone ----
+ * Pushed to the right of the tabs, into the space they leave. That space is
+ * where the user asked for it, and it is the half of the bar a thumb reaches
+ * without crossing the screen.
+ *
+ * Only rendered when onLeave is passed, which App does only on the phone — so
+ * no desktop rule is needed to hide it. Outlined rather than filled: it changes
+ * WHAT YOU ARE LOOKING AT, like the Watch/Timeline pair, rather than changing
+ * the video the way an accent-filled control does. */
+.rail-back {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px; padding: 0 var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: var(--sunk); color: var(--text);
+  font-size: var(--t-ui); font-weight: 550;
+}
+.rail-back:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+/* ---- per-clip speed ----
+ * The select sits in the clip row beside its duration. Quiet until the clip has
+ * a rate of ITS OWN: a list of twenty-one identical "1x" selects is noise, and
+ * the one clip you set to 1.5x should be the thing your eye lands on. */
+.clip-speed {
+  flex: 0 0 auto; margin-left: var(--s-1);
+  font-size: var(--t-small); font-variant-numeric: tabular-nums;
+  padding: 1px 4px; border-radius: var(--r-1);
+  background: transparent; border: 1px solid transparent; color: var(--faint);
+}
+.clip-row:hover .clip-speed { border-color: var(--line); color: var(--dim); }
+.clip-speed.set {
+  border-color: var(--accent); color: var(--accent); font-weight: 600;
+}
+.clip-allspeed {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: var(--s-1) 0 var(--s-2);
+  font-size: var(--t-small); color: var(--dim);
+}
+.clip-allspeed select {
+  font-size: var(--t-small); padding: 2px 6px;
+  border-radius: var(--r-1); border: 1px solid var(--line);
+  background: var(--sunk); color: var(--text);
 }

@@ -81,7 +81,7 @@ export default function TitleBar({
         >
           <Icon name="grid" size={17} />
         </button>
-        <img className="tb-logo" src="/jumpcut.png" alt="JumpCut" draggable={false} />
+        <span className="tb-logo">Jumpstart</span>
         {name && <span className="tb-sep" aria-hidden="true" />}
         {name && <strong className="tb-name">{name}</strong>}
         {name && <SaveState status={saveStatus} onRetry={onRetrySave} />}

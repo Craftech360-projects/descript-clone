@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  outputDurationWith,
+  cutToFinal,
+  speedOf,
+  flatSpeed,
   compileEdl,
   compileSequenceEdl,
   outputDuration,
@@ -31,15 +35,17 @@ function transcript(specs: Array<[string, number, number] | [string, number, num
 
 const NO_PAD = { padMs: 0, mergeWithinMs: 0 };
 
-test('no deletions produces a single word-bounded range', () => {
+test('no deletions keeps the whole clip, not just its words', () => {
   const t = transcript([
     ['hello', 0, 1],
     ['there', 1, 2],
     ['world', 2, 3],
   ]);
   const edl = compileEdl(t, NO_PAD);
-  assert.deepEqual(edl.keep, [{ start: 0, end: 3 }]);
-  assert.equal(outputDuration(edl), 3);
+  // duration is 4 (the helper adds a second past the last word). Nothing was
+  // deleted, so nothing is cut — including the trailing silence.
+  assert.deepEqual(edl.keep, [{ start: 0, end: 4 }]);
+  assert.equal(outputDuration(edl), 4);
 });
 
 test('deleting a middle word splits the range and drops its audio', () => {
@@ -49,11 +55,12 @@ test('deleting a middle word splits the range and drops its audio', () => {
     ['world', 2, 3],
   ]);
   const edl = compileEdl(t, NO_PAD);
+  // The deleted word's second is gone; everything else survives, tail included.
   assert.deepEqual(edl.keep, [
     { start: 0, end: 1 },
-    { start: 2, end: 3 },
+    { start: 2, end: 4 },
   ]);
-  assert.equal(outputDuration(edl), 2, 'the deleted second is gone from the output');
+  assert.equal(outputDuration(edl), 3, 'exactly the deleted second is missing');
 });
 
 test('a long pause between kept words is preserved by default', () => {
@@ -62,7 +69,7 @@ test('a long pause between kept words is preserved by default', () => {
     ['world', 6, 7], // five seconds of dead air
   ]);
   const edl = compileEdl(t, NO_PAD);
-  assert.deepEqual(edl.keep, [{ start: 0, end: 7 }], 'no cut: nothing was deleted');
+  assert.deepEqual(edl.keep, [{ start: 0, end: 8 }], 'no cut: nothing was deleted');
 });
 
 test('maxGapMs shortens a long pause, leaving half the allowance each side', () => {
@@ -72,11 +79,13 @@ test('maxGapMs shortens a long pause, leaving half the allowance each side', () 
   ]);
   const edl = compileEdl(t, { ...NO_PAD, maxGapMs: 1000 });
   // Keeps 0.5s after "hello" and 0.5s before "world" — a 1s pause, not 5s.
+  // The cap shortens the PAUSE. The head and tail are not pauses between words
+  // and are kept at any cap — see compileClipRanges.
   assert.deepEqual(edl.keep, [
     { start: 0, end: 1.5 },
-    { start: 5.5, end: 7 },
+    { start: 5.5, end: 8 },
   ]);
-  assert.equal(outputDuration(edl), 3);
+  assert.equal(outputDuration(edl), 4);
 });
 
 test('a pause is left alone when shortening it would not pay for the cut', () => {
@@ -112,7 +121,7 @@ test('minTrimMs never spares a deletion, however small the hole', () => {
   const edl = compileEdl(t, { padMs: 0, mergeWithinMs: 0, maxGapMs: 500, minTrimMs: 250 });
   assert.deepEqual(
     edl.keep,
-    [{ start: 0, end: 1 }, { start: 1.02, end: 2 }],
+    [{ start: 0, end: 1 }, { start: 1.02, end: 3 }],
     'a deleted word must be cut regardless of how little time it saves',
   );
 });
@@ -123,7 +132,7 @@ test('gaps shorter than maxGapMs are left alone', () => {
     ['world', 1.2, 2],
   ]);
   const edl = compileEdl(t, { ...NO_PAD, maxGapMs: 500 });
-  assert.deepEqual(edl.keep, [{ start: 0, end: 2 }], '200ms gap is under the 500ms cap');
+  assert.deepEqual(edl.keep, [{ start: 0, end: 3 }], '200ms gap is under the 500ms cap');
 });
 
 test('deleting every word yields an empty EDL, not a crash', () => {
@@ -145,9 +154,10 @@ test('consecutive deletions collapse into one cut, not several', () => {
     ['keep', 4, 5],
   ]);
   const edl = compileEdl(t, NO_PAD);
+  // One cut covering all three deletions; the tail past the last word stays.
   assert.deepEqual(edl.keep, [
     { start: 0, end: 1 },
-    { start: 4, end: 5 },
+    { start: 4, end: 6 },
   ]);
 });
 
@@ -157,11 +167,12 @@ test('padding widens each range and clamps at the media boundaries', () => {
     ['cut', 1, 2, true],
     ['world', 2, 3],
   ]);
-  // duration is 4 (max end + 1), so the tail pad has room but the head does not.
+  // duration is 4 (max end + 1). The head clamps at 0 and the tail now runs to
+  // the clip's end, so the pad there has nothing left to widen into.
   const edl = compileEdl(t, { padMs: 100, mergeWithinMs: 0 });
   assert.deepEqual(edl.keep, [
     { start: 0, end: 1.1 }, // clamped at 0, cannot go negative
-    { start: 1.9, end: 3.1 },
+    { start: 1.9, end: 4 }, // clamped at the media boundary
   ]);
 });
 
@@ -292,16 +303,18 @@ test('two clips concatenate on a global timeline, second shifted by the first du
   const b = clip('B', [['second', 0, 1], ['clip', 1, 2]]);
   const edl = compileSequenceEdl([a, b], NO_PAD);
 
+  // Whole clips: nothing was deleted, so nothing is cut. They do NOT merge at
+  // the seam even though A ends exactly where B begins — see the next test.
   assert.deepEqual(edl.keep, [
-    { start: 0, end: 3 }, // A, global == local
-    { start: 4, end: 6 }, // B, shifted by A's duration (4)
+    { start: 0, end: 4 }, // A whole, global == local
+    { start: 4, end: 7 }, // B whole, shifted by A's duration (4)
   ]);
   assert.deepEqual(edl.clips, [
     { clipId: 'A', offset: 0, sourceDuration: 4 },
     { clipId: 'B', offset: 4, sourceDuration: 3 },
   ]);
   assert.equal(edl.sourceDuration, 7, 'total timeline is 4 + 3');
-  assert.equal(outputDuration(edl), 5, 'kept 3s from A and 2s from B');
+  assert.equal(outputDuration(edl), 7, 'nothing deleted, so the whole timeline survives');
 });
 
 test('ranges never merge across a clip seam even when the numbers would touch', () => {
@@ -320,9 +333,9 @@ test('a deletion inside the second clip cuts only that clip', () => {
   const b = clip('B', [['keep', 0, 1], ['cut', 1, 2, true], ['keep', 2, 3]]); // duration 4
   const edl = compileSequenceEdl([a, b], NO_PAD);
   assert.deepEqual(edl.keep, [
-    { start: 0, end: 2 },   // A whole
-    { start: 3, end: 4 },   // B first word (global 3-4)
-    { start: 5, end: 6 },   // B last word (global 5-6), the deletion at 4-5 is gone
+    { start: 0, end: 3 },   // A whole (duration 3)
+    { start: 3, end: 4 },   // B up to the deletion (global 3-4)
+    { start: 5, end: 7 },   // B after it, to the clip's end; 4-5 is the cut word
   ]);
 });
 
@@ -336,9 +349,9 @@ test('clipAt maps a global time to its clip; localRange strips the offset', () =
   assert.equal(clipAt(edl, 4)?.clipId, 'B', 'the exact tail resolves to the last clip');
   assert.equal(clipAt(edl, -1), null);
 
-  const local = localRange(edl, edl.keep[1]); // B's range, global 2-3
+  const local = localRange(edl, edl.keep[1]); // B's range, now the whole clip: global 2-4
   assert.equal(local?.clip.clipId, 'B');
-  assert.deepEqual([local?.start, local?.end], [0, 1], 'offset subtracted back to the file timeline');
+  assert.deepEqual([local?.start, local?.end], [0, 2], 'offset subtracted back to the file timeline');
 });
 
 test('clipAt on a single-source EDL presents one implicit clip', () => {
@@ -355,11 +368,115 @@ test('speed divides the output duration', () => {
   ]);
   const edl = compileEdl(t, NO_PAD);
 
-  assert.equal(outputDuration(edl), 2, 'the cut alone leaves 2s');
-  assert.equal(outputDuration(edl, 1), 2, 'an explicit 1x is the default');
-  assert.equal(outputDuration(edl, 2), 1, '2x halves what the cut left');
-  assert.equal(outputDuration(edl, 0.5), 4, 'slowing down makes it longer');
+  // The 4s clip minus the one deleted second leaves 3s; speed scales that.
+  assert.equal(outputDuration(edl), 3, 'the deleted second is gone; the 4s clip leaves 3s');
+  assert.equal(outputDuration(edl, 1), 3, 'an explicit 1x is the default');
+  assert.equal(outputDuration(edl, 2), 1.5, '2x halves what the cut left');
+  assert.equal(outputDuration(edl, 0.5), 6, 'slowing down makes it longer');
   // Speed applies to the EDITED length, not the source: cut then speed, in that
   // order, because that is the order the filtergraph does it in.
-  assert.equal(outputDuration(edl, 1.2), 2 / 1.2);
+  assert.equal(outputDuration(edl, 1.2), 3 / 1.2);
+});
+
+/**
+ * Footage nobody spoke over.
+ *
+ * A time-lapse, a slow-mo, a silent B-roll shot: imported deliberately, with an
+ * empty transcript because there was nothing to transcribe. These used to
+ * compile to no ranges at all and so disappeared from the timeline and from the
+ * export — 8 of the 21 clips in one real project. Silence is not an edit.
+ *
+ * The distinction these pin: NEVER HAD words (keep it) versus words ALL DELETED
+ * (an edit, stays gone). Empty-vs-nonempty is the only signal that separates
+ * them, so it must keep working.
+ */
+test('a clip with no words at all is kept whole', () => {
+  const edl = compileEdl({ mediaId: 'm', duration: 12, words: [] });
+  assert.deepEqual(edl.keep, [{ start: 0, end: 12 }], 'silent footage survives');
+});
+
+test('a clip whose words were ALL deleted stays cut', () => {
+  const edl = compileEdl({
+    mediaId: 'm',
+    duration: 12,
+    words: [
+      { id: 'w0', text: 'a', start: 1, end: 2, deleted: true },
+      { id: 'w1', text: 'b', start: 3, end: 4, deleted: true },
+    ],
+  });
+  assert.deepEqual(edl.keep, [], 'a deliberate edit is not undone by this rule');
+});
+
+test('a silent clip in a SEQUENCE holds its place on the timeline', () => {
+  // The real shape of the bug: one silent clip between two spoken ones. It has
+  // to occupy its own span, or everything after it slides earlier and the
+  // pictures stop matching the words.
+  const edl = compileSequenceEdl([
+    { clipId: 'a', duration: 10, words: [{ id: 'w0', text: 'hi', start: 1, end: 2 }] },
+    { clipId: 'b', duration: 5, words: [] },
+    { clipId: 'c', duration: 10, words: [{ id: 'w1', text: 'bye', start: 1, end: 2 }] },
+  ]);
+  assert.equal(edl.sourceDuration, 25);
+  const silent = edl.keep.find((r) => r.start >= 10 && r.end <= 15);
+  assert.ok(silent, 'the silent clip contributes a range of its own');
+  assert.deepEqual(silent, { start: 10, end: 15 }, 'and it is the whole clip');
+});
+
+/**
+ * A rate per clip.
+ *
+ * The old model divided the whole program by one number, so the cut clock and
+ * the finished clock differed by a constant and nothing had to think about it.
+ * Per clip they differ PIECEWISE, and everything that has to line up with the
+ * finished video — the music bed's length above all — depends on these two
+ * functions agreeing about where a moment lands.
+ */
+const twoClips = () =>
+  compileSequenceEdl(
+    [
+      { clipId: 'A', duration: 10, words: [] },
+      { clipId: 'B', duration: 10, words: [] },
+    ],
+    { padMs: 0, mergeWithinMs: 0 },
+  );
+
+test('a clip with no rate of its own runs at the fallback', () => {
+  const speeds = { byClip: { B: 2 }, fallback: 1 };
+  assert.equal(speedOf(speeds, 'A'), 1, 'A falls back');
+  assert.equal(speedOf(speeds, 'B'), 2, 'B has its own');
+  assert.equal(speedOf(speeds, 'missing'), 1);
+});
+
+test('a nonsensical rate is ignored rather than dividing by zero', () => {
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(speedOf({ byClip: { A: bad }, fallback: 1 }, 'A'), 1, `${bad} must not apply`);
+  }
+});
+
+test('each clip shortens by its OWN rate, not the project average', () => {
+  const edl = twoClips();
+  // 10s at 1x + 10s at 2x = 10 + 5 = 15, NOT 20 / 1.5 = 13.33.
+  assert.equal(outputDurationWith(edl, { byClip: { B: 2 }, fallback: 1 }), 15);
+  // And a flat map reproduces the old single-speed answer exactly.
+  assert.equal(outputDurationWith(edl, flatSpeed(2)), outputDuration(edl, 2));
+});
+
+test('cutToFinal maps through the piecewise clock', () => {
+  const edl = twoClips();
+  const speeds = { byClip: { B: 2 }, fallback: 1 };
+  assert.equal(cutToFinal(edl, speeds, 0), 0);
+  assert.equal(cutToFinal(edl, speeds, 5), 5, 'inside A, which runs at 1x');
+  assert.equal(cutToFinal(edl, speeds, 10), 10, 'the seam');
+  assert.equal(cutToFinal(edl, speeds, 15), 12.5, 'halfway into B, which runs at 2x');
+  assert.equal(cutToFinal(edl, speeds, 20), 15, 'the end === outputDurationWith');
+});
+
+test('cutToFinal and outputDurationWith agree about the end', () => {
+  const edl = twoClips();
+  for (const speeds of [flatSpeed(1), flatSpeed(1.2), { byClip: { A: 0.5, B: 3 }, fallback: 1 }]) {
+    assert.ok(
+      Math.abs(cutToFinal(edl, speeds, 20) - outputDurationWith(edl, speeds)) < 1e-9,
+      'the two must never disagree, or the music bed is sized against a different clock',
+    );
+  }
 });

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, readdir, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { CONFIG } from './config.ts';
 import { probe } from './ffmpeg.ts';
@@ -34,6 +34,13 @@ export interface StoredClip {
   fps?: number;
   peaks: number[];
   thumbs?: Thumbs;
+  /**
+   * A small H.264 stand-in for PLAYBACK, when one has been built. The renderer
+   * never looks at this — see proxy.ts for why that separation is the whole
+   * point. Absent until the proxy job finishes, and on projects imported before
+   * proxies existed; the client falls back to sourceUrl.
+   */
+  proxyUrl?: string;
   /**
    * Where in its source file this clip begins, in seconds. Absent (≡ 0) for a
    * whole-file clip — every clip until one is split. Splitting a clip makes two
@@ -229,6 +236,12 @@ export interface Project {
    * Studio sound voice enhancer
    */
   studioSound?: boolean;
+  /** Clean the voice with DeepFilterNet before rendering. See denoise.ts. */
+  denoise?: boolean;
+  /** Playback rate per clip id. Absent ids run at `speed`. See doc.ts. */
+  clipSpeeds?: Record<string, number>;
+  /** Playback stand-in for the single-source case. See StoredClip.proxyUrl. */
+  proxyUrl?: string;
   /**
    * The cover frame shown on the dashboard card, as a /media URL. Absent on
    * audio, and on video whose cover has not been built yet — `list` builds any
@@ -238,9 +251,14 @@ export interface Project {
   posterUrl?: string;
   /**
    * The output frame — target resolution plus the zoom/pan that decides which part
-   * of the source fills it. Absent on projects saved before reframing existed, and
-   * on every project that has never left the source's own resolution; the client
-   * falls back to DEFAULT_FRAME via normalizeFrame.
+   * of the source fills it.
+   *
+   * Absent on projects saved before reframing existed, and on those that never
+   * left the source's own resolution. Absent normalizes to the 'source' preset —
+   * NOT to DEFAULT_FRAME, which is now a reel. That asymmetry is deliberate: a
+   * project created today is stamped with DEFAULT_FRAME at import (see the
+   * create route), while one that predates the default keeps the shape it was
+   * made at rather than being re-cropped on open.
    */
   frame?: FrameSettings;
   /**
@@ -288,18 +306,95 @@ export interface Project {
   createdAt: string;
 }
 
-const projectsDir = join(CONFIG.mediaDir, 'projects');
+/**
+ * Where project records live — the DATA directory, not the media one.
+ *
+ * A function rather than a module-level const on purpose. The const form is
+ * evaluated at import, so a test (or an embedder) that sets DATA_DIR after this
+ * module is first required would be silently ignored and would write to the
+ * wrong place while every assertion passed. folders.ts uses the function form
+ * for exactly this reason; match it.
+ */
+const projectsDir = () => join(CONFIG.dataDir, 'projects');
+/** Where these used to live, back when every transcript was web-readable. See init(). */
+const legacyProjectsDir = () => join(CONFIG.mediaDir, 'projects');
+
 const cache = new Map<string, Project>();
 
 export async function init(): Promise<void> {
-  await mkdir(projectsDir, { recursive: true });
+  await mkdir(projectsDir(), { recursive: true });
   await mkdir(join(CONFIG.mediaDir, 'uploads'), { recursive: true });
   await mkdir(join(CONFIG.mediaDir, 'renders'), { recursive: true });
+  await migrateOutOfMedia();
+}
+
+/**
+ * Move project records out of the statically-served media directory.
+ *
+ * They were written to media/projects/, and index.ts serves media/* — so
+ * GET /media/projects/<uuid>.json returned the whole record to anyone who could
+ * reach the port: every word of the transcript, the source path, the saved
+ * assistant conversation. Measured before this change: 213KB and 215 words over
+ * a plain unauthenticated GET.
+ *
+ * folders.ts already fixed the same bug for folder memories and left the note
+ * that this was the pattern; projects and jobs were simply never moved with it.
+ *
+ * Failure policy is per-file and forgiving: a record that cannot be moved is
+ * LEFT WHERE IT IS and the loop continues. A half-migrated library that still
+ * opens beats a clean failure that loses everything, and the next boot retries.
+ */
+async function migrateOutOfMedia(): Promise<void> {
+  const from = legacyProjectsDir();
+  const to = projectsDir();
+  if (from === to) return;
+
+  const files = await readdir(from).catch(() => [] as string[]);
+  let moved = 0;
+
+  for (const name of files) {
+    if (!name.endsWith('.json')) continue;
+    const src = join(from, name);
+    const dst = join(to, name);
+
+    // Never clobber a record already at the new path — it is the newer one.
+    try {
+      await readFile(dst, 'utf8');
+      await unlink(src).catch(() => {});
+      continue;
+    } catch {
+      // Not there yet. Move it.
+    }
+
+    try {
+      await rename(src, dst);
+    } catch {
+      // EXDEV: MEDIA_DIR and DATA_DIR on different volumes. Rare, but the person
+      // who splits them is exactly the person who would hit it.
+      try {
+        await copyFile(src, dst);
+        await unlink(src).catch(() => {});
+      } catch {
+        continue;
+      }
+    }
+
+    // writeFile's `mode` only applies when it CREATES a file, so a record that
+    // arrived here by rename still carries its old 0644. Set it explicitly or
+    // the migration moves the file without fixing the permission that made it
+    // readable in the first place.
+    await chmod(dst, 0o600).catch(() => {});
+    moved++;
+  }
+
+  if (moved > 0) console.log(`projects migrated out of the web-served media directory (${moved})`);
 }
 
 export async function save(project: Project): Promise<void> {
   cache.set(project.id, project);
-  await writeFile(join(projectsDir, `${project.id}.json`), JSON.stringify(project, null, 2));
+  await writeFile(join(projectsDir(), `${project.id}.json`), JSON.stringify(project, null, 2), {
+    mode: 0o600,
+  });
 }
 
 export async function get(id: string): Promise<Project | null> {
@@ -308,7 +403,7 @@ export async function get(id: string): Promise<Project | null> {
 
   try {
     const project = JSON.parse(
-      await readFile(join(projectsDir, `${id}.json`), 'utf8'),
+      await readFile(join(projectsDir(), `${id}.json`), 'utf8'),
     ) as Project;
     // Migrate BEFORE caching. Callers mutate the object this returns and then
     // save it, so a post-cache migration would be silently dropped.
@@ -359,7 +454,7 @@ export async function remove(id: string): Promise<boolean> {
   }
 
   cache.delete(id);
-  await unlink(join(projectsDir, `${id}.json`)).catch(() => {});
+  await unlink(join(projectsDir(), `${id}.json`)).catch(() => {});
   return true;
 }
 
@@ -431,12 +526,53 @@ async function migrate(project: Project): Promise<Project> {
       // reason to fail opening the project — fps is a nicety.
     }
   }
+
+  /**
+   * Re-probe a project whose stored size disagrees with what the media really
+   * displays at.
+   *
+   * `probe()` used to report a stream's STORED dimensions and ignore the
+   * container's rotation, so every vertical phone clip — stored landscape with a
+   * 90-degree Display Matrix — was recorded as landscape. Fixing the probe does
+   * nothing for the projects already on disk, and those numbers are read in
+   * fifteen places: the monitor's geometry, the render target, the caption
+   * canvas, the portrait layout. A project imported yesterday would stay
+   * stretched forever.
+   *
+   * So the correction is applied on OPEN, once, exactly like the fps backfill
+   * above. `thumbs` is dropped with it because the filmstrip's tile shape was
+   * computed from the wrong aspect and its route serves the cached sheets
+   * forever otherwise; clearing the descriptor is what lets it rebuild.
+   *
+   * Cheap in the normal case: one ffprobe, and only when the numbers differ.
+   */
+  if (project.hasVideo && project.width && project.height) {
+    try {
+      const info = await probe(project.sourcePath);
+      if (
+        info.width && info.height &&
+        (info.width !== project.width || info.height !== project.height)
+      ) {
+        console.log(
+          `[store] ${project.id}: stored ${project.width}x${project.height}, ` +
+            `media displays ${info.width}x${info.height} — correcting`,
+        );
+        const next = { ...project, width: info.width, height: info.height, thumbs: undefined };
+        await save(next);
+        return next;
+      }
+    } catch {
+      // Same reasoning as fps: a missing source or absent ffprobe must not stop
+      // a project opening.
+    }
+  }
+
   return project;
 }
 
 /** The media library listing. Peaks, transcript and chat are omitted — big, and not needed here. */
 export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript' | 'chat'>>> {
-  const files = await readdir(projectsDir).catch(() => [] as string[]);
+  const files = await readdir(projectsDir()).catch(() => [] as string[]);
   const projects = await Promise.all(
     files.filter((f) => f.endsWith('.json')).map((f) => get(f.replace('.json', ''))),
   );
@@ -457,8 +593,20 @@ export async function list(): Promise<Array<Omit<Project, 'peaks' | 'transcript'
 /** Give a project its cover frame if it has none, and remember it. */
 async function ensurePoster(project: Project): Promise<void> {
   if (project.posterUrl) return;
+  /**
+   * The cover is taken from clip 0, so it must be timed against CLIP 0.
+   *
+   * `project.duration` is the sum across every clip, while `sourcePath` is the
+   * first one alone. `coverTime` takes a tenth of what it is given, so on a
+   * multi-clip project it could seek past the end of the only file being read
+   * and ffmpeg would return nothing — a project with no cover, for no reason the
+   * user could see. Capped at 10s, so this only bit when clip 0 was short.
+   */
+  const clips = clipsOf(project);
+  const firstDuration = clips[0]?.sourceDuration ?? project.duration;
+
   const url = await poster
-    .ensure(project.sourcePath, project.id, project.duration, project.hasVideo)
+    .ensure(project.sourcePath, project.id, firstDuration, project.hasVideo)
     .catch(() => null);
   // Nothing on failure: a project with no cover shows its mark instead, and the
   // next listing tries again. Persisting a null would make that permanent.
@@ -543,5 +691,6 @@ function singleClipFrom(p: Project): StoredClip {
     fps: p.fps,
     peaks: p.peaks,
     thumbs: p.thumbs,
+    proxyUrl: p.proxyUrl,
   };
 }

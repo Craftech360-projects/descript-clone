@@ -38,7 +38,7 @@ const STARTERS = [
  * round send button. Enter sends; Shift+Enter is a newline.
  */
 export default function AgentPanel({ enabled, defaultModel, onOpenSettings }: Props) {
-  const { entries, status, model, models } = useAgent();
+  const { entries, status, model, models, catalogue } = useAgent();
   const [draft, setDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -196,11 +196,31 @@ export default function AgentPanel({ enabled, defaultModel, onOpenSettings }: Pr
             title="Model"
           >
             {/* The current model always appears, even if the live list hasn't loaded. */}
-            {(models.includes(model) ? models : [model, ...models]).map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
+            {/* Grouped by WHERE it runs, because that is the first thing that
+                decides the choice here: a local model is offline and free, a
+                hosted one is neither. The hint says what each is good for, so
+                the list stops being three vendors' naming schemes. */}
+            {(() => {
+              const ids = models.includes(model) ? models : [model, ...models];
+              const meta = new Map(catalogue.map((c) => [c.id, c]));
+              const groups = new Map<string, string[]>();
+              for (const id of ids) {
+                const where = meta.get(id)?.where ?? 'Other';
+                groups.set(where, [...(groups.get(where) ?? []), id]);
+              }
+              return [...groups.entries()].map(([where, list]) => (
+                <optgroup key={where} label={where}>
+                  {list.map((m) => {
+                    const c = meta.get(m);
+                    return (
+                      <option key={m} value={m} title={c?.hint}>
+                        {c?.label ?? m}
+                      </option>
+                    );
+                  })}
+                </optgroup>
+              ));
+            })()}
           </select>
           <button className="agent-clear" onClick={resetChat} disabled={busy || entries.length === 0}>
             Clear

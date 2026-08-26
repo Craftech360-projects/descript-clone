@@ -3,23 +3,39 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { createNodeWebSocket } from '@hono/node-ws';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
-import { writeFile, rename, unlink } from 'node:fs/promises';
+import { writeFile, rename, unlink, mkdir, readFile, stat, copyFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { join, extname } from 'node:path';
+import { join, extname, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import { ASR_MODELS, CONFIG, EDIT_DEFAULTS } from './config.ts';
-import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools } from './ffmpeg.ts';
+import { ASR_MODELS, CONFIG, EDIT_DEFAULTS, setAppleSpeechReady } from './config.ts';
+import { probe, probeImage, extractAudioForAsr, renderEdl, computePeaks, checkTools, canBurnCaptions, burnCaptionsReady, burnCaptionStrip } from './ffmpeg.ts';
 import { transcribe, defaultAsrOptions, type AsrOptions } from './asr.ts';
 import { generate as generateThumbs } from './thumbs.ts';
 import * as store from './store.ts';
+import * as denoise from './denoise.ts';
+import * as resumable from './resumable.ts';
+import * as proxy from './proxy.ts';
 import * as jobs from './jobs.ts';
 import * as fonts from './fonts.ts';
 import { registerAgent } from './agent.ts';
+import { registerLocalAgent, probe as probeLocalAgent } from './agent-local.ts';
 import { registerClaudeAgent } from './agent-claude.ts';
 import { registerSummon } from './summon.ts';
+import { registerSocial } from './social.ts';
+import * as folders from './folders.ts';
+import * as preferences from './preferences.ts';
+import * as auth from './auth.ts';
+import { registerEditorBridge } from './editor-bridge.ts';
+import * as bridge from './bridge.ts';
+import { registerBridgeRoutes } from './bridge-routes.ts';
+import { readPage } from './read-page.ts';
+import * as appleSpeech from './apple-speech.ts';
+import * as captionImage from './caption-image.ts';
+import { captionImagesReady } from './caption-image.ts';
 import * as settings from './settings.ts';
 import {
   availableProviders,
@@ -30,6 +46,7 @@ import {
 } from './music-search.ts';
 import { canGenerateImages, extensionFor, generateImage } from './image-gen.ts';
 import { nearestAspectRatio } from '../../../packages/core/src/image-prompt.ts';
+import { loudnessStage, presetFor } from '../../../packages/core/src/export-preset.ts';
 
 import {
   normalizeCaptions,
@@ -39,6 +56,7 @@ import {
   compileEdl,
   compileSequenceEdl,
   outputDuration,
+  outputDurationWith,
   sourceToOutput,
 } from '../../../packages/core/src/edl.ts';
 import { movesToOutput } from '../../../packages/core/src/frame-track.ts';
@@ -50,12 +68,14 @@ import { clampSpeed, type CutSettings } from '../../../packages/core/src/doc.ts'
 import { uniqueWordIds } from '../../../packages/core/src/transcript.ts';
 import { bedLength, bedLoops } from '../../../packages/core/src/music.ts';
 import {
+  DEFAULT_FRAME,
   frameSize,
   normalizeFrame,
   resolveFrame,
   type FrameSettings,
 } from '../../../packages/core/src/frame.ts';
 import {
+  colorFilterStages,
   normalizeColor,
   resolveColor,
   type ColorSettings,
@@ -65,9 +85,43 @@ import type { CompileOptions, Edl, Transcript, Word } from '../../../packages/co
 // Load any dashboard-set API keys into process.env BEFORE anything reads them —
 // so CONFIG's credential getters and the Claude SDK both see them from the start.
 await settings.init();
+
+/**
+ * Probe on-device speech ONCE at boot and cache the answer.
+ *
+ * `hasAsr()` is read inside request handlers that cannot await, but deciding
+ * whether the local helper is usable means hitting the filesystem and possibly
+ * the Swift toolchain. So the async question is asked here and the synchronous
+ * getters read the result. A machine does not sprout a compiler mid-session.
+ */
+setAppleSpeechReady(await appleSpeech.available());
+
+// Ask ffmpeg once whether it can burn captions, so the answer is a synchronous
+// fact for every request handler and for /api/capabilities. See canBurnCaptions.
+await canBurnCaptions();
+// Same shape as canBurnCaptions above: a fact about the machine, resolved once,
+// because /api/capabilities and the render route cannot await a probe per call.
+const denoiseReady = await denoise.available();
+// Abandoned part-files, swept at boot: the one moment we know nothing is in
+// flight, so an upload in progress cannot be mistaken for a dead one.
+const sweptUploads = await resumable.sweep();
+if (sweptUploads > 0) console.log(`upload  swept ${sweptUploads} abandoned upload${sweptUploads === 1 ? '' : 's'}`);
+
+// And whether we can draw them ourselves when ffmpeg cannot. One of the two has
+// to be true for "Burn captions" to mean anything.
+await captionImage.probeAvailability();
+
+// Look for a local LLM runtime (Ollama, LM Studio, llama.cpp). Four loopback
+// probes with a short timeout — a machine with none installed pays milliseconds.
+await probeLocalAgent();
+
 await store.init();
 await jobs.init();
 await fonts.init();
+await folders.init();
+await preferences.init();
+await auth.init();
+await bridge.init();
 
 const app = new Hono();
 
@@ -76,12 +130,60 @@ const app = new Hono();
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
 
 /**
- * CORS_ORIGIN pins the browser origin allowed to call this API. Unset keeps the
- * wildcard, which is right for local dev and wrong the moment this is public:
- * every route here is unauthenticated, so `*` lets any page on the internet
- * drive a stranger's projects and spend their ASR credit.
+ * CORS_ORIGIN pins the browser origin allowed to call this API.
+ *
+ * This comment used to end "every route here is unauthenticated, so `*` lets any
+ * page on the internet drive a stranger's projects" — true when it was written,
+ * and no longer: see auth.ts. CORS was never the control that mattered, because
+ * it restrains browsers and not curl, but with a credential in front it is now
+ * the second layer rather than the only one.
+ *
+ * `credentials: true` is required for the session cookie to be legal on a
+ * cross-origin call at all. SameSite=Strict still stops it being SENT
+ * cross-site, which is the actual CSRF defence — this only stops the browser
+ * discarding a legitimate same-site response.
  */
-app.use('/*', cors(process.env.CORS_ORIGIN ? { origin: process.env.CORS_ORIGIN } : undefined));
+app.use(
+  '/*',
+  cors(
+    process.env.CORS_ORIGIN
+      ? { origin: process.env.CORS_ORIGIN, credentials: true }
+      : undefined,
+  ),
+);
+
+/**
+ * The credential check, registered BEFORE the media static handler below and
+ * before every /api route — order is the whole point, since a static handler
+ * that runs first would serve the file and never consult this.
+ */
+app.use('/*', async (c, next) => {
+  const url = new URL(c.req.url);
+  const verdict = auth.authorize(
+    {
+      path: url.pathname,
+      authorization: c.req.header('authorization') ?? null,
+      cookie: c.req.header('cookie') ?? null,
+      query: url.searchParams.get('token'),
+    },
+    auth.currentToken(),
+    { enabled: auth.authEnabled(), autoIssue: auth.isLoopbackHost(CONFIG.host) },
+  );
+
+  if (!verdict.ok) {
+    if (verdict.clearCookie) c.header('set-cookie', auth.cookieHeader('', 0));
+    return c.json({ error: verdict.message }, verdict.status);
+  }
+
+  if ('issue' in verdict && verdict.issue) {
+    c.header('set-cookie', auth.cookieHeader(verdict.issue));
+    // A token that arrived in the query string is redirected away so it does not
+    // linger in the address bar, in history, or in a screenshot.
+    if ('redirect' in verdict && verdict.redirect) return c.redirect(verdict.redirect, 302);
+  }
+
+  await next();
+});
 
 /**
  * Serve uploads and renders out of the media directory itself, rather than
@@ -101,6 +203,36 @@ app.use(
  * Liveness + dependency check. Reports 503 when ffmpeg is missing, so an
  * orchestrator refuses to route to a container that cannot do the job.
  */
+/**
+ * Choices that belong to this installation rather than to a browser tab.
+ *
+ * The model especially: it was in-memory only, so a reload put you back on the
+ * default without saying so.
+ */
+/**
+ * Read a web page's text, for the assistant.
+ *
+ * The address comes from a chat message, so it is untrusted input aimed at this
+ * server's network position — `readPage` runs it through the same public-address
+ * guard the media fetch uses before a byte is requested.
+ */
+app.post('/api/read-page', async (c) => {
+  const { url } = await c.req.json<{ url?: string }>().catch(() => ({ url: '' }));
+  if (!url?.trim()) return c.json({ error: 'Give a URL to read.' }, 400);
+  try {
+    return c.json(await readPage(url.trim()));
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+app.get('/api/preferences', (c) => c.json(preferences.get()));
+
+app.patch('/api/preferences', async (c) => {
+  const body = await c.req.json<Partial<import('./preferences.ts').Preferences>>().catch(() => ({}));
+  return c.json(await preferences.patch(body));
+});
+
 app.get('/api/health', async (c) => {
   const tools = await checkTools();
   const ok = Boolean(tools.ffmpeg && tools.ffprobe);
@@ -119,8 +251,16 @@ app.get('/api/capabilities', (c) =>
       available:
         model.provider === 'mock' ||
         (model.provider === 'elevenlabs' && CONFIG.hasElevenLabsAsr()) ||
-        (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()),
+        (model.provider === 'sarvam' && CONFIG.hasSarvamAsr()) ||
+        (model.provider === 'deepgram' && CONFIG.hasDeepgramAsr()) ||
+        (model.provider === 'apple' && CONFIG.hasAppleSpeech()),
     })),
+    /**
+     * Whether the trained voice cleaner is installed. The toggle is hidden
+     * rather than disabled when it is not — an offer the server cannot keep is
+     * worse than no offer. Probed once at boot; see denoise.ts.
+     */
+    canCleanVoice: denoiseReady,
     asrDefaults: defaultAsrOptions(),
     editDefaults: { ...EDIT_DEFAULTS, maxGapMs: 0 },
     /**
@@ -128,6 +268,16 @@ app.get('/api/capabilities', (c) =>
      * so unlike ASR this capability degrades in QUALITY rather than switching
      * off, and the panel says which catalogue it is on rather than hiding.
      */
+    /**
+     * The EFFECTIVE answer, not "does ffmpeg have libass".
+     *
+     * There are two routes — libass, or drawing the glyphs with CoreText and
+     * compositing them (caption-image.ts). The UI only cares whether ticking
+     * "Burn captions into the video" will produce captions, so it is told that,
+     * not which of the two will do it.
+     */
+    canBurnCaptions: burnCaptionsReady() || captionImagesReady(),
+    captionBurnVia: burnCaptionsReady() ? 'libass' : captionImagesReady() ? 'coretext' : null,
     musicProviders: availableProviders(),
     /**
      * Image inserts. `generate` gates the prompt box in the Images panel — it is
@@ -156,7 +306,17 @@ app.get('/api/capabilities', (c) =>
 // Claude branch (WebSocket at /api/agent/claude/ws). Registered here, before the
 // static catch-all below, like every other /api route.
 registerAgent(app);
+registerLocalAgent(app);
+registerSocial(app);
 registerClaudeAgent(app, upgradeWebSocket);
+
+/**
+ * The editor bridge: a second socket a window attaches with, so callers that are
+ * NOT its own chat panel — the MCP server Hermes talks to — can run the same 70
+ * tools. Registered here beside the Claude one because both need upgradeWebSocket.
+ */
+registerEditorBridge(app, upgradeWebSocket);
+registerBridgeRoutes(app);
 // The assistant's escape hatch: fetch a file off the open web, run a media
 // operation no panel exists for. Its own module because neither backs a feature
 // of the app — see summon.ts on why an assistant needs both.
@@ -263,9 +423,40 @@ app.post('/api/projects', async (c) => {
     return c.json({ error: 'Could not read the upload.' }, 400);
   }
 
+  // Same cleanup contract as the resumable finish below: bytes that turn out not
+  // to be media must not be left behind in mediaDir.
+  let project: store.Project;
+  try {
+    project = await projectFromFile(id, sourcePath, name, ext);
+  } catch (e) {
+    await unlink(sourcePath).catch(() => {});
+    return c.json(
+      { error: `That file could not be read as media. ${e instanceof Error ? e.message.split('\n')[0] : ''}`.trim() },
+      400,
+    );
+  }
+  await store.save(project);
+  startProxy(project.id);
+  return c.json(project);
+});
+
+/**
+ * Build a project record around a file that is ALREADY on disk.
+ *
+ * Shared by the one-shot import above and the resumable finish below, because
+ * everything after "the bytes arrived" is identical and the two must not drift:
+ * a project created by a resumed upload has to be indistinguishable from one
+ * created in a single request.
+ */
+async function projectFromFile(
+  id: string,
+  sourcePath: string,
+  name: string,
+  ext: string,
+): Promise<store.Project> {
   const info = await probe(sourcePath);
 
-  const project: store.Project = {
+  return {
     id,
     name,
     sourcePath,
@@ -276,16 +467,236 @@ app.post('/api/projects', async (c) => {
     height: info.height,
     fps: info.fps,
     status: 'imported',
+    /**
+     * New projects are REELS. Written here, at creation, rather than by changing
+     * what an ABSENT frame normalizes to.
+     *
+     * The distinction matters. `normalizeFrame` reads a missing frame as
+     * 'source' — "nothing was ever chosen, so leave the media alone" — and every
+     * project saved before this change has no frame stored. Moving that fallback
+     * to 'reel' would silently re-crop every existing project to 9:16 the next
+     * time it was opened, which is not a default, it is an edit nobody asked for.
+     *
+     * Stamping the new record instead means the default applies to work started
+     * from now on and existing work keeps the shape it was made at.
+     */
+    frame: DEFAULT_FRAME,
     transcript: null,
     asrProvider: null,
     verbatim: false,
     peaks: await computePeaks(sourcePath),
     createdAt: new Date().toISOString(),
   };
+}
 
+
+/**
+ * Resumable upload: open a session.
+ *
+ * The client gets an id and sends the file in chunks against it. Everything the
+ * server needs to finish the import later (name, extension) is captured now, so
+ * a resume after a reload does not depend on the client remembering it.
+ */
+app.post('/api/uploads', async (c) => {
+  const body = await c.req.json<{ name?: string; size?: number }>().catch(() => ({}));
+  const name = (body.name ?? 'upload.mp4').slice(0, 200);
+  const size = Number(body.size ?? 0);
+  if (!Number.isFinite(size) || size <= 0) return c.json({ error: 'A size is required.' }, 400);
+  if (size > CONFIG.maxUploadBytes) {
+    return c.json({ error: `File is too large. The limit is ${mb(CONFIG.maxUploadBytes)} MB.` }, 413);
+  }
+  const session = await resumable.create({
+    id: randomUUID(),
+    name,
+    ext: extname(name) || '.mp4',
+    size,
+  });
+  return c.json({ uploadId: session.id, offset: 0 });
+});
+
+/**
+ * Where did this upload get to?
+ *
+ * The question a client asks after a refresh. Answering with the byte count on
+ * disk is what turns "start again" into "carry on".
+ */
+/** Unfinished uploads, so the dashboard can offer to carry one on. */
+app.get('/api/uploads', async (c) => c.json(await resumable.list()));
+
+app.get('/api/uploads/:id', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+  return c.json({ uploadId: session.id, offset: session.offset, size: session.size, name: session.name });
+});
+
+/** Append one chunk at an explicit offset. See resumable.append for why it is strict. */
+app.patch('/api/uploads/:id', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+
+  const offset = Number(c.req.query('offset') ?? NaN);
+  if (!Number.isFinite(offset) || offset < 0) return c.json({ error: 'A byte offset is required.' }, 400);
+
+  const result = await resumable.append(session, offset, c.req.raw.body);
+  if (!result.ok) {
+    // 409, with the truth: the client re-seeks rather than guessing. This is the
+    // normal way a retried chunk is handled, not an error worth surfacing.
+    return c.json({ error: 'Offset does not match', expected: result.expected }, 409);
+  }
+  return c.json({ uploadId: session.id, offset: result.session.offset });
+});
+
+/**
+ * Finish: turn the assembled bytes into a project.
+ *
+ * Refuses a short file rather than importing a truncated video — a clip that
+ * plays for ten of its ninety seconds is a worse outcome than a failed import,
+ * because it looks like it worked.
+ */
+app.post('/api/uploads/:id/finish', async (c) => {
+  const session = await resumable.get(c.req.param('id'));
+  if (!session) return c.json({ error: 'No such upload' }, 404);
+
+  const onDisk = await stat(resumable.partPath(session.id)).then((s) => s.size).catch(() => 0);
+  if (onDisk !== session.size) {
+    return c.json({ error: 'Upload is incomplete', offset: onDisk, size: session.size }, 409);
+  }
+
+  const id = randomUUID();
+  const sourcePath = join(CONFIG.mediaDir, 'uploads', `${id}${session.ext}`);
+  await mkdir(dirname(sourcePath), { recursive: true });
+  // rename() when it can, copy+unlink across devices — dataDir and mediaDir are
+  // not guaranteed to be the same filesystem (they are not, in the Docker image).
+  try {
+    await rename(resumable.partPath(session.id), sourcePath);
+  } catch {
+    await copyFile(resumable.partPath(session.id), sourcePath);
+  }
+  await resumable.discard(session.id);
+
+  /**
+   * Probe can reject what arrived — a file that is not media, or one whose moov
+   * atom never made it. The bytes are already in mediaDir by then, so failing
+   * here without cleaning up leaves an orphan no project references and nothing
+   * ever collects. Delete it and say what was wrong.
+   */
+  let project: store.Project;
+  try {
+    project = await projectFromFile(id, sourcePath, session.name, session.ext);
+  } catch (e) {
+    await unlink(sourcePath).catch(() => {});
+    return c.json(
+      { error: `That file could not be read as media. ${e instanceof Error ? e.message.split('\n')[0] : ''}`.trim() },
+      400,
+    );
+  }
   await store.save(project);
+  startProxy(project.id);
   return c.json(project);
 });
+
+/** Give up on an upload and reclaim its bytes. */
+app.delete('/api/uploads/:id', async (c) => {
+  await resumable.discard(c.req.param('id'));
+  return c.json({ ok: true });
+});
+
+
+/**
+ * Kick off the playback proxy for a project, in the background.
+ *
+ * Deliberately fire-and-forget: import must return the moment the media is on
+ * disk, because the user wants to start reading the transcript, not watch a
+ * progress bar for a file they already have. Until it lands the player falls
+ * back to the original, which is exactly what it did before proxies existed —
+ * so a failure here costs speed, never function.
+ */
+/**
+ * Clean the voice NOW, rather than at export.
+ *
+ * The denoise always ran — but only inside the render, where the user had
+ * already pressed Export and was waiting anyway. Turning the switch on did
+ * nothing visible, so it read as a control that was not wired up. Running it
+ * here gives the work a job, and therefore a progress bar, and leaves the result
+ * cached so the export that follows is no slower than an uncleaned one.
+ */
+app.post('/api/projects/:id/clean-voice', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!(await denoise.available())) {
+    return c.json({ error: 'Voice cleanup is not installed on this server.' }, 400);
+  }
+
+  const job = jobs.start(project.id, 'denoise', 'Cleaning voice', async (runner) => {
+    const fresh = await store.get(project.id);
+    if (!fresh) return {};
+    const stored = store.ensureClips(fresh);
+    const clips = store.clipsOf(fresh);
+    let n = 0;
+    for (const clip of clips) {
+      n++;
+      const of = clips.length > 1 ? ` (${n}/${clips.length})` : '';
+      const cleaned = await denoise.ensureCleaned(clip.sourcePath, (stage) =>
+        runner.onProgress({ progress: -1, stage: `${stage}${of}` }),
+      );
+
+      /**
+       * Rebuild the PREVIEW from the cleaned audio.
+       *
+       * Without this the cleaner was inaudible: the editor plays the proxy, the
+       * proxy was made from the original, so the noise stayed exactly where the
+       * user could hear it and only the export was ever clean. Cleaning audio
+       * you cannot listen to is not a feature.
+       *
+       * The proxy keeps its name — it is keyed to the original — so the URL on
+       * the record does not move and nothing downstream has to be told.
+       */
+      runner.onProgress({ progress: -1, stage: `Updating preview${of}` });
+      await proxy.build(clip.sourcePath, undefined, cleaned);
+      const rec = stored.find((c) => c.id === clip.id);
+      if (rec) rec.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      if (clips.length === 1) fresh.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      await store.save(fresh);
+    }
+    return {};
+  });
+  return c.json({ jobId: job?.id ?? null });
+});
+
+/**
+ * Build (or rebuild) the playback proxy for an existing project.
+ *
+ * Import does this on its own, but every project that predates proxies has none
+ * — and those are exactly the big 4K files that need one most. Returns the job
+ * so the client can watch it.
+ */
+app.post('/api/projects/:id/proxy', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project.hasVideo) return c.json({ error: 'Audio projects need no preview copy.' }, 400);
+  const job = startProxy(project.id);
+  return c.json({ jobId: job?.id ?? null });
+});
+
+function startProxy(projectId: string): { id: string } | null {
+  return jobs.start(projectId, 'proxy', 'Preparing preview', async (runner) => {
+    const fresh = await store.get(projectId);
+    if (!fresh) return {};
+    const clips = store.ensureClips(fresh);
+    for (const clip of clips) {
+      if (!clip.hasVideo) continue;
+      await proxy.build(clip.sourcePath, (stage) => runner.onProgress({ progress: -1, stage }));
+      clip.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      // Single-source projects are read through the flat fields too, so the top
+      // level has to carry it or clipsOf would hand back a clip with no proxy.
+      if (clips.length === 1) fresh.proxyUrl = clip.proxyUrl;
+      // Saved per clip rather than once at the end: a five-clip project should
+      // start playing smoothly from the first, not after the last.
+      await store.save(fresh);
+    }
+    return {};
+  });
+}
 
 app.get('/api/projects/:id', async (c) => {
   const project = await store.get(c.req.param('id'));
@@ -983,18 +1394,52 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   const project = await store.get(c.req.param('id'));
   if (!project?.transcript) return c.json({ error: 'Not transcribed yet' }, 400);
 
-  const { deletedIds, captions, speed, cut, studioSound, frame, color, overlays } = await c.req.json<{
+  const { deletedIds, texts, speakers, captions, speed, cut, studioSound, denoise: denoise2, clipSpeeds, frame, color, overlays } =
+    await c.req.json<{
     deletedIds: string[];
+    texts?: Record<string, unknown>;
+    speakers?: Record<string, unknown>;
     captions?: CaptionSettings;
     speed?: number;
     cut?: Partial<CutSettings>;
     studioSound?: boolean;
+    denoise?: boolean;
+    clipSpeeds?: Record<string, unknown>;
     frame?: Partial<FrameSettings>;
     color?: Partial<ColorSettings>;
     overlays?: unknown;
   }>();
   const deleted = new Set(deletedIds);
   for (const word of project.transcript.words) word.deleted = deleted.has(word.id);
+
+  /**
+   * Corrected spellings, and the speaker labels beside them.
+   *
+   * Sanitised, not trusted, exactly like cut/frame/color below: only ids this
+   * transcript actually has are looked at, only strings are taken, and each is
+   * capped so a hostile or buggy client cannot grow the record without bound.
+   *
+   * `texts` is applied per word rather than replacing the array, so a word the
+   * map omits keeps the text it had — an OLDER client, which sends no `texts`
+   * at all, must not blank the script it cannot see. `speakers` is a whole
+   * replacement because clearing a label has to be expressible, and absent is
+   * the only way to say it.
+   */
+  const MAX_WORD = 200;
+  const MAX_SPEAKER = 80;
+  if (texts && typeof texts === 'object') {
+    for (const word of project.transcript.words) {
+      const t = texts[word.id];
+      if (typeof t === 'string') word.text = t.slice(0, MAX_WORD);
+    }
+  }
+  if (speakers && typeof speakers === 'object') {
+    for (const word of project.transcript.words) {
+      const s = speakers[word.id];
+      word.speaker = typeof s === 'string' && s ? s.slice(0, MAX_SPEAKER) : undefined;
+    }
+  }
+
   if (captions) project.captions = captions;
   // Distinguish "not sent" from "sent as 1": an older client omits the field and
   // must not have its speed reset, but a user picking 1x must have it saved.
@@ -1004,6 +1449,20 @@ app.patch('/api/projects/:id/transcript', async (c) => {
   // cannot poison the compiler on the next render.
   if (cut) project.cut = sanitizeCut(cut);
   if (studioSound !== undefined) project.studioSound = Boolean(studioSound);
+  if (denoise2 !== undefined) project.denoise = Boolean(denoise2);
+  /**
+   * Per-clip rates, coerced at the boundary like every sibling here: only ids
+   * this project actually has, and every value through clampSpeed — an unchecked
+   * 0 is `setpts=PTS/0` and a failed render rather than a silly one.
+   */
+  if (clipSpeeds && typeof clipSpeeds === 'object') {
+    const ids = new Set(store.clipsOf(project).map((c) => c.id));
+    const clean: Record<string, number> = {};
+    for (const [id, v] of Object.entries(clipSpeeds)) {
+      if (ids.has(id)) clean[id] = clampSpeed(v);
+    }
+    project.clipSpeeds = clean;
+  }
   // normalizeFrame is the coercion, same contract as sanitizeCut above: a bad
   // width, a NaN zoom, or an unknown preset off the wire cannot reach the graph.
   if (frame !== undefined) project.frame = normalizeFrame(frame);
@@ -1178,12 +1637,58 @@ app.post('/api/projects/:id/render', async (c) => {
   });
   const wantsCaptions = Boolean(options.burnCaptions ?? captions.enabled);
 
+  /**
+   * Refuse a burn this ffmpeg cannot do, BEFORE the job starts.
+   *
+   * `subtitles` is the libass filter, and it is a build option. Without it the
+   * render queued, ran, and died with "No such filter: 'subtitles'" — an ffmpeg
+   * internal buried in a job record, from a button that just said Export. The
+   * user is left believing the app is broken rather than that one optional
+   * dependency is missing.
+   *
+   * Refusing here says what is wrong, what it costs, and the two ways out. The
+   * sidecar caption export is unaffected: it is text, not pixels, and never
+   * touches libass.
+   */
+  /**
+   * Two ways to burn a caption, and the fallback is not a downgrade.
+   *
+   * libass is the usual route and it is a BUILD OPTION ffmpeg here does not
+   * carry, so `subtitles` does not exist and the render used to die inside
+   * ffmpeg. When it is missing we draw the glyphs ourselves with CoreText and
+   * composite the result as an image track — see caption-image.ts. Only when
+   * NEITHER is available is there nothing to do but say so.
+   */
+  const captionsViaImages = wantsCaptions && !burnCaptionsReady() && captionImagesReady();
+
+  if (wantsCaptions && !burnCaptionsReady() && !captionImagesReady()) {
+    return c.json(
+      {
+        error:
+          'Captions cannot be burned in on this machine: this ffmpeg was built without libass, ' +
+          'and the built-in caption renderer needs macOS. Turn off "Burn captions into the video" ' +
+          'to export without them — the caption file download is unaffected.',
+      },
+      422,
+    );
+  }
+
   // The output frame, resolved before captions because captions are placed
   // against it. Layered the same way as the caption style: the request wins over
   // the record, per field, so an Export fired mid-debounce reframes to what is on
   // screen. The SOURCE it is resolved against is the stitched canvas on a
   // multi-clip project (render.width/height) and the file's own size otherwise.
-  const frameSettings = normalizeFrame({ ...project.frame, ...(options.frame ?? {}) });
+  /**
+   * A preset names the shape it wants, and that beats the stored frame — picking
+   * "Instagram Reels" and getting a 16:9 file because the project was left on
+   * `source` would make the preset a decoration.
+   */
+  const presetSize = presetFor(String(options.preset ?? 'source')).size;
+  const frameSettings = normalizeFrame({
+    ...project.frame,
+    ...(presetSize ? { preset: 'custom' as const, width: presetSize.width, height: presetSize.height } : {}),
+    ...(options.frame ?? {}),
+  });
   const sourceSize = {
     width: render?.width ?? project.width ?? 1920,
     height: render?.height ?? project.height ?? 1080,
@@ -1274,7 +1779,7 @@ app.post('/api/projects/:id/render', async (c) => {
       : undefined;
 
   const subtitles =
-    wantsCaptions && project.hasVideo
+    wantsCaptions && project.hasVideo && !captionsViaImages
       ? toAss(
           toCues(captionTranscript, edl, {
             maxChars: captions.maxChars,
@@ -1328,10 +1833,50 @@ app.post('/api/projects/:id/render', async (c) => {
 
   const job = jobs.start(project.id, 'render', 'Encoding', async (runner) => {
     const started = Date.now();
+
+    /**
+     * Voice cleanup, when it is asked for.
+     *
+     * Runs BEFORE the render and swaps the input, rather than joining the filter
+     * chain — DeepFilterNet is a model, not a filter. What comes back is the same
+     * media with the same picture (stream-copied, not re-encoded) and cleaned
+     * audio, so everything below this line is unchanged and unaware.
+     *
+     * Cached per source, so only the first render of a clip pays for it.
+     *
+     * A multi-clip project cleans each clip; they are separate files and the
+     * stitch reads them individually.
+     */
+    /**
+     * One rate map for this render: per-clip overrides, with the project speed as
+     * the fallback. Built once and used by the plan, the music bed AND the
+     * reported length — those three disagreeing is how a bed gets trimmed to a
+     * program length that does not exist.
+     */
+    const speeds = {
+      byClip: (options.clipSpeeds ?? project.clipSpeeds ?? {}) as Record<string, number>,
+      fallback: speed,
+    };
+    const wantsClean = Boolean(options.denoise ?? project.denoise);
+    let input = project.sourcePath;
+    let clipInputs = render?.clips;
+    if (wantsClean) {
+      runner.onProgress({ progress: -1, stage: 'Cleaning voice' });
+      input = await denoise.ensureCleaned(project.sourcePath, (stage) =>
+        runner.onProgress({ progress: -1, stage }),
+      );
+      if (clipInputs) {
+        clipInputs = [];
+        for (const cl of render!.clips) {
+          clipInputs.push({ ...cl, input: await denoise.ensureCleaned(cl.input) });
+        }
+      }
+    }
+
     const { segments, burnedIn } = await renderEdl(
       edl,
       {
-        input: project.sourcePath,
+        input,
         output: outPath,
         hasVideo: project.hasVideo,
         subtitles,
@@ -1341,15 +1886,29 @@ app.post('/api/projects/:id/render', async (c) => {
         // Present only for a multi-clip project: renderEdl then stitches these
         // source files instead of cutting the single input. width/height give the
         // canonical frame the clips are letterboxed into.
-        clips: render?.clips,
+        clips: clipInputs,
         width: render?.width,
         height: render?.height,
         // The music bed, mixed under the finished program. Absent = clean render.
         bgMusic,
+        // Tells the voice chain the model already cleaned this input, so it does
+        // not denoise twice or amplify what the model left behind.
+        denoised: wantsClean,
+        /**
+         * Per-clip rates. Live options win over the stored record for the same
+         * reason captions and frame do — an Export fired mid-debounce must use
+         * what is on screen. `speed` remains the fallback for clips with no rate
+         * of their own, which is what makes "all clips 1.2x" one number.
+         */
+        clipSpeeds: speeds,
         // The Studio Sound voice chain, run on the program before the bed. Live
         // settings win over the stored flag for the same reason the music ones do:
         // an Export fired mid-debounce should use the toggle on screen.
         studioSound: Boolean(options.studioSound ?? project.studioSound),
+        // Where this file is going. The preset's loudness target runs whether or
+        // not Studio Sound is on — arriving at the right level is not a creative
+        // choice the way the voice chain is. See export-preset.ts.
+        loudness: loudnessStage(String(options.preset ?? 'source')),
         // The crop into the target resolution. Absent = the picture keeps the
         // source's shape, and the video graph is emitted as it was before.
         frame,
@@ -1375,21 +1934,221 @@ app.post('/api/projects/:id/render', async (c) => {
       },
     );
 
+    /**
+     * The CoreText caption pass.
+     *
+     * Runs only when libass is absent — otherwise the glyphs are already in the
+     * picture and this is skipped entirely. The tiles are drawn from the same
+     * cues and the same CaptionSettings the preview reads, so what ships is what
+     * was on screen.
+     */
+    let finalName = name;
+    if (captionsViaImages && project.hasVideo) {
+      runner.onProgress({ progress: -1, stage: 'Drawing captions' });
+
+      const cues = toCues(captionTranscript, edl, {
+        maxChars: captions.maxChars,
+        maxDurationMs: options.maxDurationMs,
+      });
+      const scaled = speed === 1 ? cues : scaleCues(cues, speed);
+
+      const strip = await captionImage.build(
+        scaled,
+        captions,
+        outSize,
+        CONFIG.mediaDir,
+        job.id,
+      );
+
+      if (strip) {
+        try {
+          const burnedName = name.replace(/\.mp4$/, '-cc.mp4');
+          runner.onProgress({ progress: -1, stage: 'Burning captions' });
+          await burnCaptionStrip(
+            join(CONFIG.mediaDir, 'renders', name),
+            join(CONFIG.mediaDir, 'renders', burnedName),
+            strip,
+            { onSpawn: (child) => runner.track(child) },
+          );
+          // The clean render was an intermediate; only the captioned file ships.
+          await unlink(join(CONFIG.mediaDir, 'renders', name)).catch(() => {});
+          finalName = burnedName;
+        } finally {
+          await captionImage.cleanup(strip);
+        }
+      }
+    }
+
     return {
-      url: `/media/renders/${name}`,
+      url: `/media/renders/${finalName}`,
       segments,
-      burnedIn,
+      burnedIn: burnedIn || captionsViaImages,
       // An audio-only project cannot show a caption. Say so rather than silently
       // dropping the option the user ticked.
       captionsSkipped: wantsCaptions && !project.hasVideo,
       sourceDuration: project.duration,
-      outputDuration: outputDuration(edl, speed),
+      // Summed per clip at each clip's own rate — total/speed is only right when
+      // every clip agrees, and it reported 740s for a render that ran 706s.
+      outputDuration: outputDurationWith(edl, speeds),
       speed,
       renderMs: Date.now() - started,
     };
   });
 
   return c.json({ jobId: job.id }, 202);
+});
+
+/**
+ * Run one ffmpeg command to completion. For the single-frame look, which needs
+ * neither progress nor cancellation — the whole point is that it is over before
+ * anyone would think to stop it.
+ */
+function runFfmpegOnce(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(CONFIG.ffmpegPath, args, { windowsHide: true });
+    let err = '';
+    child.stderr.on('data', (c) => { err = (err + String(c)).slice(-1000); });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.trim().slice(0, 300)}`)),
+    );
+  });
+}
+
+/**
+ * Which caption tile is on screen at `at` on the output clock.
+ *
+ * The strip is one tile per caption STATE — a gap, a cue, or a word within a cue
+ * when karaoke is on — so the index is a walk, not arithmetic. Returns 0 (the
+ * leading gap) when nothing is being said, which is the honest picture.
+ */
+function tileIndexAt(cues: Array<{ start: number; end: number; words: unknown[] }>, at: number, karaoke: boolean): number {
+  let index = 0;
+  let clock = 0;
+  for (const cue of cues) {
+    if (cue.start > clock + 0.001) {
+      if (at < cue.start) return index;
+      index += 1;
+      clock = cue.start;
+    }
+    if (at < cue.end) {
+      if (!karaoke || cue.words.length === 0) return index;
+      const words = cue.words as Array<{ start: number }>;
+      for (let i = 0; i < words.length; i++) {
+        const next = i === words.length - 1 ? cue.end : words[i + 1].start;
+        if (at < next) return index + i;
+      }
+      return index + Math.max(0, words.length - 1);
+    }
+    index += !karaoke || cue.words.length === 0 ? 1 : Math.max(1, cue.words.length);
+    clock = cue.end;
+  }
+  return index;
+}
+
+/**
+ * ONE finished frame, as an image — what the assistant looks at.
+ *
+ * Not a screenshot of the app. A screenshot shows the editor's chrome, which is
+ * not the thing anyone is asking about; this renders the DELIVERED picture at a
+ * moment — the crop, the grade and the burned caption — so "does the subtitle
+ * sit under the platform's caption bar" is answerable by looking rather than by
+ * reasoning about numbers.
+ *
+ * Cheap on purpose: one frame, scaled down, no audio, no encode of a programme.
+ * The caption tile is composited exactly as the export does it, so what the
+ * model sees is what would ship.
+ */
+app.post('/api/projects/:id/frame', async (c) => {
+  const project = await store.get(c.req.param('id'));
+  if (!project) return c.json({ error: 'No such project' }, 404);
+  if (!project.hasVideo) return c.json({ error: 'This project has no picture to look at.' }, 400);
+
+  const body = await c.req.json<{ atSeconds?: number; captions?: CaptionSettings }>().catch(() => ({}));
+
+  const captions = normalizeCaptions({ ...normalizeCaptions(project.captions), ...(body.captions ?? {}) });
+  const frameSettings = normalizeFrame(project.frame);
+  const source = { width: project.width ?? 1920, height: project.height ?? 1080 };
+  const outSize = frameSize(frameSettings, source);
+
+  const clips = store.clipsOf(project);
+  const at = Math.max(0, Math.min(project.duration - 0.05, Number(body.atSeconds ?? 0) || 0));
+  // Which file that moment lives in — a multi-clip project's timeline is not any
+  // single file's timeline.
+  const clip = clips.find((cl) => at >= cl.offset && at < cl.offset + cl.duration) ?? clips[0];
+  const withinClip = (clip.sourceStart ?? 0) + (at - clip.offset);
+
+  const dir = join(CONFIG.mediaDir, 'tmp');
+  await mkdir(dir, { recursive: true }).catch(() => {});
+  const out = join(dir, `frame-${project.id}-${Date.now()}.jpg`);
+
+  const filters: string[] = [];
+  const resolved = resolveFrame(frameSettings, source);
+  if (resolved) filters.push(...frameFilterStages(resolved));
+  const grade = resolveColor(normalizeColor(project.color));
+  if (grade) filters.push(...colorFilterStages(grade));
+  // Small: the model is judging placement and colour, not pixel detail, and a
+  // 4K still costs tokens for nothing.
+  filters.push(`scale=${Math.min(540, outSize.width)}:-2`);
+
+  try {
+    await runFfmpegOnce([
+      '-hide_banner', '-v', 'error', '-y',
+      '-ss', String(withinClip),
+      '-i', clip.sourcePath,
+      '-frames:v', '1',
+      ...(filters.length ? ['-vf', filters.join(',')] : []),
+      '-q:v', '4',
+      out,
+    ]);
+
+    let framePath = out;
+    // The caption, composited the same way the export does it, so the answer is
+    // about the delivered picture rather than an approximation of it.
+    if (captions.enabled && captionImagesReady() && project.transcript) {
+      const transcript = project.transcript;
+      if (!transcript) throw new Error('no transcript');
+      const edl = compileEdl(transcript, EDIT_DEFAULTS);
+      const cues = toCues(transcript, edl, { maxChars: captions.maxChars });
+      const strip = await captionImage.build(cues, captions, outSize, CONFIG.mediaDir, `look-${project.id}`);
+      if (strip) {
+        try {
+          const withCaps = out.replace(/\.jpg$/, '-cc.jpg');
+          await runFfmpegOnce([
+            '-hide_banner', '-v', 'error', '-y',
+            '-i', out,
+            // The tile that is on screen at this moment. Always taking cap-00001
+            // would show whatever the first caption happened to be, which is a
+            // different lie from showing none.
+            '-i', join(strip.dir, `cap-${String(tileIndexAt(cues, at, captions.karaoke)).padStart(5, '0')}.png`),
+            '-filter_complex',
+            `[1:v]scale=iw*${(Math.min(540, outSize.width) / outSize.width).toFixed(4)}:-1[c];[0:v][c]overlay=x=${Math.round(strip.x * (Math.min(540, outSize.width) / outSize.width))}:y=${Math.round(strip.y * (Math.min(540, outSize.width) / outSize.width))}`,
+            '-frames:v', '1', '-q:v', '4', withCaps,
+          ]);
+          framePath = withCaps;
+        } catch {
+          // A caption that would not composite is not a reason to refuse the
+          // look — the picture underneath is still the answer to most questions.
+        } finally {
+          await captionImage.cleanup(strip);
+        }
+      }
+    }
+
+    const bytes = await readFile(framePath);
+    await unlink(out).catch(() => {});
+    if (framePath !== out) await unlink(framePath).catch(() => {});
+
+    return c.json({
+      image: `data:image/jpeg;base64,${bytes.toString('base64')}`,
+      atSeconds: at,
+      width: Math.min(540, outSize.width),
+      note: `Frame at ${at.toFixed(1)}s of the finished ${outSize.width}x${outSize.height} picture.`,
+    });
+  } catch (e) {
+    await unlink(out).catch(() => {});
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
 });
 
 /**
@@ -1410,15 +2169,35 @@ app.post('/api/projects/:id/thumbs', async (c) => {
   if (project.thumbs) return c.json({ thumbs: project.thumbs });
 
   const job = jobs.start(project.id, 'thumbs', 'Building filmstrip', async (runner) => {
+    // Probe rather than trust the record. The tile's SHAPE comes from these two
+    // numbers, and the record is the one thing here that can be stale — it is
+    // written once at import, while `probe` reads the file in front of it. A
+    // disagreement used to bake a squashed picture into every sheet.
+    const probed = await probe(project.sourcePath).catch(() => null);
+
+    /**
+     * Every clip, not just the first.
+     *
+     * `project.duration` is the SUM across clips while `sourcePath` is clip 0
+     * alone, so passing the pair asked for a strip covering the whole programme
+     * built from one file — and the strip went black at clip 1's end.
+     */
+    const clips = store.clipsOf(project);
+    const sources = clips.map((c) => ({
+      sourcePath: c.sourcePath,
+      sourceStart: c.sourceStart,
+      duration: c.duration,
+    }));
+
     const thumbs = await generateThumbs(
-      project.sourcePath,
+      sources.length > 1 ? sources : project.sourcePath,
       project.id,
       {
         duration: project.duration,
         hasVideo: project.hasVideo,
         hasAudio: true,
-        width: project.width,
-        height: project.height,
+        width: probed?.width ?? project.width,
+        height: probed?.height ?? project.height,
       },
       { onSpawn: (child) => runner.track(child) },
     );
@@ -1576,11 +2355,34 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500);
 });
 
-const server = serve({ fetch: app.fetch, port: CONFIG.port }, (info) => {
-  console.log(`server  http://localhost:${info.port}`);
+/**
+ * Is this bind address one only this machine can reach?
+ *
+ * Used for one thing: deciding whether the startup banner owes the operator a
+ * warning. `::` and `0.0.0.0` are the two ways to say "every interface", and a
+ * named host is assumed routable because a person who typed one meant it.
+ */
+function isLoopback(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+}
+
+const server = serve({ fetch: app.fetch, port: CONFIG.port, hostname: CONFIG.host }, (info) => {
+  // Print the address we ACTUALLY bound. The old line said "localhost" while
+  // binding every interface, so the one place a person looks to find out where
+  // their editor is listening told them the reassuring answer rather than the
+  // real one.
+  console.log(`server  http://${CONFIG.host}:${info.port}`);
+  // Publish where we ACTUALLY landed, so an external agent can find us even
+  // though the desktop shell picks a fresh port every launch. See bridge.ts.
+  void bridge.publish(info.port);
+  if (!isLoopback(CONFIG.host)) {
+    console.log(`        reachable from the network — every route on this port is`);
+  }
   const asr = [
     CONFIG.hasElevenLabsAsr() ? 'ElevenLabs Scribe' : '',
     CONFIG.hasSarvamAsr() ? 'Sarvam Saaras v3' : '',
+    CONFIG.hasAppleSpeech() ? 'Apple on-device (no key, no diarization)' : '',
+    CONFIG.hasDeepgramAsr() ? 'Deepgram Nova-3' : '',
   ].filter(Boolean).join(' + ') || 'disabled (mock ASR)';
   console.log(`asr     ${asr}`);
   console.log(

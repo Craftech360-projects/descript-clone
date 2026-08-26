@@ -65,9 +65,9 @@ export function proxyUrlFor(sourceUrl: string): string {
 }
 
 /** Whether a usable proxy already exists and is newer than what it stands in for. */
-export async function isFresh(sourcePath: string): Promise<boolean> {
+export async function isFresh(sourcePath: string, proxyPath?: string): Promise<boolean> {
   try {
-    const [src, prox] = await Promise.all([stat(sourcePath), stat(proxyPathFor(sourcePath))]);
+    const [src, prox] = await Promise.all([stat(sourcePath), stat(proxyPath ?? proxyPathFor(sourcePath))]);
     return prox.size > 0 && prox.mtimeMs >= src.mtimeMs;
   } catch {
     return false;
@@ -90,14 +90,27 @@ export async function isFresh(sourcePath: string): Promise<boolean> {
 export async function build(
   sourcePath: string,
   onProgress?: (stage: string) => void,
+  /**
+   * Read the pictures and sound from HERE instead, while still naming the proxy
+   * after `sourcePath`.
+   *
+   * For the cleaned copy of a clip. The proxy is what the editor actually plays,
+   * so a proxy built from the original meant the voice cleaner changed nothing
+   * you could HEAR — you edited against the noise and only the export was clean.
+   * The name stays keyed to the original so the URL on the record never moves.
+   */
+  from?: string,
 ): Promise<string> {
   const out = proxyPathFor(sourcePath);
-  if (await isFresh(sourcePath)) return out;
+  // Freshness is judged against whatever is actually being read: a proxy older
+  // than the cleaned file it should have come from is stale even when it is
+  // newer than the original.
+  if (await isFresh(from ?? sourcePath, out)) return out;
 
   onProgress?.('Preparing preview');
   const common = [
     '-v', 'error',
-    '-i', sourcePath,
+    '-i', from ?? sourcePath,
     // Scaling DOWN only: a source already smaller than the proxy height would
     // otherwise be upscaled into a file bigger than the thing it stands in for.
     '-vf', `scale=-2:'min(${PROXY_HEIGHT},ih)'`,

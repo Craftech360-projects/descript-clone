@@ -629,14 +629,33 @@ app.post('/api/projects/:id/clean-voice', async (c) => {
   const job = jobs.start(project.id, 'denoise', 'Cleaning voice', async (runner) => {
     const fresh = await store.get(project.id);
     if (!fresh) return {};
+    const stored = store.ensureClips(fresh);
     const clips = store.clipsOf(fresh);
     let n = 0;
     for (const clip of clips) {
       n++;
       const of = clips.length > 1 ? ` (${n}/${clips.length})` : '';
-      await denoise.ensureCleaned(clip.sourcePath, (stage) =>
+      const cleaned = await denoise.ensureCleaned(clip.sourcePath, (stage) =>
         runner.onProgress({ progress: -1, stage: `${stage}${of}` }),
       );
+
+      /**
+       * Rebuild the PREVIEW from the cleaned audio.
+       *
+       * Without this the cleaner was inaudible: the editor plays the proxy, the
+       * proxy was made from the original, so the noise stayed exactly where the
+       * user could hear it and only the export was ever clean. Cleaning audio
+       * you cannot listen to is not a feature.
+       *
+       * The proxy keeps its name — it is keyed to the original — so the URL on
+       * the record does not move and nothing downstream has to be told.
+       */
+      runner.onProgress({ progress: -1, stage: `Updating preview${of}` });
+      await proxy.build(clip.sourcePath, undefined, cleaned);
+      const rec = stored.find((c) => c.id === clip.id);
+      if (rec) rec.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      if (clips.length === 1) fresh.proxyUrl = proxy.proxyUrlFor(clip.sourceUrl);
+      await store.save(fresh);
     }
     return {};
   });
